@@ -20,6 +20,7 @@
 #define SIG_SRC_SCALL 1
 
 #include <arch/cpu.h>
+#include <arch/exceptions.h>
 #include "spinlock.h"
 
 
@@ -116,6 +117,12 @@ void hal_cpuSigreturn(void *kstack, void *ustack, cpu_context_t **ctx);
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly code" */
 void hal_jmp(void *f, void *kstack, void *ustack, size_t kargc, const arg_t *kargs);
+
+
+#ifdef EXCJMP_SUPPORTED
+/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly code" */
+__attribute((returns_twice)) int hal_createexcjmp(excjmp_context_t *ctx);
+#endif
 
 
 /* core management */

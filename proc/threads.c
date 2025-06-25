@@ -340,6 +340,28 @@ __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx)
 }
 
 
+#ifdef EXCJMP_SUPPORTED
+void threads_setexcjmp(excjmp_context_t *ctx)
+{
+	thread_t *current = proc_current();
+	if (current == NULL) {
+		return;
+	}
+	current->excjmpctx = ctx;
+}
+
+
+excjmp_context_t *threads_getexcjmp(void)
+{
+	thread_t *current = proc_current();
+	if (current == NULL) {
+		return NULL;
+	}
+	return current->excjmpctx;
+}
+#endif
+
+
 static int _threads_checkSignal(thread_t *selected, process_t *proc, cpu_context_t *signalCtx, unsigned int oldmask, const int src);
 
 
@@ -579,6 +601,9 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	proc_gettime(&t->startTime, NULL);
 	t->lastTime = t->startTime;
 	t->longjmpctx = NULL;
+#ifdef EXCJMP_SUPPORTED
+	t->excjmpctx = NULL;
+#endif
 
 	if (thread_alloc(t) < 0) {
 		vm_kfree(t->kstack);

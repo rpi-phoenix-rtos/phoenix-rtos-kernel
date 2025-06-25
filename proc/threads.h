@@ -82,6 +82,9 @@ typedef struct _thread_t {
 
 	cpu_context_t *context;
 	cpu_context_t *longjmpctx;
+#ifdef EXCJMP_SUPPORTED
+	excjmp_context_t *excjmpctx;
+#endif
 } thread_t;
 
 
@@ -173,6 +176,14 @@ int proc_settime(time_t offs);
 
 
 __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx);
+
+
+#ifdef EXCJMP_SUPPORTED
+void threads_setexcjmp(excjmp_context_t *ctx);
+
+
+excjmp_context_t *threads_getexcjmp(void);
+#endif
 
 
 void proc_threadsDump(u8 priority);

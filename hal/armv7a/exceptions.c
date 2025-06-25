@@ -37,6 +37,8 @@
 #define EXC_DEBUG               0x02U
 #define EXC_ALIGMENT            0x01U
 
+#define PSR_THUMB_STATE (1U << 5)
+
 
 static struct {
 	excHandlerFn_t undefHandler;
@@ -118,12 +120,46 @@ static void exceptions_defaultHandler(unsigned int n, exc_context_t *ctx)
 }
 
 
+static void exceptions_excjmpInstall(excjmp_context_t *excctx, cpu_context_t *ctx)
+{
+	ctx->psr = excctx->psr;
+	if ((excctx->ret & 1U) != 0U) {
+		ctx->psr |= PSR_THUMB_STATE;
+	}
+	else {
+		ctx->psr &= ~PSR_THUMB_STATE;
+	}
+	ctx->r4 = excctx->r4;
+	ctx->r5 = excctx->r5;
+	ctx->r6 = excctx->r6;
+	ctx->r7 = excctx->r7;
+	ctx->r8 = excctx->r8;
+	ctx->r9 = excctx->r9;
+	ctx->r10 = excctx->r10;
+	ctx->fp = excctx->fp;
+	ctx->pc = excctx->ret & ~1U;
+	ctx->sp = excctx->sp;
+
+	/* Mark fault happened in return value */
+	ctx->r0 = 1;
+}
+
+
 void threads_setupUserReturn(void *retval, cpu_context_t *ctx);
+
+
+excjmp_context_t *threads_getexcjmp(void);
 
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_4 "Usage in assembly" */
 void exceptions_dispatch(unsigned int n, exc_context_t *ctx)
 {
+	excjmp_context_t *excctx = threads_getexcjmp();
+	if ((hal_cpuSupervisorMode(&ctx->cpuCtx) != 0) && (excctx != NULL)) {
+		exceptions_excjmpInstall(excctx, &ctx->cpuCtx);
+		return;
+	}
+
 	if (n == (unsigned int)exc_prefetch || n == (unsigned int)exc_abort) {
 		exceptions.abortHandler(n, ctx);
 	}
