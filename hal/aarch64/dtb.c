@@ -64,6 +64,8 @@ static struct {
 		addr_t gicc;
 	} apu_gic;
 
+	dtb_timer_t timer;
+
 	size_t nSerials;
 	dtb_serial_t serials[MAX_SERIALS];
 } dtb_common;
@@ -173,6 +175,33 @@ static void dtb_parseSerial(void *dtb, u32 si, u32 l)
 }
 
 
+static void dtb_parseTimer(void *dtb, u32 si, u32 l)
+{
+	if (hal_strcmp(dtb_getString(si), "interrupts") != 0) {
+		return;
+	}
+
+	/* ARM architectural timer interrupt order:
+	 * secure physical, non-secure physical, virtual, hypervisor.
+	 */
+	if (l >= 12U) {
+		dtb_common.timer.physSecure = dtb_getIntrFromReg(dtb);
+	}
+
+	if (l >= 24U) {
+		dtb_common.timer.physNonSecure = dtb_getIntrFromReg(dtb + 12);
+	}
+
+	if (l >= 36U) {
+		dtb_common.timer.virt = dtb_getIntrFromReg(dtb + 24);
+	}
+
+	if (l >= 48U) {
+		dtb_common.timer.hyp = dtb_getIntrFromReg(dtb + 36);
+	}
+}
+
+
 static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 {
 	addr_t start = 0, size = 0;
@@ -237,6 +266,7 @@ static void dtb_parse(void)
 		stateAMBA_APU,
 		stateInterruptController,
 		stateMemory,
+		stateTimer,
 		stateSerial,
 	} state = stateIdle;
 
@@ -257,6 +287,9 @@ static void dtb_parse(void)
 			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("memory")) == 0)) {
 				state = stateMemory;
+			}
+			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("timer")) == 0)) {
+				state = stateTimer;
 			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("amba_apu")) == 0)) {
 				state = stateAMBA_APU;
@@ -307,6 +340,10 @@ static void dtb_parse(void)
 
 				case stateCPU:
 					dtb_parseCPU(dtb, si, l);
+					break;
+
+				case stateTimer:
+					dtb_parseTimer(dtb, si, l);
 					break;
 
 				case stateSerial:
@@ -396,10 +433,20 @@ void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials)
 }
 
 
+void dtb_getTimer(dtb_timer_t *timer)
+{
+	*timer = dtb_common.timer;
+}
+
+
 void _dtb_init(addr_t dtbPhys)
 {
 	hal_memset(&dtb_common, 0, sizeof(dtb_common));
 	dtb_common.fdth = (void *)((dtbPhys & (SIZE_PAGE - 1U)) + VADDR_DTB);
+	dtb_common.timer.physSecure = -1;
+	dtb_common.timer.physNonSecure = -1;
+	dtb_common.timer.virt = -1;
+	dtb_common.timer.hyp = -1;
 
 	dtb_parse();
 }

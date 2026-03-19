@@ -34,6 +34,14 @@ typedef struct {
 } dtb_serial_t;
 
 
+typedef struct {
+	int physSecure;
+	int physNonSecure;
+	int virt;
+	int hyp;
+} dtb_timer_t;
+
+
 void dtb_getSystem(char **model, char **compatible);
 
 
@@ -47,6 +55,9 @@ void dtb_getGIC(addr_t *gicc, addr_t *gicd);
 
 
 void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials);
+
+
+void dtb_getTimer(dtb_timer_t *timer);
 
 
 void _dtb_init(addr_t dtbPhys);
