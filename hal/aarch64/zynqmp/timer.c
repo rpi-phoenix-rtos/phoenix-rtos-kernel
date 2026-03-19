@@ -124,6 +124,12 @@ int hal_timerRegister(intrFn_t f, void *data, intr_handler_t *h)
 }
 
 
+unsigned int hal_timerIrq(void)
+{
+	return TIMER_IRQ_ID;
+}
+
+
 static void hal_timerSetPrescaler(u32 freq)
 {
 	u32 ticks = TIMER_SRC_CLK_CPU_1x / freq;

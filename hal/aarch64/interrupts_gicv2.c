@@ -19,6 +19,7 @@
 #include "hal/spinlock.h"
 #include "hal/interrupts.h"
 #include "hal/list.h"
+#include "hal/timer.h"
 
 #include "proc/userintr.h"
 
@@ -114,7 +115,7 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 		return 0;
 	}
 
-	trace = interrupts_common.trace_irqs != 0 && n != TIMER_IRQ_ID;
+	trace = interrupts_common.trace_irqs != 0 && n != hal_timerIrq();
 	if (trace != 0) {
 		trace_eventInterruptEnter(n);
 	}
