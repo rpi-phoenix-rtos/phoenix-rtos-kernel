@@ -57,6 +57,70 @@ static inline void hal_cpuInstrBarrier(void)
 }
 
 
+/* ARM architectural timer */
+
+
+enum {
+	aarch64_gtimerCtlEnable = 0x1U,
+	aarch64_gtimerCtlIMask = 0x2U,
+	aarch64_gtimerCtlIStatus = 0x4U,
+};
+
+
+static inline u32 hal_gtimerGetFrequency(void)
+{
+	return (u32)sysreg_read(cntfrq_el0);
+}
+
+
+static inline u64 hal_gtimerGetPhysicalCount(void)
+{
+	return (u64)sysreg_read(cntpct_el0);
+}
+
+
+static inline u64 hal_gtimerGetVirtualCount(void)
+{
+	return (u64)sysreg_read(cntvct_el0);
+}
+
+
+static inline u32 hal_gtimerGetPhysicalControl(void)
+{
+	return (u32)sysreg_read(cntp_ctl_el0);
+}
+
+
+static inline void hal_gtimerSetPhysicalControl(u32 val)
+{
+	sysreg_write(cntp_ctl_el0, val);
+}
+
+
+static inline void hal_gtimerSetPhysicalTimer(u32 ticks)
+{
+	sysreg_write(cntp_tval_el0, ticks);
+}
+
+
+static inline u32 hal_gtimerGetVirtualControl(void)
+{
+	return (u32)sysreg_read(cntv_ctl_el0);
+}
+
+
+static inline void hal_gtimerSetVirtualControl(u32 val)
+{
+	sysreg_write(cntv_ctl_el0, val);
+}
+
+
+static inline void hal_gtimerSetVirtualTimer(u32 ticks)
+{
+	sysreg_write(cntv_tval_el0, ticks);
+}
+
+
 /* Memory Management */
 
 
