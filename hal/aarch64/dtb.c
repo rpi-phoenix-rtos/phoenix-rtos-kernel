@@ -132,11 +132,18 @@ static void dtb_parseCPU(void *dtb, u32 si, u32 l)
 static void dtb_parseInterruptController(void *dtb, u32 si, u32 l)
 {
 	u64 gicc, gicd;
+	u32 giccOffs;
+
 	if (hal_strcmp(dtb_getString(si), "reg") == 0) {
 		if (l >= 24U) {
+			/* The current ZynqMP path uses 12-byte tuples (64-bit address, 32-bit size),
+			 * while QEMU virt exposes 16-byte tuples (64-bit address, 64-bit size).
+			 */
+			giccOffs = (l >= 32U) ? 16U : 12U;
+
 			hal_memcpy(&gicd, dtb + 0, 8);
 			gicd = ntoh64(gicd);
-			hal_memcpy(&gicc, dtb + 12, 8);
+			hal_memcpy(&gicc, dtb + giccOffs, 8);
 			gicc = ntoh64(gicc);
 			dtb_common.apu_gic.gicd = gicd;
 			dtb_common.apu_gic.gicc = gicc;
