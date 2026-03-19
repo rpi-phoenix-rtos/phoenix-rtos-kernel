@@ -189,6 +189,34 @@ static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 }
 
 
+static int dtb_isInterruptControllerNode(const char *nodeName, unsigned int depth, int inAMBA_APU)
+{
+	if ((inAMBA_APU != 0) && (hal_strncmp(nodeName, STR_AND_LEN("interrupt-controller@")) == 0)) {
+		return 1;
+	}
+
+	if ((depth <= 2U) && (hal_strncmp(nodeName, STR_AND_LEN("intc@")) == 0)) {
+		return 1;
+	}
+
+	return 0;
+}
+
+
+static int dtb_isSerialNode(const char *nodeName, unsigned int depth)
+{
+	if ((depth == 2U) && (hal_strncmp(nodeName, STR_AND_LEN("serial@")) == 0)) {
+		return 1;
+	}
+
+	if ((depth <= 2U) && (hal_strncmp(nodeName, STR_AND_LEN("pl011@")) == 0)) {
+		return 1;
+	}
+
+	return 0;
+}
+
+
 static void dtb_parse(void)
 {
 	void *dtb;
@@ -231,10 +259,10 @@ static void dtb_parse(void)
 					state = stateCPU;
 				}
 			}
-			else if ((state == stateAMBA_APU) && (hal_strncmp(dtb, STR_AND_LEN("interrupt-controller@")) == 0)) {
+			else if (dtb_isInterruptControllerNode(dtb, depth, state == stateAMBA_APU) != 0) {
 				state = stateInterruptController;
 			}
-			else if ((depth == 2U) && (hal_strncmp(dtb, STR_AND_LEN("serial@")) == 0)) {
+			else if (dtb_isSerialNode(dtb, depth) != 0) {
 				if (dtb_common.nSerials < MAX_SERIALS) {
 					state = stateSerial;
 					dtb_common.serials[dtb_common.nSerials].intr = -1;
