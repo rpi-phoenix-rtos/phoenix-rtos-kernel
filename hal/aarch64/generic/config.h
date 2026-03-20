@@ -27,7 +27,11 @@
 
 #ifndef __ASSEMBLY__
 
-#define HAL_NAME_PLATFORM "AArch64 Generic "
+#if defined(__TARGET_AARCH64A72)
+#define HAL_NAME_PLATFORM "AArch64 Cortex-A72 Generic "
+#else
+#define HAL_NAME_PLATFORM "AArch64 Cortex-A53 Generic "
+#endif
 
 #include "include/arch/aarch64/generic/generic.h"
 #include "include/arch/aarch64/generic/syspage.h"
