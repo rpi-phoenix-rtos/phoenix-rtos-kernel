@@ -40,4 +40,13 @@ time_t hal_gtimerStateGetUs(const hal_gtimerState_t *state);
 u32 hal_gtimerStateUs2Ticks(const hal_gtimerState_t *state, time_t us);
 
 
+u32 hal_gtimerStateGetControl(const hal_gtimerState_t *state);
+
+
+void hal_gtimerStateSetControl(const hal_gtimerState_t *state, u32 val);
+
+
+void hal_gtimerStateSetTimer(const hal_gtimerState_t *state, u32 ticks);
+
+
 #endif

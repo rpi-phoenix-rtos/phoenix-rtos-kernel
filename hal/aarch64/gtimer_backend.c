@@ -85,3 +85,33 @@ u32 hal_gtimerStateUs2Ticks(const hal_gtimerState_t *state, time_t us)
 
 	return (u32)ticks;
 }
+
+
+u32 hal_gtimerStateGetControl(const hal_gtimerState_t *state)
+{
+	if (state == NULL) {
+		return 0U;
+	}
+
+	return hal_gtimerGetControl(state->source);
+}
+
+
+void hal_gtimerStateSetControl(const hal_gtimerState_t *state, u32 val)
+{
+	if (state == NULL) {
+		return;
+	}
+
+	hal_gtimerSetControl(state->source, val);
+}
+
+
+void hal_gtimerStateSetTimer(const hal_gtimerState_t *state, u32 ticks)
+{
+	if (state == NULL) {
+		return;
+	}
+
+	hal_gtimerSetTimer(state->source, ticks);
+}
