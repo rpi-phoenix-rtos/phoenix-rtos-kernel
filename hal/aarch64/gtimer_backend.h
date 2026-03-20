@@ -37,4 +37,7 @@ time_t hal_gtimerStateCyc2us(const hal_gtimerState_t *state, u64 cycles);
 time_t hal_gtimerStateGetUs(const hal_gtimerState_t *state);
 
 
+u32 hal_gtimerStateUs2Ticks(const hal_gtimerState_t *state, time_t us);
+
+
 #endif

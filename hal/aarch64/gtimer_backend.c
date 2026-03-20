@@ -68,3 +68,20 @@ time_t hal_gtimerStateGetUs(const hal_gtimerState_t *state)
 {
 	return hal_gtimerStateCyc2us(state, hal_gtimerStateGetCount(state));
 }
+
+
+u32 hal_gtimerStateUs2Ticks(const hal_gtimerState_t *state, time_t us)
+{
+	u64 ticks;
+
+	if ((state == NULL) || (state->frequency == 0U) || (us <= 0)) {
+		return 0U;
+	}
+
+	ticks = ((u64)us * state->frequency) / 1000000ULL;
+	if (ticks > 0xffffffffULL) {
+		return 0xffffffffU;
+	}
+
+	return (u32)ticks;
+}
