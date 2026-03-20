@@ -27,4 +27,7 @@ typedef struct _intr_handler_t {
 } intr_handler_t;
 
 
+enum { TIMER_WAKEUP_IRQ = 1U };
+
+
 #endif

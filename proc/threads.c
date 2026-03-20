@@ -51,6 +51,10 @@ static struct {
 	idtree_t id;
 
 	intr_handler_t timeintrHandler;
+#ifdef TIMER_WAKEUP_IRQ
+	intr_handler_t wakeupHandler;
+	unsigned int timerWakeupPending;
+#endif
 
 #ifdef PENDSV_IRQ
 	intr_handler_t pendsvHandler;
@@ -107,6 +111,39 @@ static int threads_sleepcmp(rbnode_t *n1, rbnode_t *n2)
 
 static int _proc_threadWakeup(thread_t **queue);
 static int _proc_threadBroadcast(thread_t **queue);
+
+
+/* Note: always called with threads_common.spinlock set */
+static void _threads_programWakeup(time_t now, thread_t *minimum)
+{
+	thread_t *t;
+	time_t wakeup;
+
+	if (minimum != NULL) {
+		t = minimum;
+	}
+	else {
+		t = lib_treeof(thread_t, sleeplinkage, lib_rbMinimum(threads_common.sleeping.root));
+	}
+
+	if (t != NULL) {
+		if (now >= t->wakeup) {
+			wakeup = 1;
+		}
+		else {
+			wakeup = t->wakeup - now;
+		}
+	}
+	else {
+		wakeup = SYSTICK_INTERVAL;
+	}
+
+	if (wakeup > SYSTICK_INTERVAL + SYSTICK_INTERVAL / 8) {
+		wakeup = SYSTICK_INTERVAL;
+	}
+
+	hal_timerSetWakeup((unsigned int)wakeup);
+}
 
 
 /* Note: always called with threads_common.spinlock set */
@@ -167,33 +204,19 @@ static void _threads_waking(thread_t *t)
 
 static void _threads_updateWakeup(time_t now, thread_t *minimum)
 {
-	thread_t *t;
-	time_t wakeup;
-
-	if (minimum != NULL) {
-		t = minimum;
-	}
-	else {
-		t = lib_treeof(thread_t, sleeplinkage, lib_rbMinimum(threads_common.sleeping.root));
-	}
-
-	if (t != NULL) {
-		if (now >= t->wakeup) {
-			wakeup = 1;
+#ifdef TIMER_WAKEUP_IRQ
+	if ((hal_cpuGetCount() > 1U) && (hal_cpuGetID() != 0U)) {
+		/* Coalesce remote wakeup requests until CPU0 recomputes the next timer deadline. */
+		if (threads_common.timerWakeupPending == 0U) {
+			threads_common.timerWakeupPending = 1U;
+			hal_cpuSendIPI(0, TIMER_WAKEUP_IRQ);
 		}
-		else {
-			wakeup = t->wakeup - now;
-		}
-	}
-	else {
-		wakeup = SYSTICK_INTERVAL;
-	}
 
-	if (wakeup > SYSTICK_INTERVAL + SYSTICK_INTERVAL / 8) {
-		wakeup = SYSTICK_INTERVAL;
+		return;
 	}
+#endif
 
-	hal_timerSetWakeup((unsigned int)wakeup);
+	_threads_programWakeup(now, minimum);
 }
 
 
@@ -232,6 +255,29 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 	/* Invoke scheduler */
 	return 1;
 }
+
+
+#ifdef TIMER_WAKEUP_IRQ
+static int threads_wakeupintr(unsigned int n, cpu_context_t *context, void *arg)
+{
+	spinlock_ctx_t sc;
+
+	(void)n;
+	(void)context;
+	(void)arg;
+
+	if (hal_cpuGetID() != 0U) {
+		return 0;
+	}
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	threads_common.timerWakeupPending = 0U;
+	_threads_programWakeup(_proc_gettimeRaw(), NULL);
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	return 0;
+}
+#endif
 
 
 /*
@@ -2032,6 +2078,9 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 	lib_printf("proc: Initializing thread scheduler, priorities=%d\n", sizeof(threads_common.ready) / sizeof(thread_t *));
 
 	hal_spinlockCreate(&threads_common.spinlock, "threads.spinlock");
+#ifdef TIMER_WAKEUP_IRQ
+	threads_common.timerWakeupPending = 0U;
+#endif
 
 	/* Allocate and initialize current threads array */
 	/* parasoft-suppress-next-line MISRAC2012-DIR_4_7 "return value of hal_cpuGetCount() is used, false positive" */
@@ -2056,6 +2105,12 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 
 	hal_memset(&threads_common.timeintrHandler, 0, sizeof(threads_common.timeintrHandler));
 	(void)hal_timerRegister(threads_timeintr, NULL, &threads_common.timeintrHandler);
+#ifdef TIMER_WAKEUP_IRQ
+	hal_memset(&threads_common.wakeupHandler, 0, sizeof(threads_common.wakeupHandler));
+	threads_common.wakeupHandler.f = threads_wakeupintr;
+	threads_common.wakeupHandler.n = TIMER_WAKEUP_IRQ;
+	(void)hal_interruptsSetHandler(&threads_common.wakeupHandler);
+#endif
 
 	return EOK;
 }
