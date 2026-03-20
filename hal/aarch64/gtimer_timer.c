@@ -13,18 +13,36 @@
  */
 
 #include "gtimer_backend.h"
+#include "gtimer.h"
 
+#include "hal/console.h"
 #include "hal/string.h"
 #include "hal/timer.h"
 
 #include "include/errno.h"
+#include "lib/lib.h"
 
 
 static struct {
 	hal_gtimerState_t state;
 	u32 interval;
 	int ready;
+	int traceConfig;
+	int traceWakeup;
 } timer_common;
+
+
+static void timer_tracePrint(const char *fmt, ...)
+{
+	char buff[80];
+	va_list args;
+
+	va_start(args, fmt);
+	(void)lib_vsprintf(buff, fmt, args);
+	va_end(args);
+
+	hal_consolePrint(ATTR_USER, buff);
+}
 
 
 time_t hal_timerGetUs(void)
@@ -43,6 +61,11 @@ void hal_timerSetWakeup(u32 waitUs)
 		return;
 	}
 
+	if (timer_common.traceWakeup == 0) {
+		timer_common.traceWakeup = 1;
+		timer_tracePrint("gtimer: arm %u us\n", waitUs);
+	}
+
 	hal_gtimerStateSetWakeup(&timer_common.state, waitUs);
 }
 
@@ -53,6 +76,11 @@ int hal_timerRegister(intrFn_t f, void *data, intr_handler_t *h)
 
 	if (timer_common.ready == 0) {
 		return -ENODEV;
+	}
+
+	if (timer_common.traceConfig == 0) {
+		timer_common.traceConfig = 1;
+		timer_tracePrint("gtimer: source %s irq %u\n", hal_gtimerName(timer_common.state.source), hal_gtimerStateIrq(&timer_common.state));
 	}
 
 	err = hal_gtimerStateRegisterHandler(&timer_common.state, f, data, h);
@@ -78,6 +106,8 @@ void _hal_timerInit(u32 interval)
 {
 	timer_common.interval = interval;
 	timer_common.ready = 0;
+	timer_common.traceConfig = 0;
+	timer_common.traceWakeup = 0;
 
 	if (hal_gtimerInitState(&timer_common.state) < 0) {
 		return;
