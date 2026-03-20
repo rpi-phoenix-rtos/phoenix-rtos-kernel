@@ -52,6 +52,41 @@ void syscalls_debug(u8 *ustack)
 }
 
 
+static int syscalls_createDevLookupTrace(const char *name)
+{
+	if (name == NULL) {
+		return 0;
+	}
+
+	if (hal_strcmp(name, "devfs") == 0) {
+		hal_consolePrint(ATTR_USER, "create_dev: lookup devfs\n");
+		return 1;
+	}
+
+	if (hal_strcmp(name, "/dev") == 0) {
+		hal_consolePrint(ATTR_USER, "create_dev: lookup /dev\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+
+static int syscalls_createDevMsgTrace(const msg_t *msg)
+{
+	if ((msg == NULL) || (msg->type != mtCreate) || (msg->i.data == NULL) || (msg->i.size != 5U)) {
+		return 0;
+	}
+
+	if (hal_strcmp(msg->i.data, "tty0") == 0) {
+		hal_consolePrint(ATTR_USER, "create_dev: send tty0\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+
 /*
  * Memory management
  */
@@ -784,6 +819,8 @@ int syscalls_msgSend(u8 *ustack)
 	process_t *proc = proc_current()->process;
 	u32 port;
 	msg_t *msg;
+	int traced;
+	int err;
 
 	GETFROMSTACK(ustack, u32, port, 0U);
 	GETFROMSTACK(ustack, msg_t *, msg, 1U);
@@ -804,7 +841,14 @@ int syscalls_msgSend(u8 *ustack)
 		}
 	}
 
-	return proc_send(port, msg);
+	traced = syscalls_createDevMsgTrace(msg);
+	err = proc_send(port, msg);
+
+	if (traced != 0) {
+		hal_consolePrint(ATTR_USER, "create_dev: send done\n");
+	}
+
+	return err;
 }
 
 
@@ -863,6 +907,8 @@ int syscalls_lookup(u8 *ustack)
 	process_t *proc = proc_current()->process;
 	char *name;
 	oid_t *file, *dev;
+	int traced;
+	int err;
 
 	GETFROMSTACK(ustack, char *, name, 0U);
 	GETFROMSTACK(ustack, oid_t *, file, 1U);
@@ -878,7 +924,14 @@ int syscalls_lookup(u8 *ustack)
 		return -EFAULT;
 	}
 
-	return proc_portLookup(name, file, dev);
+	traced = syscalls_createDevLookupTrace(name);
+	err = proc_portLookup(name, file, dev);
+
+	if (traced != 0) {
+		hal_consolePrint(ATTR_USER, "create_dev: lookup done\n");
+	}
+
+	return err;
 }
 
 
