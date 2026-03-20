@@ -94,12 +94,14 @@ static inline u32 hal_gtimerGetPhysicalControl(void)
 static inline void hal_gtimerSetPhysicalControl(u32 val)
 {
 	sysreg_write(cntp_ctl_el0, val);
+	hal_cpuInstrBarrier();
 }
 
 
 static inline void hal_gtimerSetPhysicalTimer(u32 ticks)
 {
 	sysreg_write(cntp_tval_el0, ticks);
+	hal_cpuInstrBarrier();
 }
 
 
@@ -112,12 +114,14 @@ static inline u32 hal_gtimerGetVirtualControl(void)
 static inline void hal_gtimerSetVirtualControl(u32 val)
 {
 	sysreg_write(cntv_ctl_el0, val);
+	hal_cpuInstrBarrier();
 }
 
 
 static inline void hal_gtimerSetVirtualTimer(u32 ticks)
 {
 	sysreg_write(cntv_tval_el0, ticks);
+	hal_cpuInstrBarrier();
 }
 
 
