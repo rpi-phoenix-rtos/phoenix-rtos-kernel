@@ -5,4 +5,5 @@
 #
 
 OBJS += $(addprefix $(PREFIX_O)hal/aarch64/, interrupts_gicv2.o)
-OBJS += $(addprefix $(PREFIX_O)hal/aarch64/zynqmp/, console.o zynqmp.o timer.o)
+OBJS += $(addprefix $(PREFIX_O)hal/aarch64/zynqmp/, console.o zynqmp.o)
+AARCH64_TIMER_OBJS += $(addprefix $(PREFIX_O)hal/aarch64/zynqmp/, timer.o)
