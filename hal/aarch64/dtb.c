@@ -245,12 +245,26 @@ static void dtb_parseCPU(void *dtb, u32 si, u32 l)
 }
 
 
-static void dtb_parseInterruptController(void *dtb, u32 si, u32 l)
+static void dtb_parseInterruptController(void *dtb, u32 si, u32 l, int inSOC)
 {
 	u64 gicc, gicd;
 	u32 giccOffs;
+	u32 tupleCells;
 
 	if (hal_strcmp(dtb_getString(si), "reg") == 0) {
+		if ((inSOC != 0) && (dtb_common.soc.addressCells != 0U) && (dtb_common.soc.sizeCells != 0U)) {
+			tupleCells = dtb_common.soc.addressCells + dtb_common.soc.sizeCells;
+			if ((tupleCells != 0U) && (l >= (2U * tupleCells * sizeof(u32)))) {
+				if ((dtb_readCells(dtb, dtb_common.soc.addressCells, &dtb_common.apu_gic.gicd) == EOK) &&
+					(dtb_readCells(dtb + (tupleCells * sizeof(u32)), dtb_common.soc.addressCells, &dtb_common.apu_gic.gicc) == EOK)) {
+					(void)dtb_translateSocAddress(&dtb_common.apu_gic.gicd);
+					(void)dtb_translateSocAddress(&dtb_common.apu_gic.gicc);
+				}
+			}
+
+			return;
+		}
+
 		if (l >= 24U) {
 			/* The current ZynqMP path uses 12-byte tuples (64-bit address, 32-bit size),
 			 * while QEMU virt exposes 16-byte tuples (64-bit address, 64-bit size).
@@ -365,6 +379,10 @@ static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 static int dtb_isInterruptControllerNode(const char *nodeName, unsigned int depth, int inAMBA_APU)
 {
 	if ((inAMBA_APU != 0) && (hal_strncmp(nodeName, STR_AND_LEN("interrupt-controller@")) == 0)) {
+		return 1;
+	}
+
+	if ((depth <= 2U) && (hal_strncmp(nodeName, STR_AND_LEN("interrupt-controller@")) == 0)) {
 		return 1;
 	}
 
@@ -582,7 +600,7 @@ static void dtb_parse(void)
 					break;
 
 				case stateInterruptController:
-					dtb_parseInterruptController(dtb, si, l);
+					dtb_parseInterruptController(dtb, si, l, (dtb_common.soc.depth != 0U) && (depth > dtb_common.soc.depth));
 					break;
 
 				case stateCPU:
