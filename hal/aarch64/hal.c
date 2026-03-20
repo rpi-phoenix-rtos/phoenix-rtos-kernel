@@ -104,6 +104,7 @@ __attribute__((section(".init"))) void _hal_init(void)
 
 	_hal_platformInit();
 	_hal_consoleInit();
+	hal_consolePrint(ATTR_USER, "hal: console init done\n");
 
 	_hal_exceptionsInit();
 	_hal_interruptsInit();

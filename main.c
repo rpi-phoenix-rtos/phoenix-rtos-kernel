@@ -107,6 +107,7 @@ int main(void)
 
 	syspage_init();
 	_hal_init();
+	hal_consolePrint(ATTR_USER, "main: hal init done\n");
 	_usrv_init();
 
 	hal_consolePrint(ATTR_BOLD, "Phoenix-RTOS microkernel v. " RELEASE " rev. " VERSION "\n");
