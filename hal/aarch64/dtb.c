@@ -268,7 +268,7 @@ static int dtb_isSerialNode(const char *nodeName, unsigned int depth)
 static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
 {
 	/* Keep the first common EL1 policy explicit:
-	 * prefer the non-secure physical timer, then fall back to the virtual timer.
+	 * prefer the virtual timer, then fall back to the non-secure physical timer.
 	 */
 	if ((source == NULL) || (intr == NULL)) {
 		return -EINVAL;
@@ -277,15 +277,15 @@ static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
 	*source = dtb_timerNone;
 	*intr = -1;
 
-	if (dtb_common.timer.physNonSecure >= 0) {
-		*source = dtb_timerPhysNonSecure;
-		*intr = dtb_common.timer.physNonSecure;
-		return EOK;
-	}
-
 	if (dtb_common.timer.virt >= 0) {
 		*source = dtb_timerVirt;
 		*intr = dtb_common.timer.virt;
+		return EOK;
+	}
+
+	if (dtb_common.timer.physNonSecure >= 0) {
+		*source = dtb_timerPhysNonSecure;
+		*intr = dtb_common.timer.physNonSecure;
 		return EOK;
 	}
 
