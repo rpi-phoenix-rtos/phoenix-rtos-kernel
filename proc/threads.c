@@ -65,6 +65,9 @@ static struct {
 
 	/* Debug */
 	unsigned char stackCanary[16];
+	unsigned int sleepTraceActive;
+	unsigned int sleepTraceWakeup;
+	unsigned int sleepTraceIrq;
 	time_t prev;
 } threads_common;
 
@@ -77,6 +80,45 @@ _Static_assert(sizeof(threads_common.ready) / sizeof(threads_common.ready[0]) <=
 static thread_t *_proc_current(void);
 static void _proc_threadDequeue(thread_t *t);
 static int _proc_threadWait(thread_t **queue, time_t timeout, spinlock_ctx_t *scp);
+
+
+static int threads_traceSleepMatch(time_t us, int absolute)
+{
+	return (absolute == 0) && (us == 100000LL);
+}
+
+
+static void threads_traceSleepEnter(void)
+{
+	if (threads_common.sleepTraceActive != 0U) {
+		return;
+	}
+
+	threads_common.sleepTraceActive = 1U;
+	hal_consolePrint(ATTR_USER, "threads: nsleep enter\n");
+}
+
+
+static void threads_traceSleepWakeup(void)
+{
+	if ((threads_common.sleepTraceActive == 0U) || (threads_common.sleepTraceWakeup != 0U)) {
+		return;
+	}
+
+	threads_common.sleepTraceWakeup = 1U;
+	hal_consolePrint(ATTR_USER, "threads: wakeup programmed\n");
+}
+
+
+static void threads_traceSleepIrq(void)
+{
+	if ((threads_common.sleepTraceActive == 0U) || (threads_common.sleepTraceIrq != 0U)) {
+		return;
+	}
+
+	threads_common.sleepTraceIrq = 1U;
+	hal_consolePrint(ATTR_USER, "threads: timer irq\n");
+}
 
 
 static time_t _proc_gettimeRaw(void)
@@ -143,6 +185,7 @@ static void _threads_programWakeup(time_t now, thread_t *minimum)
 	}
 
 	hal_timerSetWakeup((unsigned int)wakeup);
+	threads_traceSleepWakeup();
 }
 
 
@@ -233,6 +276,8 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 		return 1;
 	}
 	/* parasoft-end-suppress MISRAC2012-RULE_14_3 */
+
+	threads_traceSleepIrq();
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 	now = _proc_gettimeRaw();
@@ -1031,6 +1076,9 @@ int proc_threadNanoSleep(time_t *sec, long int *nsec, int absolute)
 	}
 
 	us = ((*sec) * 1000LL * 1000LL) + (((time_t)(*nsec) + 999LL) / 1000LL);
+	if (threads_traceSleepMatch(us, absolute) != 0) {
+		threads_traceSleepEnter();
+	}
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 
