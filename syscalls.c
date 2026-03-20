@@ -41,7 +41,7 @@
  */
 
 static struct {
-	unsigned int pshRootLookup;
+	unsigned int pshRootLookupResult;
 } syscalls_common;
 
 
@@ -93,13 +93,13 @@ static int syscalls_createDevMsgTrace(const msg_t *msg)
 
 static void syscalls_pshLookupTrace(process_t *proc, const char *name, int err)
 {
-	if ((err < 0) || (syscalls_common.pshRootLookup != 0U) || (proc == NULL) || (proc->path == NULL) || (name == NULL)) {
+	if ((syscalls_common.pshRootLookupResult != 0U) || (proc == NULL) || (proc->path == NULL) || (name == NULL)) {
 		return;
 	}
 
 	if ((hal_strcmp(proc->path, "psh") == 0) && (hal_strcmp(name, "/") == 0)) {
-		syscalls_common.pshRootLookup = 1U;
-		hal_consolePrint(ATTR_USER, "syscalls: psh root lookup ok\n");
+		syscalls_common.pshRootLookupResult = 1U;
+		lib_printf("syscalls: psh root lookup %d\n", err);
 	}
 }
 
