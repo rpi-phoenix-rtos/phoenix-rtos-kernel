@@ -214,6 +214,10 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	hal_spinlockSet(&interrupts_common.spinlock[h->n], &sc);
 	HAL_LIST_ADD(&interrupts_common.handlers[h->n], h);
 
+	if (h->n >= 16U) {
+		interrupts_setConf(h->n, (u32)_interrupts_gicv2_classify(h->n));
+	}
+
 	interrupts_setPriority(h->n, DEFAULT_PRIORITY);
 	if ((h->n == hal_timerIrq()) && (interrupts_common.timerTraceRegistered == 0)) {
 		interrupts_common.timerTraceRegistered = 1;
