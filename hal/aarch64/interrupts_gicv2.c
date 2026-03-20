@@ -272,6 +272,12 @@ u32 interrupts_getHighestPending(void)
 }
 
 
+u32 interrupts_getAliasedHighestPending(void)
+{
+	return *(interrupts_common.gicc + gicc_ahppir) & 0x3ffU;
+}
+
+
 int hal_interruptsSetHandler(intr_handler_t *h)
 {
 	spinlock_ctx_t sc;

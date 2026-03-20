@@ -41,4 +41,7 @@ u32 interrupts_getPrivatePending(unsigned int irqn);
 u32 interrupts_getHighestPending(void);
 
 
+u32 interrupts_getAliasedHighestPending(void);
+
+
 #endif /* _INTERRUPTS_GICV2_H_ */
