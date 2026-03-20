@@ -330,6 +330,16 @@ static void hal_cpuSendSGI(u8 targetFilter, u8 targetList, u8 intID)
 }
 
 
+void hal_cpuSendIPI(unsigned int cpu, unsigned int intr)
+{
+	if ((cpu >= hal_cpuGetCount()) || (cpu >= 8U)) {
+		return;
+	}
+
+	hal_cpuSendSGI(SGI_FLT_USE_LIST, (u8)(1U << cpu), (u8)intr);
+}
+
+
 void hal_cpuBroadcastIPI(unsigned int intr)
 {
 	hal_cpuSendSGI(SGI_FLT_OTHER_CPUS, 0, (u8)intr);

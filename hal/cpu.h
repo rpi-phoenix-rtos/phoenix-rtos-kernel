@@ -133,6 +133,9 @@ char *hal_cpuInfo(char *info);
 char *hal_cpuFeatures(char *features, size_t len);
 
 
+void hal_cpuSendIPI(unsigned int cpu, unsigned int intr);
+
+
 void hal_cpuBroadcastIPI(unsigned int intr);
 
 
