@@ -29,19 +29,6 @@
 #define TIMER_IRQ_GROUP 1U
 #endif
 
-#ifndef ARM_LOCAL_BASE
-#define ARM_LOCAL_BASE 0U
-#endif
-
-#ifndef ARM_LOCAL_PRESCALER_VALUE
-#define ARM_LOCAL_PRESCALER_VALUE 0U
-#endif
-
-#define ARM_LOCAL_PRESCALER_OFFSET         0x008U
-#define ARM_LOCAL_TIMER_INT_CONTROL0_OFFSET 0x040U
-#define ARM_LOCAL_IRQ_PENDING0_OFFSET      0x060U
-#define ARM_LOCAL_IRQ_CNTPNS               (1U << 1)
-
 #ifndef __ASSEMBLY__
 
 #if defined(__TARGET_AARCH64A72)
