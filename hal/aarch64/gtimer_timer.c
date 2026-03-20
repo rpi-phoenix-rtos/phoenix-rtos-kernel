@@ -1,0 +1,102 @@
+/*
+ * Phoenix-RTOS
+ *
+ * Operating system kernel
+ *
+ * ARM architectural timer
+ *
+ * Copyright 2026 Phoenix Systems
+ *
+ * This file is part of Phoenix-RTOS.
+ *
+ * %LICENSE%
+ */
+
+#include "gtimer_backend.h"
+
+#include "hal/string.h"
+#include "hal/timer.h"
+
+#include "include/errno.h"
+
+
+static struct {
+	hal_gtimerState_t state;
+	u32 interval;
+	int ready;
+} timer_common;
+
+
+time_t hal_timerGetUs(void)
+{
+	if (timer_common.ready == 0) {
+		return 0;
+	}
+
+	return hal_gtimerStateGetUs(&timer_common.state);
+}
+
+
+void hal_timerSetWakeup(u32 waitUs)
+{
+	if (timer_common.ready == 0) {
+		return;
+	}
+
+	hal_gtimerStateSetWakeup(&timer_common.state, waitUs);
+}
+
+
+int hal_timerRegister(intrFn_t f, void *data, intr_handler_t *h)
+{
+	int err;
+
+	if (timer_common.ready == 0) {
+		return -ENODEV;
+	}
+
+	err = hal_gtimerStateRegisterHandler(&timer_common.state, f, data, h);
+	if ((err >= 0) && (timer_common.interval != 0U)) {
+		hal_gtimerStateSetWakeup(&timer_common.state, timer_common.interval);
+	}
+
+	return err;
+}
+
+
+unsigned int hal_timerIrq(void)
+{
+	if (timer_common.ready == 0) {
+		return 0U;
+	}
+
+	return hal_gtimerStateIrq(&timer_common.state);
+}
+
+
+void _hal_timerInit(u32 interval)
+{
+	timer_common.interval = interval;
+	timer_common.ready = 0;
+
+	if (hal_gtimerInitState(&timer_common.state) < 0) {
+		return;
+	}
+
+	timer_common.ready = 1;
+	hal_gtimerStateSetControl(&timer_common.state, 0U);
+}
+
+
+char *hal_timerFeatures(char *features, size_t len)
+{
+	const char *text;
+
+	text = (timer_common.ready != 0) ? "Using ARM architectural timer" : "ARM architectural timer unavailable";
+	(void)hal_strncpy(features, text, len);
+	if (len != 0U) {
+		features[len - 1U] = '\0';
+	}
+
+	return features;
+}
