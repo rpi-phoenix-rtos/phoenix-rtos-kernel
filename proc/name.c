@@ -70,6 +70,35 @@ static dcache_entry_t *_dcache_entryLookup(unsigned int hash, const char *name)
 }
 
 
+static int name_traceIs(const char *name, const char *match)
+{
+	return (name != NULL) && (hal_strcmp(name, match) == 0);
+}
+
+
+static void name_traceRegister(const char *name)
+{
+	if (name_traceIs(name, "/") != 0) {
+		hal_consolePrint(ATTR_USER, "name: register /\n");
+	}
+	else if (name_traceIs(name, "devfs") != 0) {
+		hal_consolePrint(ATTR_USER, "name: register devfs\n");
+	}
+}
+
+
+static int name_traceDevfsLookup(const char *name)
+{
+	return name_traceIs(name, "devfs");
+}
+
+
+static void name_traceDevfs(const char *msg)
+{
+	hal_consolePrint(ATTR_USER, msg);
+}
+
+
 int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
 {
 	dcache_entry_t *entry;
@@ -89,6 +118,7 @@ int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
 			name_common.root_oid.id = oid->id;
 		}
 		name_common.root_registered = 1;
+		name_traceRegister(name);
 		return EOK;
 	}
 
@@ -108,6 +138,7 @@ int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
 	entry->next = name_common.dcache[hash];
 	name_common.dcache[hash] = entry;
 	(void)proc_lockClear(&name_common.dcache_lock);
+	name_traceRegister(name);
 
 	return EOK;
 }
@@ -153,6 +184,7 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 	size_t len, i;
 	oid_t srv;
 	char pstack[16], *pheap = NULL, *pptr;
+	int traceDevfs = name_traceDevfsLookup(name);
 
 	if (name == NULL || (file == NULL && dev == NULL)) {
 		return -EINVAL;
@@ -177,6 +209,9 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 	(void)proc_lockSet(&name_common.dcache_lock);
 	entry = _dcache_entryLookup(dcache_strHash(name), name);
 	if (entry != NULL) {
+		if (traceDevfs != 0) {
+			name_traceDevfs("name: devfs cache hit\n");
+		}
 		if (file != NULL) {
 			*file = entry->oid;
 		}
@@ -231,6 +266,9 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 	}
 
 	if (name_common.root_registered == 0 && i == 0U) {
+		if (traceDevfs != 0) {
+			name_traceDevfs("name: devfs no root\n");
+		}
 		if (pheap != NULL) {
 			vm_kfree(pheap);
 		}
@@ -254,6 +292,15 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 		msg->i.size = len - i;
 		hal_memcpy(pptr, name + i + 1, len - i);
 		msg->i.data = pptr;
+
+		if (traceDevfs != 0) {
+			if (i == 0U) {
+				name_traceDevfs("name: devfs root query\n");
+			}
+			else {
+				name_traceDevfs("name: devfs relative query\n");
+			}
+		}
 
 		err = proc_send(srv.port, msg);
 		if (err < 0) {
