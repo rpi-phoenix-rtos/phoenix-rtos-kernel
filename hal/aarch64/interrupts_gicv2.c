@@ -266,6 +266,12 @@ u32 interrupts_getPrivatePending(unsigned int irqn)
 }
 
 
+u32 interrupts_getHighestPending(void)
+{
+	return *(interrupts_common.gicc + gicc_hppir) & 0x3ffU;
+}
+
+
 int hal_interruptsSetHandler(intr_handler_t *h)
 {
 	spinlock_ctx_t sc;
