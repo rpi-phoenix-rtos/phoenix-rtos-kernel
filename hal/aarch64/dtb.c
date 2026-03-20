@@ -14,6 +14,7 @@
  */
 
 #include "dtb.h"
+#include "config.h"
 #include "hal/string.h"
 
 #include <arch/pmap.h>
@@ -401,6 +402,19 @@ static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
 	*source = dtb_timerNone;
 	*intr = -1;
 
+#ifdef DTB_FORCE_PHYS_TIMER
+	if (dtb_common.timer.physNonSecure >= 0) {
+		*source = dtb_timerPhysNonSecure;
+		*intr = dtb_common.timer.physNonSecure;
+		return EOK;
+	}
+
+	if (dtb_common.timer.virt >= 0) {
+		*source = dtb_timerVirt;
+		*intr = dtb_common.timer.virt;
+		return EOK;
+	}
+#else
 	if (dtb_common.timer.virt >= 0) {
 		*source = dtb_timerVirt;
 		*intr = dtb_common.timer.virt;
@@ -412,6 +426,7 @@ static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
 		*intr = dtb_common.timer.physNonSecure;
 		return EOK;
 	}
+#endif
 
 	return -ENODEV;
 }
