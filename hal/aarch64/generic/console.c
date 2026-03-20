@@ -26,6 +26,14 @@ static struct {
 } console_common;
 
 
+static void _hal_consoleProbe(hal_pl011_t *uart, const char *s)
+{
+	for (; *s != '\0'; ++s) {
+		hal_pl011Putch(uart, *s);
+	}
+}
+
+
 static void _hal_consolePrint(const char *s)
 {
 	for (; *s != '\0'; ++s) {
@@ -73,6 +81,8 @@ __attribute__((section(".init"))) void _hal_consoleInit(void)
 		console_common.enabled = 0;
 		return;
 	}
+
+	_hal_consoleProbe(&console_common.uart, "console: pl011 init done\n");
 
 	hal_spinlockCreate(&console_common.lock, "console_common.lock");
 	console_common.enabled = 1;
