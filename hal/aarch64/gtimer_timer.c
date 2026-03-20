@@ -61,7 +61,7 @@ static void timer_traceProbePending(const hal_gtimerState_t *state)
 {
 	u64 start, now;
 	time_t elapsed;
-	u32 pending;
+	u32 control, pending, value;
 
 	if (state == NULL) {
 		return;
@@ -71,20 +71,19 @@ static void timer_traceProbePending(const hal_gtimerState_t *state)
 	pending = interrupts_getPending(hal_gtimerStateIrq(state));
 
 	do {
-		if (pending != 0U) {
-			break;
-		}
+		pending |= interrupts_getPending(hal_gtimerStateIrq(state));
 
 		now = hal_gtimerStateGetCount(state);
 		elapsed = hal_gtimerStateCyc2us(state, now - start);
 		if (elapsed >= 2000) {
 			break;
 		}
-
-		pending = interrupts_getPending(hal_gtimerStateIrq(state));
 	} while (1);
 
 	timer_tracePrint("gtimer: pending %u\n", pending);
+	control = hal_gtimerStateGetControl(state);
+	value = timer_traceGetTimerValue(state);
+	timer_tracePrint("gtimer: post %lld us ctl 0x%x tval %u\n", (long long)elapsed, control, value);
 }
 
 
