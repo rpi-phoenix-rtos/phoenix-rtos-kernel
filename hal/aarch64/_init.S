@@ -149,6 +149,8 @@ _start:
 	orr x0, x0, #(1 << 31)
 	msr pmcntenset_el0, x0
 
+	uart_putc 76
+
 #ifdef __TARGET_AARCH64A53
 	/* Enable SMP */
 	mrs x0, s3_1_c15_c2_1 /* CPUECTLR_EL1 */
@@ -160,6 +162,8 @@ _start:
 	ldr	x0, =0x1000080ca000
 	msr	s3_1_c15_c2_0, x0 /* CPUACTLR_EL1 */
 #endif
+
+	uart_putc 77
 
 	/* Set up MMU */
 	ldr x0, =(TCR_EL1_VALUE)
