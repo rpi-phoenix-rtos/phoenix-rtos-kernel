@@ -25,6 +25,10 @@
 #define PL011_TTY_BASE 0x09000000u
 #endif
 
+#ifndef TIMER_IRQ_GROUP
+#define TIMER_IRQ_GROUP 1U
+#endif
+
 #ifndef __ASSEMBLY__
 
 #if defined(__TARGET_AARCH64A72)

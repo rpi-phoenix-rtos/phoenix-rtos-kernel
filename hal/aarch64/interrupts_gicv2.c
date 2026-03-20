@@ -284,7 +284,7 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	/* The generic handoff path reaches the kernel in non-secure EL1, so the
 	 * selected architectural timer PPI must be placed in Group 1. */
 	if (h->n == hal_timerIrq()) {
-		interrupts_setGroup(h->n, 1U);
+		interrupts_setGroup(h->n, TIMER_IRQ_GROUP);
 	}
 
 	interrupts_setPriority(h->n, DEFAULT_PRIORITY);
