@@ -15,9 +15,15 @@
 #ifndef _PH_HAL_CONFIG_H_
 #define _PH_HAL_CONFIG_H_
 
+#include <board_config.h>
+
 #define ASID_BITS       16U
 #define NUM_CPUS        1U
 #define SIZE_INTERRUPTS 256U
+
+#ifndef PL011_TTY_BASE
+#define PL011_TTY_BASE 0x09000000u
+#endif
 
 #ifndef __ASSEMBLY__
 

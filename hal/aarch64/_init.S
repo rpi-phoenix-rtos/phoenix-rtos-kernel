@@ -27,6 +27,22 @@
 .extern _end
 
 
+#define UARTFR_OFFSET 0x18
+#define UARTFR_TXFF   (1 << 5)
+
+
+.macro uart_putc imm
+991:
+	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
+	ldr w4, [x3]
+	tst w4, #UARTFR_TXFF
+	b.ne 991b
+	ldr x3, =PL011_TTY_BASE
+	mov w4, #\imm
+	str w4, [x3]
+.endm
+
+
 /* 16-bit ASID
  * Params for TTBR1:
  * * 4 KB granule
@@ -90,6 +106,8 @@
 _start:
 	/* Assumptions:
 	 * x9 => PA of syspage from PLO */
+	uart_putc 75
+
 	/* Mask all interrupts */
 	msr daifSet, #0xf
 
