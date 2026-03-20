@@ -208,7 +208,9 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	HAL_LIST_ADD(&interrupts_common.handlers[h->n], h);
 
 	interrupts_setPriority(h->n, DEFAULT_PRIORITY);
-	interrupts_setCPU(h->n, DEFAULT_CPU_MASK);
+	if (h->n >= SPI_FIRST_IRQID) {
+		interrupts_setCPU(h->n, DEFAULT_CPU_MASK);
+	}
 	interrupts_enableIRQ(h->n);
 
 	hal_spinlockClear(&interrupts_common.spinlock[h->n], &sc);
