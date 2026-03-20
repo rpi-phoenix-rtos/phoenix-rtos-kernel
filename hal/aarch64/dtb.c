@@ -334,20 +334,27 @@ static void dtb_parseChosen(void *dtb, u32 si, u32 l)
 static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 {
 	addr_t start = 0, size = 0;
+	u32 tupleCells;
 	if (hal_strcmp(dtb_getString(si), "reg") == 0) {
-		/* TODO: currently we assume 2 cells per address or size.
-		 * More correctly we would need to keep track of #address-cells and #size-cells properties.
-		 */
-		while ((l >= 16U) && (dtb_common.nMemBanks < MAX_MEM_BANKS)) {
-			hal_memcpy(&start, dtb, 8);
-			start = ntoh64(start);
-			hal_memcpy(&size, dtb + 8, 8);
-			size = ntoh64(size);
-			dtb_common.memBanks[dtb_common.nMemBanks].start = start;
-			dtb_common.memBanks[dtb_common.nMemBanks].end = start + size - 1U;
-			dtb_common.nMemBanks++;
-			l -= 16U;
-			dtb += 16;
+		tupleCells = dtb_common.rootAddressCells + dtb_common.rootSizeCells;
+		if ((tupleCells == 0U) || (tupleCells > 4U)) {
+			return 0;
+		}
+
+		while ((l >= (tupleCells * sizeof(u32))) && (dtb_common.nMemBanks < MAX_MEM_BANKS)) {
+			if ((dtb_readCells(dtb, dtb_common.rootAddressCells, &start) < 0) ||
+				(dtb_readCells(dtb + (dtb_common.rootAddressCells * sizeof(u32)), dtb_common.rootSizeCells, &size) < 0)) {
+				break;
+			}
+
+			if (size != 0U) {
+				dtb_common.memBanks[dtb_common.nMemBanks].start = start;
+				dtb_common.memBanks[dtb_common.nMemBanks].end = start + size - 1U;
+				dtb_common.nMemBanks++;
+			}
+
+			l -= tupleCells * sizeof(u32);
+			dtb += tupleCells * sizeof(u32);
 		}
 	}
 	return 0;
