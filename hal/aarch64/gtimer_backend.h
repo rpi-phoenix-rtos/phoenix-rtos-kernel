@@ -16,6 +16,7 @@
 #define _PH_HAL_AARCH64_GTIMER_BACKEND_H_
 
 #include "dtb.h"
+#include "hal/interrupts.h"
 
 
 typedef struct {
@@ -50,6 +51,12 @@ void hal_gtimerStateSetTimer(const hal_gtimerState_t *state, u32 ticks);
 
 
 void hal_gtimerStateSetWakeup(const hal_gtimerState_t *state, u32 waitUs);
+
+
+unsigned int hal_gtimerStateIrq(const hal_gtimerState_t *state);
+
+
+int hal_gtimerStateRegisterHandler(const hal_gtimerState_t *state, intrFn_t f, void *data, intr_handler_t *h);
 
 
 #endif

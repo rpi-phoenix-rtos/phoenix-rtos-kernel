@@ -133,3 +133,27 @@ void hal_gtimerStateSetWakeup(const hal_gtimerState_t *state, u32 waitUs)
 	hal_gtimerStateSetTimer(state, ticks);
 	hal_gtimerStateSetControl(state, aarch64_gtimerCtlEnable);
 }
+
+
+unsigned int hal_gtimerStateIrq(const hal_gtimerState_t *state)
+{
+	if (state == NULL) {
+		return 0U;
+	}
+
+	return state->irq;
+}
+
+
+int hal_gtimerStateRegisterHandler(const hal_gtimerState_t *state, intrFn_t f, void *data, intr_handler_t *h)
+{
+	if ((state == NULL) || (h == NULL) || (state->irq == 0U)) {
+		return -EINVAL;
+	}
+
+	h->f = f;
+	h->n = hal_gtimerStateIrq(state);
+	h->data = data;
+
+	return hal_interruptsSetHandler(h);
+}
