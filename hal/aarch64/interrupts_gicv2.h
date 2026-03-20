@@ -38,4 +38,7 @@ u32 interrupts_getPending(unsigned int irqn);
 u32 interrupts_getPrivatePending(unsigned int irqn);
 
 
+u32 interrupts_getLocalPending(void);
+
+
 #endif /* _INTERRUPTS_GICV2_H_ */
