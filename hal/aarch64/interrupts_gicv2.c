@@ -97,6 +97,7 @@ static struct {
 	int trace_irqs;
 	int timerTraceRegistered;
 	int timerTraceDispatched;
+	int timerTraceLocalPrescaler;
 	int timerTraceLocalRoute;
 } interrupts_common;
 
@@ -298,6 +299,24 @@ static void interrupts_enableLocalTimerRoute(void)
 }
 
 
+#if ARM_LOCAL_PRESCALER_VALUE != 0U
+static void interrupts_setLocalPrescaler(void)
+{
+	if ((interrupts_common.local == NULL) || (ARM_LOCAL_PRESCALER_VALUE == 0U)) {
+		return;
+	}
+
+	*(interrupts_common.local + (ARM_LOCAL_PRESCALER_OFFSET / sizeof(u32))) = ARM_LOCAL_PRESCALER_VALUE;
+	hal_cpuDataSyncBarrier();
+
+	if (interrupts_common.timerTraceLocalPrescaler == 0) {
+		interrupts_common.timerTraceLocalPrescaler = 1;
+		interrupts_tracePrint("gic: local prescaler %u\n", ARM_LOCAL_PRESCALER_VALUE);
+	}
+}
+#endif
+
+
 int hal_interruptsSetHandler(intr_handler_t *h)
 {
 	spinlock_ctx_t sc;
@@ -382,6 +401,7 @@ void _hal_interruptsInit(void)
 	interrupts_common.trace_irqs = 0;
 	interrupts_common.timerTraceRegistered = 0;
 	interrupts_common.timerTraceDispatched = 0;
+	interrupts_common.timerTraceLocalPrescaler = 0;
 	interrupts_common.timerTraceLocalRoute = 0;
 
 	dtb_getGIC(&gicc, &gicd);
@@ -389,6 +409,9 @@ void _hal_interruptsInit(void)
 	interrupts_common.gicc = _pmap_halMapDevice(gicc, 0, SIZE_PAGE);
 #if ARM_LOCAL_BASE != 0U
 	interrupts_common.local = _pmap_halMapDevice(ARM_LOCAL_BASE, 0, SIZE_PAGE);
+#if ARM_LOCAL_PRESCALER_VALUE != 0U
+	interrupts_setLocalPrescaler();
+#endif
 #else
 	interrupts_common.local = NULL;
 #endif
