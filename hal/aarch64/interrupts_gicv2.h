@@ -35,4 +35,7 @@ void interrupts_setCPU(unsigned int irqn, unsigned int cpuID);
 u32 interrupts_getPending(unsigned int irqn);
 
 
+u32 interrupts_getPrivatePending(unsigned int irqn);
+
+
 #endif /* _INTERRUPTS_GICV2_H_ */

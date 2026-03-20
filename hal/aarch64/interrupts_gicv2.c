@@ -256,6 +256,16 @@ u32 interrupts_getPending(unsigned int irqn)
 }
 
 
+u32 interrupts_getPrivatePending(unsigned int irqn)
+{
+	if ((irqn < 16U) || (irqn >= 32U)) {
+		return 0U;
+	}
+
+	return (*(interrupts_common.gicd + gicd_ppisr) >> (irqn - 16U)) & 0x1U;
+}
+
+
 int hal_interruptsSetHandler(intr_handler_t *h)
 {
 	spinlock_ctx_t sc;
