@@ -92,6 +92,8 @@ static struct {
 	intr_handler_t *handlers[SIZE_INTERRUPTS];
 	unsigned int counters[SIZE_INTERRUPTS];
 	int trace_irqs;
+	int timerTraceRegistered;
+	int timerTraceDispatched;
 } interrupts_common;
 
 
@@ -118,6 +120,11 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	trace = interrupts_common.trace_irqs != 0 && n != hal_timerIrq();
 	if (trace != 0) {
 		trace_eventInterruptEnter(n);
+	}
+
+	if ((n == hal_timerIrq()) && (interrupts_common.timerTraceDispatched == 0)) {
+		interrupts_common.timerTraceDispatched = 1;
+		hal_consolePrint(ATTR_USER, "gic: timer dispatch\n");
 	}
 
 	hal_spinlockSet(&interrupts_common.spinlock[n], &sc);
@@ -208,6 +215,10 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	HAL_LIST_ADD(&interrupts_common.handlers[h->n], h);
 
 	interrupts_setPriority(h->n, DEFAULT_PRIORITY);
+	if ((h->n == hal_timerIrq()) && (interrupts_common.timerTraceRegistered == 0)) {
+		interrupts_common.timerTraceRegistered = 1;
+		hal_consolePrint(ATTR_USER, "gic: timer handler set\n");
+	}
 	if (h->n >= SPI_FIRST_IRQID) {
 		interrupts_setCPU(h->n, DEFAULT_CPU_MASK);
 	}
@@ -263,6 +274,8 @@ void _hal_interruptsInit(void)
 	addr_t gicc, gicd;
 
 	interrupts_common.trace_irqs = 0;
+	interrupts_common.timerTraceRegistered = 0;
+	interrupts_common.timerTraceDispatched = 0;
 
 	dtb_getGIC(&gicc, &gicd);
 	interrupts_common.gicd = _pmap_halMapDevice(gicd, 0, SIZE_PAGE);
