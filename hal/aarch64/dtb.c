@@ -253,6 +253,34 @@ static int dtb_isSerialNode(const char *nodeName, unsigned int depth)
 }
 
 
+static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
+{
+	/* Keep the first common EL1 policy explicit:
+	 * prefer the non-secure physical timer, then fall back to the virtual timer.
+	 */
+	if ((source == NULL) || (intr == NULL)) {
+		return -EINVAL;
+	}
+
+	*source = dtb_timerNone;
+	*intr = -1;
+
+	if (dtb_common.timer.physNonSecure >= 0) {
+		*source = dtb_timerPhysNonSecure;
+		*intr = dtb_common.timer.physNonSecure;
+		return EOK;
+	}
+
+	if (dtb_common.timer.virt >= 0) {
+		*source = dtb_timerVirt;
+		*intr = dtb_common.timer.virt;
+		return EOK;
+	}
+
+	return -ENODEV;
+}
+
+
 static void dtb_parse(void)
 {
 	void *dtb;
@@ -436,6 +464,12 @@ void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials)
 void dtb_getTimer(dtb_timer_t *timer)
 {
 	*timer = dtb_common.timer;
+}
+
+
+int dtb_getTimerSource(dtb_timerSource_t *source, int *intr)
+{
+	return dtb_chooseTimerSource(source, intr);
 }
 
 

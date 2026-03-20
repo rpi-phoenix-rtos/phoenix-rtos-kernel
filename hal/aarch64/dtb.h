@@ -42,6 +42,13 @@ typedef struct {
 } dtb_timer_t;
 
 
+typedef enum {
+	dtb_timerNone = 0,
+	dtb_timerPhysNonSecure,
+	dtb_timerVirt,
+} dtb_timerSource_t;
+
+
 void dtb_getSystem(char **model, char **compatible);
 
 
@@ -58,6 +65,9 @@ void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials);
 
 
 void dtb_getTimer(dtb_timer_t *timer);
+
+
+int dtb_getTimerSource(dtb_timerSource_t *source, int *intr);
 
 
 void _dtb_init(addr_t dtbPhys);
