@@ -49,4 +49,7 @@ void hal_gtimerStateSetControl(const hal_gtimerState_t *state, u32 val);
 void hal_gtimerStateSetTimer(const hal_gtimerState_t *state, u32 ticks);
 
 
+void hal_gtimerStateSetWakeup(const hal_gtimerState_t *state, u32 waitUs);
+
+
 #endif

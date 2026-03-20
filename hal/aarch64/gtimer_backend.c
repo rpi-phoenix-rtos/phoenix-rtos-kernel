@@ -115,3 +115,21 @@ void hal_gtimerStateSetTimer(const hal_gtimerState_t *state, u32 ticks)
 
 	hal_gtimerSetTimer(state->source, ticks);
 }
+
+
+void hal_gtimerStateSetWakeup(const hal_gtimerState_t *state, u32 waitUs)
+{
+	u32 ticks;
+
+	if ((state == NULL) || (waitUs == 0U)) {
+		return;
+	}
+
+	ticks = hal_gtimerStateUs2Ticks(state, (time_t)waitUs);
+	if (ticks == 0U) {
+		ticks = 1U;
+	}
+
+	hal_gtimerStateSetTimer(state, ticks);
+	hal_gtimerStateSetControl(state, aarch64_gtimerCtlEnable);
+}
