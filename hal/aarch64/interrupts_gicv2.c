@@ -247,6 +247,15 @@ static u32 interrupts_getEnabled(unsigned int irqn)
 }
 
 
+u32 interrupts_getPending(unsigned int irqn)
+{
+	unsigned int irq_reg = irqn / 32U;
+	unsigned int irq_offs = irqn % 32U;
+
+	return (*(interrupts_common.gicd + gicd_ispendr0 + irq_reg) >> irq_offs) & 0x1U;
+}
+
+
 int hal_interruptsSetHandler(intr_handler_t *h)
 {
 	spinlock_ctx_t sc;

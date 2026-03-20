@@ -15,6 +15,7 @@
 #include "gtimer_backend.h"
 #include "gtimer.h"
 #include "aarch64.h"
+#include "interrupts_gicv2.h"
 
 #include "hal/console.h"
 #include "hal/string.h"
@@ -56,6 +57,37 @@ static u32 timer_traceGetTimerValue(const hal_gtimerState_t *state)
 }
 
 
+static void timer_traceProbePending(const hal_gtimerState_t *state)
+{
+	u64 start, now;
+	time_t elapsed;
+	u32 pending;
+
+	if (state == NULL) {
+		return;
+	}
+
+	start = hal_gtimerStateGetCount(state);
+	pending = interrupts_getPending(hal_gtimerStateIrq(state));
+
+	do {
+		if (pending != 0U) {
+			break;
+		}
+
+		now = hal_gtimerStateGetCount(state);
+		elapsed = hal_gtimerStateCyc2us(state, now - start);
+		if (elapsed >= 2000) {
+			break;
+		}
+
+		pending = interrupts_getPending(hal_gtimerStateIrq(state));
+	} while (1);
+
+	timer_tracePrint("gtimer: pending %u\n", pending);
+}
+
+
 time_t hal_timerGetUs(void)
 {
 	if (timer_common.ready == 0) {
@@ -77,6 +109,7 @@ void hal_timerSetWakeup(u32 waitUs)
 	if (timer_common.traceWakeup == 0) {
 		timer_common.traceWakeup = 1;
 		timer_tracePrint("gtimer: arm %u us ctl 0x%x tval %u\n", waitUs, hal_gtimerStateGetControl(&timer_common.state), timer_traceGetTimerValue(&timer_common.state));
+		timer_traceProbePending(&timer_common.state);
 	}
 }
 
