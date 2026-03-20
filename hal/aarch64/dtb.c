@@ -68,6 +68,8 @@ static struct {
 
 	size_t nSerials;
 	dtb_serial_t serials[MAX_SERIALS];
+
+	char *stdoutPath;
 } dtb_common;
 
 
@@ -202,6 +204,16 @@ static void dtb_parseTimer(void *dtb, u32 si, u32 l)
 }
 
 
+static void dtb_parseChosen(void *dtb, u32 si, u32 l)
+{
+	if ((l == 0U) || (hal_strcmp(dtb_getString(si), "stdout-path") != 0)) {
+		return;
+	}
+
+	dtb_common.stdoutPath = dtb;
+}
+
+
 static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 {
 	addr_t start = 0, size = 0;
@@ -281,6 +293,59 @@ static int dtb_chooseTimerSource(dtb_timerSource_t *source, int *intr)
 }
 
 
+static int dtb_getStdoutBase(addr_t *base)
+{
+	char *path, *end, *mark;
+	addr_t value = 0;
+	char c;
+
+	if (base == NULL) {
+		return -EINVAL;
+	}
+
+	path = dtb_common.stdoutPath;
+	if (path == NULL) {
+		return -ENODEV;
+	}
+
+	end = path;
+	while ((*end != '\0') && (*end != ':')) {
+		++end;
+	}
+
+	mark = end;
+	while ((mark != path) && (*(mark - 1) != '@')) {
+		--mark;
+	}
+
+	if ((mark == path) && (*mark != '@')) {
+		return -ENODEV;
+	}
+
+	while (mark < end) {
+		c = *mark++;
+
+		value <<= 4;
+		if ((c >= '0') && (c <= '9')) {
+			value |= (addr_t)(c - '0');
+		}
+		else if ((c >= 'a') && (c <= 'f')) {
+			value |= (addr_t)(c - 'a' + 10);
+		}
+		else if ((c >= 'A') && (c <= 'F')) {
+			value |= (addr_t)(c - 'A' + 10);
+		}
+		else {
+			return -EINVAL;
+		}
+	}
+
+	*base = value;
+
+	return EOK;
+}
+
+
 static void dtb_parse(void)
 {
 	void *dtb;
@@ -295,6 +360,7 @@ static void dtb_parse(void)
 		stateInterruptController,
 		stateMemory,
 		stateTimer,
+		stateChosen,
 		stateSerial,
 	} state = stateIdle;
 
@@ -318,6 +384,9 @@ static void dtb_parse(void)
 			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("timer")) == 0)) {
 				state = stateTimer;
+			}
+			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("chosen")) == 0)) {
+				state = stateChosen;
 			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("amba_apu")) == 0)) {
 				state = stateAMBA_APU;
@@ -372,6 +441,10 @@ static void dtb_parse(void)
 
 				case stateTimer:
 					dtb_parseTimer(dtb, si, l);
+					break;
+
+				case stateChosen:
+					dtb_parseChosen(dtb, si, l);
 					break;
 
 				case stateSerial:
@@ -458,6 +531,36 @@ void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials)
 {
 	*serials = dtb_common.serials;
 	*nSerials = dtb_common.nSerials;
+}
+
+
+int dtb_getConsoleSerial(dtb_serial_t *serial)
+{
+	addr_t base;
+	size_t i;
+	int err;
+
+	if (serial == NULL) {
+		return -EINVAL;
+	}
+
+	err = dtb_getStdoutBase(&base);
+	if (err == EOK) {
+		for (i = 0U; i < dtb_common.nSerials; ++i) {
+			if (dtb_common.serials[i].base == base) {
+				*serial = dtb_common.serials[i];
+				return EOK;
+			}
+		}
+	}
+
+	if (dtb_common.nSerials == 0U) {
+		return -ENODEV;
+	}
+
+	*serial = dtb_common.serials[0];
+
+	return EOK;
 }
 
 

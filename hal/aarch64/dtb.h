@@ -64,6 +64,9 @@ void dtb_getGIC(addr_t *gicc, addr_t *gicd);
 void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials);
 
 
+int dtb_getConsoleSerial(dtb_serial_t *serial);
+
+
 void dtb_getTimer(dtb_timer_t *timer);
 
 

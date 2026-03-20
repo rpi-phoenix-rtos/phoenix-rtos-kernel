@@ -67,11 +67,9 @@ void hal_consolePutch(char c)
 
 __attribute__((section(".init"))) void _hal_consoleInit(void)
 {
-	dtb_serial_t *serials;
-	size_t nSerials;
+	dtb_serial_t serial;
 
-	dtb_getSerials(&serials, &nSerials);
-	if ((nSerials == 0U) || (hal_pl011Init(&console_common.uart, serials[0].base) < 0)) {
+	if ((dtb_getConsoleSerial(&serial) < 0) || (hal_pl011Init(&console_common.uart, serial.base) < 0)) {
 		console_common.enabled = 0;
 		return;
 	}
