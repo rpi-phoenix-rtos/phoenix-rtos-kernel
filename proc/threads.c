@@ -68,6 +68,7 @@ static struct {
 	unsigned int sleepTraceActive;
 	unsigned int sleepTraceWakeup;
 	unsigned int sleepTraceIrq;
+	unsigned int pshTraceScheduled;
 	time_t prev;
 } threads_common;
 
@@ -516,6 +517,12 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 		}
 
 		_threads_scheduling(selected);
+		if ((threads_common.pshTraceScheduled == 0U) && (selected->process != NULL) && (selected->process->path != NULL) &&
+			(hal_strcmp(selected->process->path, "psh") == 0) && (hal_cpuSupervisorMode(selCtx) == 0)) {
+			threads_common.pshTraceScheduled = 1U;
+			hal_consolePrint(ATTR_USER, "threads: psh user scheduled\n");
+		}
+
 		hal_cpuRestore(context, selCtx);
 
 #if defined(STACK_CANARY) || !defined(NDEBUG)
