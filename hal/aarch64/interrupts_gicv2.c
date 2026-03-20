@@ -206,6 +206,17 @@ static u32 interrupts_getGroup(unsigned int irqn)
 }
 
 
+static void interrupts_setGroup(unsigned int irqn, u32 group)
+{
+	unsigned int irq_reg = irqn / 32U;
+	unsigned int irq_offs = irqn % 32U;
+	u32 mask;
+
+	mask = *(interrupts_common.gicd + gicd_igroupr0 + irq_reg) & ~((u32)1U << irq_offs);
+	*(interrupts_common.gicd + gicd_igroupr0 + irq_reg) = mask | ((group & 0x1U) << irq_offs);
+}
+
+
 void interrupts_setCPU(unsigned int irqn, unsigned int cpuID)
 {
 	unsigned int irq_reg = irqn / 4U;
@@ -249,6 +260,12 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 
 	if (h->n >= 16U) {
 		interrupts_setConf(h->n, (u32)_interrupts_gicv2_classify(h->n));
+	}
+
+	/* The generic handoff path reaches the kernel in non-secure EL1, so the
+	 * selected architectural timer PPI must be placed in Group 1. */
+	if (h->n == hal_timerIrq()) {
+		interrupts_setGroup(h->n, 1U);
 	}
 
 	interrupts_setPriority(h->n, DEFAULT_PRIORITY);
