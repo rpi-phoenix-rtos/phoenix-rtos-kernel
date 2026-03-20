@@ -1617,6 +1617,7 @@ int _map_init(vm_map_t *kmap, vm_object_t *kernel, void **bss, void **top)
 
 	map_common.kmap = kmap;
 	map_common.kernel = kernel;
+	hal_consolePrint(ATTR_USER, "map: enter\n");
 
 	vm_pageGetStats(&freesz);
 
@@ -1631,8 +1632,14 @@ int _map_init(vm_map_t *kmap, vm_object_t *kernel, void **bss, void **top)
 
 	map_common.entries = (*bss);
 	poolsz = min((ptr_t)(*top) - (ptr_t)(*bss), sizeof(map_entry_t) * map_common.ntotal);
+	lib_printf("map: pool bss=%p top=%p free=%u total=%u pool=%u\n", *bss, *top, map_common.nfree, map_common.ntotal, poolsz);
 
 	map_common.free = map_common.entries;
+	hal_consolePrint(ATTR_USER, "map: pool link\n");
+
+	if (map_common.nfree == 0U) {
+		hal_consolePrint(ATTR_USER, "map: zero free\n");
+	}
 
 	for (i = 0; i < map_common.nfree - 1U; ++i) {
 		map_common.entries[i].next = map_common.entries + i + 1U;
