@@ -91,6 +91,12 @@ static inline u32 hal_gtimerGetPhysicalControl(void)
 }
 
 
+static inline u32 hal_gtimerGetPhysicalTimer(void)
+{
+	return (u32)sysreg_read(cntp_tval_el0);
+}
+
+
 static inline void hal_gtimerSetPhysicalControl(u32 val)
 {
 	sysreg_write(cntp_ctl_el0, val);
@@ -108,6 +114,12 @@ static inline void hal_gtimerSetPhysicalTimer(u32 ticks)
 static inline u32 hal_gtimerGetVirtualControl(void)
 {
 	return (u32)sysreg_read(cntv_ctl_el0);
+}
+
+
+static inline u32 hal_gtimerGetVirtualTimer(void)
+{
+	return (u32)sysreg_read(cntv_tval_el0);
 }
 
 

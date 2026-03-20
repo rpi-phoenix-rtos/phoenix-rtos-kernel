@@ -14,6 +14,7 @@
 
 #include "gtimer_backend.h"
 #include "gtimer.h"
+#include "aarch64.h"
 
 #include "hal/console.h"
 #include "hal/string.h"
@@ -45,6 +46,16 @@ static void timer_tracePrint(const char *fmt, ...)
 }
 
 
+static u32 timer_traceGetTimerValue(const hal_gtimerState_t *state)
+{
+	if ((state != NULL) && (state->source == dtb_timerVirt)) {
+		return hal_gtimerGetVirtualTimer();
+	}
+
+	return hal_gtimerGetPhysicalTimer();
+}
+
+
 time_t hal_timerGetUs(void)
 {
 	if (timer_common.ready == 0) {
@@ -61,12 +72,12 @@ void hal_timerSetWakeup(u32 waitUs)
 		return;
 	}
 
+	hal_gtimerStateSetWakeup(&timer_common.state, waitUs);
+
 	if (timer_common.traceWakeup == 0) {
 		timer_common.traceWakeup = 1;
-		timer_tracePrint("gtimer: arm %u us\n", waitUs);
+		timer_tracePrint("gtimer: arm %u us ctl 0x%x tval %u\n", waitUs, hal_gtimerStateGetControl(&timer_common.state), timer_traceGetTimerValue(&timer_common.state));
 	}
-
-	hal_gtimerStateSetWakeup(&timer_common.state, waitUs);
 }
 
 
