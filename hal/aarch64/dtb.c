@@ -24,9 +24,10 @@
 
 #define STR_AND_LEN(x) (x), (sizeof(x) - 1U)
 
-#define MAX_CPUS      8U
-#define MAX_MEM_BANKS 8U
-#define MAX_SERIALS   4U
+#define MAX_CPUS       8U
+#define MAX_MEM_BANKS  8U
+#define MAX_SERIALS    4U
+#define MAX_SOC_RANGES 4U
 
 struct _fdt_header_t {
 	u32 magic;
@@ -49,6 +50,8 @@ static struct {
 
 	char *model;
 	char *compatible;
+	u32 rootAddressCells;
+	u32 rootSizeCells;
 
 	size_t nCpus;
 	struct {
@@ -58,6 +61,19 @@ static struct {
 
 	size_t nMemBanks;
 	dtb_memBank_t memBanks[MAX_MEM_BANKS];
+
+	struct {
+		unsigned int depth;
+		u32 addressCells;
+		u32 sizeCells;
+
+		size_t nRanges;
+		struct {
+			addr_t bus;
+			addr_t cpu;
+			addr_t size;
+		} ranges[MAX_SOC_RANGES];
+	} soc;
 
 	struct {
 		addr_t gicd;
@@ -76,6 +92,53 @@ static struct {
 static char *dtb_getString(u32 i)
 {
 	return (char *)((void *)dtb_common.fdth + ntoh32(dtb_common.fdth->off_dt_strings) + i);
+}
+
+
+static int dtb_readCells(const void *data, u32 cells, addr_t *value)
+{
+	const u8 *p = data;
+	addr_t v = 0;
+	u32 cell;
+	u32 i;
+
+	if ((data == NULL) || (value == NULL) || (cells == 0U) || (cells > 2U)) {
+		return -EINVAL;
+	}
+
+	for (i = 0U; i < cells; ++i) {
+		hal_memcpy(&cell, p + (i * sizeof(cell)), sizeof(cell));
+		v = (v << 32) | ntoh32(cell);
+	}
+
+	*value = v;
+
+	return EOK;
+}
+
+
+static int dtb_translateSocAddress(addr_t *addr)
+{
+	addr_t offset;
+	size_t i;
+
+	if (addr == NULL) {
+		return -EINVAL;
+	}
+
+	for (i = 0U; i < dtb_common.soc.nRanges; ++i) {
+		if (*addr < dtb_common.soc.ranges[i].bus) {
+			continue;
+		}
+
+		offset = *addr - dtb_common.soc.ranges[i].bus;
+		if (offset < dtb_common.soc.ranges[i].size) {
+			*addr = dtb_common.soc.ranges[i].cpu + offset;
+			return EOK;
+		}
+	}
+
+	return -ENODEV;
 }
 
 
@@ -113,8 +176,56 @@ static void dtb_parseSystem(void *dtb, u32 si, u32 l)
 	else if (hal_strcmp(dtb_getString(si), "compatible") == 0) {
 		dtb_common.compatible = dtb;
 	}
+	else if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#address-cells") == 0)) {
+		dtb_common.rootAddressCells = ntoh32(*(u32 *)dtb);
+	}
+	else if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#size-cells") == 0)) {
+		dtb_common.rootSizeCells = ntoh32(*(u32 *)dtb);
+	}
 	else {
 		/* No action required */
+	}
+}
+
+
+static void dtb_parseSOC(void *dtb, u32 si, u32 l)
+{
+	addr_t bus, cpu, size;
+	u32 tupleCells;
+
+	if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#address-cells") == 0)) {
+		dtb_common.soc.addressCells = ntoh32(*(u32 *)dtb);
+		return;
+	}
+
+	if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#size-cells") == 0)) {
+		dtb_common.soc.sizeCells = ntoh32(*(u32 *)dtb);
+		return;
+	}
+
+	if (hal_strcmp(dtb_getString(si), "ranges") != 0) {
+		return;
+	}
+
+	tupleCells = dtb_common.soc.addressCells + dtb_common.rootAddressCells + dtb_common.soc.sizeCells;
+	if ((tupleCells == 0U) || (tupleCells > 5U)) {
+		return;
+	}
+
+	while ((l >= (tupleCells * sizeof(u32))) && (dtb_common.soc.nRanges < MAX_SOC_RANGES)) {
+		if ((dtb_readCells(dtb, dtb_common.soc.addressCells, &bus) < 0) ||
+			(dtb_readCells(dtb + (dtb_common.soc.addressCells * sizeof(u32)), dtb_common.rootAddressCells, &cpu) < 0) ||
+			(dtb_readCells(dtb + ((dtb_common.soc.addressCells + dtb_common.rootAddressCells) * sizeof(u32)), dtb_common.soc.sizeCells, &size) < 0)) {
+			break;
+		}
+
+		dtb_common.soc.ranges[dtb_common.soc.nRanges].bus = bus;
+		dtb_common.soc.ranges[dtb_common.soc.nRanges].cpu = cpu;
+		dtb_common.soc.ranges[dtb_common.soc.nRanges].size = size;
+		dtb_common.soc.nRanges++;
+
+		dtb += tupleCells * sizeof(u32);
+		l -= tupleCells * sizeof(u32);
 	}
 }
 
@@ -156,11 +267,17 @@ static void dtb_parseInterruptController(void *dtb, u32 si, u32 l)
 }
 
 
-static void dtb_parseSerial(void *dtb, u32 si, u32 l)
+static void dtb_parseSerial(void *dtb, u32 si, u32 l, int inSOC)
 {
 	u64 base;
+
 	if (hal_strcmp(dtb_getString(si), "reg") == 0) {
-		if (l >= 8U) {
+		if ((inSOC != 0) && (dtb_common.soc.addressCells != 0U) && (l >= (dtb_common.soc.addressCells * sizeof(u32)))) {
+			if (dtb_readCells(dtb, dtb_common.soc.addressCells, &dtb_common.serials[dtb_common.nSerials].base) == EOK) {
+				(void)dtb_translateSocAddress(&dtb_common.serials[dtb_common.nSerials].base);
+			}
+		}
+		else if (l >= 8U) {
 			hal_memcpy(&base, dtb, 8);
 			base = ntoh64(base);
 			dtb_common.serials[dtb_common.nSerials].base = base;
@@ -341,6 +458,7 @@ static int dtb_getStdoutBase(addr_t *base)
 	}
 
 	*base = value;
+	(void)dtb_translateSocAddress(base);
 
 	return EOK;
 }
@@ -382,6 +500,10 @@ static void dtb_parse(void)
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("memory")) == 0)) {
 				state = stateMemory;
 			}
+			else if ((depth == 1U) && (hal_strcmp(dtb, "soc") == 0)) {
+				state = stateIdle;
+				dtb_common.soc.depth = depth + 1U;
+			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("timer")) == 0)) {
 				state = stateTimer;
 			}
@@ -422,9 +544,15 @@ static void dtb_parse(void)
 			si = ntoh32(*(u32 *)dtb);
 			dtb += 4;
 
+			if (depth == dtb_common.soc.depth) {
+				dtb_parseSOC(dtb, si, l);
+			}
+
 			switch (state) {
 				case stateSystem:
-					dtb_parseSystem(dtb, si, l);
+					if (depth == 1U) {
+						dtb_parseSystem(dtb, si, l);
+					}
 					break;
 
 				case stateMemory:
@@ -448,7 +576,7 @@ static void dtb_parse(void)
 					break;
 
 				case stateSerial:
-					dtb_parseSerial(dtb, si, l);
+					dtb_parseSerial(dtb, si, l, (dtb_common.soc.depth != 0U) && (depth > dtb_common.soc.depth));
 					break;
 
 				default:
@@ -481,6 +609,9 @@ static void dtb_parse(void)
 					break;
 			}
 			/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "The algorithm is designed not to underflow" */
+			if ((dtb_common.soc.depth != 0U) && (depth == dtb_common.soc.depth)) {
+				dtb_common.soc.depth = 0U;
+			}
 			depth--;
 		}
 		else if (token == 9U) {
@@ -580,6 +711,10 @@ void _dtb_init(addr_t dtbPhys)
 {
 	hal_memset(&dtb_common, 0, sizeof(dtb_common));
 	dtb_common.fdth = (void *)((dtbPhys & (SIZE_PAGE - 1U)) + VADDR_DTB);
+	dtb_common.rootAddressCells = 2U;
+	dtb_common.rootSizeCells = 1U;
+	dtb_common.soc.addressCells = 2U;
+	dtb_common.soc.sizeCells = 1U;
 	dtb_common.timer.physSecure = -1;
 	dtb_common.timer.physNonSecure = -1;
 	dtb_common.timer.virt = -1;
