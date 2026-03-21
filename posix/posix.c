@@ -64,6 +64,7 @@ static struct {
 	lock_t lock;
 	id_t fresh;
 	char hostname[HOST_NAME_MAX + 1U];
+	unsigned int pshConsoleOpenLookup;
 } posix_common;
 
 
@@ -598,6 +599,14 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 
 		do {
 			err = proc_lookup(filename, &ln, &oid);
+			if ((posix_common.pshConsoleOpenLookup == 0U) && (filename != NULL) &&
+				(proc_current()->process != NULL) && (proc_current()->process->path != NULL) &&
+				(hal_strcmp(proc_current()->process->path, "psh") == 0) &&
+				(hal_strcmp(filename, "/dev/console") == 0)) {
+				posix_common.pshConsoleOpenLookup = 1U;
+				lib_printf("posix: psh console open %d\n", err);
+			}
+
 			if ((err == -ENOENT) && (((unsigned int)oflag & O_CREAT) != 0U)) {
 				GETFROMSTACK(ustack, mode_t, mode, 2U);
 
