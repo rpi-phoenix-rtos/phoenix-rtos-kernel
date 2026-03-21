@@ -21,13 +21,21 @@
 
 typedef struct {
 	enum { pctl_set = 0, pctl_get } action;
-	enum { pctl_reboot = 0 } type;
+	enum { pctl_reboot = 0, pctl_graphmode } type;
 
 	union {
 		struct {
 			unsigned int magic;
 			unsigned int reason;
 		} reboot;
+
+		struct {
+			unsigned short width;
+			unsigned short height;
+			unsigned short bpp;
+			unsigned short pitch;
+			unsigned long framebuffer; /* addr_t */
+		} graphmode;
 	} task;
 } __attribute__((packed)) platformctl_t;
 

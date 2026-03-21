@@ -14,6 +14,7 @@
 
 #include "hal/aarch64/aarch64.h"
 #include "hal/aarch64/interrupts_gicv2.h"
+#include "hal/aarch64/halsyspage.h"
 
 #include "hal/cpu.h"
 #include "hal/hal.h"
@@ -51,6 +52,21 @@ int hal_platformctl(void *ptr)
 			else if (data->action == pctl_get) {
 				data->task.reboot.reason = 0U;
 				ret = 0;
+			}
+			break;
+
+		case pctl_graphmode:
+			if (data->action == pctl_get) {
+#if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
+				data->task.graphmode.width = hal_syspage->hs.graphmode.width;
+				data->task.graphmode.height = hal_syspage->hs.graphmode.height;
+				data->task.graphmode.bpp = hal_syspage->hs.graphmode.bpp;
+				data->task.graphmode.pitch = hal_syspage->hs.graphmode.pitch;
+				data->task.graphmode.framebuffer = hal_syspage->hs.graphmode.framebuffer;
+				ret = 0;
+#else
+				ret = -1;
+#endif
 			}
 			break;
 
