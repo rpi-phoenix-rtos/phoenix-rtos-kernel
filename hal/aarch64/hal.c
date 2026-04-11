@@ -85,22 +85,35 @@ void hal_lockScheduler(void)
 __attribute__((section(".init"))) void _hal_init(void)
 {
 	const syspage_prog_t *dtb;
+	addr_t dtbStart;
+	addr_t dtbEnd;
 	hal_common.started = 0;
 	schedulerLocked = 0;
 	_hal_spinlockInit();
 
-	dtb = syspage_progNameResolve("system.dtb");
-	if (dtb == NULL) {
+	if ((hal_syspage->hs.firmwareDtb != 0u) && (hal_syspage->hs.firmwareDtbSize != 0u)) {
+		dtbStart = hal_syspage->hs.firmwareDtb;
+		dtbEnd = dtbStart + hal_syspage->hs.firmwareDtbSize;
+		hal_consolePrint(ATTR_USER, "hal: using firmware dtb\n");
+	}
+	else {
+		dtb = syspage_progNameResolve("system.dtb");
+		if (dtb == NULL) {
 #ifdef NDEBUG
-		hal_cpuReboot();
+			hal_cpuReboot();
 #else
-		for (;;) {
-			hal_cpuHalt();
-		}
+			for (;;) {
+				hal_cpuHalt();
+			}
 #endif
+		}
+
+		dtbStart = dtb->start;
+		dtbEnd = dtb->end;
+		hal_consolePrint(ATTR_USER, "hal: using syspage dtb\n");
 	}
 
-	_pmap_preinit(dtb->start, dtb->end);
+	_pmap_preinit(dtbStart, dtbEnd);
 
 	_hal_platformInit();
 	_hal_consoleInit();

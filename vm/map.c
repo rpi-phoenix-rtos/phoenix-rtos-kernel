@@ -1640,12 +1640,13 @@ int _map_init(vm_map_t *kmap, vm_object_t *kernel, void **bss, void **top)
 	if (map_common.nfree == 0U) {
 		hal_consolePrint(ATTR_USER, "map: zero free\n");
 	}
+	else {
+		for (i = 0; i < map_common.nfree - 1U; ++i) {
+			map_common.entries[i].next = map_common.entries + i + 1U;
+		}
 
-	for (i = 0; i < map_common.nfree - 1U; ++i) {
-		map_common.entries[i].next = map_common.entries + i + 1U;
+		map_common.entries[i].next = NULL;
 	}
-
-	map_common.entries[i].next = NULL;
 
 	(*bss) += poolsz;
 	lib_printf("vm: Initializing memory mapper: (%d*%d) %d\n", map_common.nfree, sizeof(map_entry_t), poolsz);

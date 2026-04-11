@@ -88,11 +88,11 @@
 
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
+#define SYSPAGE_SIZE_OFFSET 40
+#define SYSPAGE_PKERNEL_OFFSET 48
+#else
 #define SYSPAGE_SIZE_OFFSET 24
 #define SYSPAGE_PKERNEL_OFFSET 32
-#else
-#define SYSPAGE_SIZE_OFFSET 8
-#define SYSPAGE_PKERNEL_OFFSET 16
 #endif
 
 #define PMAP_COMMON_KERNEL_TTL2 (pmap_common)

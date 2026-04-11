@@ -26,6 +26,8 @@ typedef struct {
 		unsigned long framebuffer; /* addr_t */
 	} __attribute__((packed)) graphmode;
 #endif
+	unsigned long firmwareDtb;     /* addr_t */
+	unsigned long firmwareDtbSize; /* size_t */
 } __attribute__((packed)) hal_syspage_t;
 
 #endif
