@@ -844,8 +844,13 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 
 	_dtb_init(dtbStart);
 	dtb_getMemory(&banks, &nBanks);
-	pmap_common.mem.min = banks[0].start;
-	pmap_common.mem.max = banks[0].end;
+
+	if (nBanks == 0) {
+	        while (1) {
+	                asm volatile("wfe");
+	        }
+	}
+	pmap_common.mem.min = banks[0].start;	pmap_common.mem.max = banks[0].end;
 
 	pmap_common.mem.count = 0;
 	for (i = 0; i < nBanks; i++) {
