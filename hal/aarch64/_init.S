@@ -109,6 +109,18 @@
 
 .org 0
 _start:
+        /* ACT LED (GPIO42) ON at kernel entry */
+        ldr     x0, =0xfe200010
+        ldr     w1, [x0]
+        mov     w2, #(7 << 6)
+        bic     w1, w1, w2
+        mov     w2, #(1 << 6)
+        orr     w1, w1, w2
+        str     w1, [x0]
+        ldr     x0, =0xfe200020
+        mov     w1, #(1 << 10)
+        str     w1, [x0]
+
         /* Assumptions:
          * x9 => PA of syspage from PLO */
         uart_putc 75
