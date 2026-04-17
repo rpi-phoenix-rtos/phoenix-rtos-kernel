@@ -63,6 +63,14 @@
 .endm
 #endif
 
+
+.macro uart_tag2 c1 c2
+	uart_putc 10
+	uart_putc \c1
+	uart_putc \c2
+	uart_putc 10
+.endm
+
 #if defined(PL011_TTY_CLOCK) && (PL011_TTY_CLOCK == 48000000u)
 .macro uart_reinit_115200
 	ldr x3, =PL011_TTY_BASE
@@ -213,6 +221,7 @@ _start:
 	uart_putc 77
 
 	/* Set up MMU */
+	uart_tag2 88, 49
 	ldr x0, =(TCR_EL1_VALUE)
 	mrs x1, id_aa64mmfr0_el1
 	and x1, x1, #0x7
@@ -243,11 +252,13 @@ _start:
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
+	uart_tag2 88, 50
 
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
 
 	/* Turn on MMU and caches */
+	uart_tag2 88, 51
 	dsb ish
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 12)
