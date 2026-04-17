@@ -33,7 +33,6 @@
 #define UARTLCRH_OFFSET 0x2c
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
-#define EARLY_UART_DEVICE_DESCR 0x6000000000070b
 
 .macro uart_putc imm
 991:
@@ -45,23 +44,6 @@
 	mov w4, #\imm
 	str w4, [x3]
 .endm
-
-
-#if defined(PL011_TTY_EARLY_VADDR)
-.macro uart_putc_virt imm
-992:
-	ldr x3, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
-	ldr w4, [x3]
-	tst w4, #UARTFR_TXFF
-	b.ne 992b
-	ldr x3, =PL011_TTY_EARLY_VADDR
-	mov w4, #\imm
-	str w4, [x3]
-.endm
-#else
-.macro uart_putc_virt imm
-.endm
-#endif
 
 
 .macro uart_tag2 c1 c2
@@ -300,12 +282,6 @@ _start:
 	/* Map TTL3 (VADDR_MAX - 2 MB) ~ VADDR_MAX => no access */
 	bl _fill_page_zero
 
-#if defined(PL011_TTY_EARLY_VADDR)
-	/* Reserve the first device TTL3 entry for a temporary post-MMU PL011 probe. */
-	ldr x1, =(PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR)
-	str x1, [x0]
-#endif
-
 	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
@@ -349,13 +325,11 @@ _start:
 	ic iallu
 	dsb nsh
 	isb
-	uart_putc_virt 78
 
 	ldr x0, =_core_0_virtual
 	br x0
 
 _core_0_virtual:
-	uart_putc_virt 79
 	/* Copy syspage to the designated spot in virtual memory */
 	adrp x1, VADDR_SYSPAGE
 	add x1, x1, :lo12:VADDR_SYSPAGE
@@ -380,11 +354,8 @@ _core_0_virtual:
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
-	uart_putc_virt 80
 
 	bl _set_up_vbar_and_stacks
-	uart_putc_virt 81
-	uart_putc_virt 82
 	b main
 
 

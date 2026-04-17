@@ -27,31 +27,6 @@
 #include "perf/perf.h"
 
 
-#if defined(PL011_TTY_EARLY_VADDR)
-enum {
-	main_pl011_dr = 0x00 / sizeof(u32),
-	main_pl011_fr = 0x18 / sizeof(u32),
-};
-
-#define MAIN_PL011_FR_TXFF (1U << 5)
-
-static inline void main_earlyUartPutch(char c)
-{
-	volatile u32 *uart = (volatile u32 *)(ptr_t)PL011_TTY_EARLY_VADDR;
-
-	while ((uart[main_pl011_fr] & MAIN_PL011_FR_TXFF) != 0U) {
-	}
-
-	uart[main_pl011_dr] = (u32)(u8)c;
-}
-#else
-static inline void main_earlyUartPutch(char c)
-{
-	(void)c;
-}
-#endif
-
-
 static struct {
 	vm_map_t kmap;
 	vm_object_t kernel;
@@ -134,7 +109,6 @@ int main(void)
 {
 	char s[128];
 
-	main_earlyUartPutch('S');
 	syspage_init();
 	_hal_init();
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
