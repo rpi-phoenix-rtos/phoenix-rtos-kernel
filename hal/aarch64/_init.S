@@ -33,6 +33,7 @@
 #define UARTLCRH_OFFSET 0x2c
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
+#define EARLY_UART_DEVICE_DESCR 0x6000000000070b
 
 .macro uart_putc imm
 991:
@@ -44,6 +45,24 @@
 	mov w4, #\imm
 	str w4, [x3]
 .endm
+
+
+#if defined(PL011_TTY_EARLY_VADDR)
+.macro uart_putc_virt imm
+992:
+	ldr x3, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
+	ldr w4, [x3]
+	tst w4, #UARTFR_TXFF
+	b.ne 992b
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	mov w4, #\imm
+	str w4, [x3]
+.endm
+#else
+.macro uart_putc_virt imm
+.endm
+#endif
+
 
 .macro uart_tag2 c1 c2
 	uart_putc 10
@@ -246,7 +265,11 @@ _start:
 	orr x0, x0, #(1 << 2)
 	orr x0, x0, #(1 << 0)
 	msr sctlr_el1, x0
-	dsb ish
+	isb
+	/* Match Linux's arm64 early-MMU sequence: discard any instructions
+	 * speculatively fetched before the new translation regime became active. */
+	ic iallu
+	dsb nsh
 	isb
 
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
@@ -295,6 +318,12 @@ _start:
 	/* Map TTL3 (VADDR_MAX - 2 MB) ~ VADDR_MAX => no access */
 	bl _fill_page_zero
 
+#if defined(PL011_TTY_EARLY_VADDR)
+	/* Reserve the first device TTL3 entry for a temporary post-MMU PL011 probe. */
+	ldr x1, =(PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR)
+	str x1, [x0]
+#endif
+
 	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
@@ -302,14 +331,7 @@ _start:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
-	/* Ensure TTBR1 page tables are visible to the page-table walker on real hardware. */
-	adrp x0, PMAP_COMMON_KERNEL_TTL2
-	add x1, x0, #(3 * SIZE_PAGE)
-	bl _clean_dcache_range
-
 	/* Ensure changes to translation tables are visible */
-	dsb ish
-	tlbi vmalle1is
 	dsb ish
 	isb
 
@@ -318,11 +340,13 @@ _start:
 	bic x0, x0, #(1 << 23)
 	msr tcr_el1, x0
 	isb
+	uart_putc_virt 78
 
 	ldr x0, =_core_0_virtual
 	br x0
 
 _core_0_virtual:
+	uart_putc_virt 79
 	/* Copy syspage to the designated spot in virtual memory */
 	adrp x1, VADDR_SYSPAGE
 	add x1, x1, :lo12:VADDR_SYSPAGE
@@ -332,7 +356,6 @@ _core_0_virtual:
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
-	cbz x0, 3f
 1:
 	cmp x0, #8
 	b.lo 2f
@@ -342,13 +365,17 @@ _core_0_virtual:
 	cbnz x0, 1b
 	b 3f
 2:
+	cbz x0, 3f
 	ldrb w3, [x9], #1
 	strb w3, [x1], #1
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
+	uart_putc_virt 80
 
 	bl _set_up_vbar_and_stacks
+	uart_putc_virt 81
+	uart_putc_virt 82
 	b main
 
 
@@ -410,25 +437,6 @@ _fill_page_descr:
 	add x2, x2, #(2 * SIZE_PAGE)
 	cmp x0, x3
 	b.lo 1b
-	ret
-
-
-_clean_dcache_range:
-	/* Clean data cache lines by VA to PoC for [x0, x1). Clobbers x0-x4. */
-	mrs x2, ctr_el0
-	lsr x2, x2, #16
-	and x2, x2, #0xf
-	mov x3, #4
-	lsl x2, x3, x2
-	sub x3, x2, #1
-	bic x0, x0, x3
-1:
-	dc cvac, x0
-	add x0, x0, x2
-	cmp x0, x1
-	b.lo 1b
-	dsb ish
-	isb
 	ret
 
 _set_up_vbar_and_stacks:
