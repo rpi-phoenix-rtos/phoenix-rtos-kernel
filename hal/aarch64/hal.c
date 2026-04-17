@@ -28,84 +28,6 @@ static struct {
 	int started;
 } hal_common;
 
-
-#if defined(PLO_RPI_LED_DIAG) && (PLO_RPI_LED_DIAG != 0) && defined(PLO_RPI_GPIO_BASE_ADDRESS) && (PLO_RPI_GPIO_BASE_ADDRESS != 0)
-enum {
-	hal_gpio_gpfsel4 = 0x10 / sizeof(u32),
-	hal_gpio_gpset1 = 0x20 / sizeof(u32),
-	hal_gpio_gpclr1 = 0x2c / sizeof(u32),
-	hal_gpio42_shift = 6u,
-	hal_gpio42_mask = 1u << 10,
-	hal_led_delay_loops = 25000000u,
-};
-
-
-static struct {
-	volatile u32 *gpio;
-	int gpioReady;
-} hal_diag;
-
-
-static void hal_rpiDiagDelay(unsigned int loops)
-{
-	volatile unsigned int i;
-
-	for (i = 0u; i < loops; ++i) {
-		__asm__ volatile ("nop");
-	}
-}
-
-
-static int hal_rpiDiagInit(void)
-{
-	u32 val;
-
-	if (hal_diag.gpioReady != 0) {
-		return 0;
-	}
-
-	hal_diag.gpio = _pmap_halMapDevice(PLO_RPI_GPIO_BASE_ADDRESS, 0, SIZE_PAGE);
-	if (hal_diag.gpio == NULL) {
-		return -1;
-	}
-
-	val = hal_diag.gpio[hal_gpio_gpfsel4];
-	val &= ~(7u << hal_gpio42_shift);
-	val |= 1u << hal_gpio42_shift;
-	hal_diag.gpio[hal_gpio_gpfsel4] = val;
-	hal_diag.gpio[hal_gpio_gpclr1] = hal_gpio42_mask;
-	hal_diag.gpioReady = 1;
-
-	return 0;
-}
-
-
-void hal_rpiDiagPulse(unsigned int stage)
-{
-	unsigned int i;
-
-	if ((stage == 0u) || (hal_rpiDiagInit() < 0)) {
-		return;
-	}
-
-	hal_rpiDiagDelay(hal_led_delay_loops * 3u);
-
-	for (i = 0u; i < stage; ++i) {
-		hal_diag.gpio[hal_gpio_gpset1] = hal_gpio42_mask;
-		hal_rpiDiagDelay(hal_led_delay_loops);
-		hal_diag.gpio[hal_gpio_gpclr1] = hal_gpio42_mask;
-		hal_rpiDiagDelay(hal_led_delay_loops);
-	}
-
-	hal_rpiDiagDelay(hal_led_delay_loops * 4u);
-}
-#else
-void hal_rpiDiagPulse(unsigned int stage)
-{
-	(void)stage;
-}
-#endif
-
 /* parasoft-begin-suppress MISRAC2012-RULE_8_4 "Definition in assembly" */
 syspage_t *hal_syspage;
 u64 relOffs;
@@ -169,7 +91,6 @@ __attribute__((section(".init"))) void _hal_init(void)
 	addr_t dtbStart;
 	addr_t dtbEnd;
 
-	hal_rpiDiagPulse(10u);
 	hal_common.started = 0;
 	schedulerLocked = 0;
 	_hal_spinlockInit();

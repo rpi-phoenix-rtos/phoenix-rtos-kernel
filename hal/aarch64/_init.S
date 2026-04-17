@@ -34,50 +34,6 @@
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
 
-#if defined(PLO_RPI_LED_DIAG) && (PLO_RPI_LED_DIAG != 0) && defined(PLO_RPI_GPIO_BASE_ADDRESS) && (PLO_RPI_GPIO_BASE_ADDRESS != 0)
-#define GPIO_GPFSEL4_OFFSET 0x10
-#define GPIO_GPSET1_OFFSET  0x20
-#define GPIO_GPCLR1_OFFSET  0x2c
-#define GPIO42_SHIFT        6
-#define GPIO42_MASK         (1 << 10)
-#define LED_DELAY_LOOPS     25000000
-
-.macro led_delay loops
-	ldr x5, =(\loops)
-990:
-	subs x5, x5, #1
-	b.ne 990b
-.endm
-
-.macro led_init
-	ldr x0, =PLO_RPI_GPIO_BASE_ADDRESS
-	ldr w1, [x0, #GPIO_GPFSEL4_OFFSET]
-	mov w2, #(7 << GPIO42_SHIFT)
-	bic w1, w1, w2
-	mov w2, #(1 << GPIO42_SHIFT)
-	orr w1, w1, w2
-	str w1, [x0, #GPIO_GPFSEL4_OFFSET]
-	mov w1, #GPIO42_MASK
-	str w1, [x0, #GPIO_GPCLR1_OFFSET]
-.endm
-
-.macro led_pulse count
-	mov x6, #\count
-	led_init
-	led_delay LED_DELAY_LOOPS * 3
-991:
-	mov w1, #GPIO42_MASK
-	str w1, [x0, #GPIO_GPSET1_OFFSET]
-	led_delay LED_DELAY_LOOPS
-	str w1, [x0, #GPIO_GPCLR1_OFFSET]
-	led_delay LED_DELAY_LOOPS
-	subs x6, x6, #1
-	b.ne 991b
-	led_delay LED_DELAY_LOOPS * 4
-.endm
-#endif
-
-
 .macro uart_putc imm
 991:
 	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
@@ -178,9 +134,6 @@
 .org 0
 _start:
 	uart_reinit_115200
-#if defined(PLO_RPI_LED_DIAG) && (PLO_RPI_LED_DIAG != 0) && defined(PLO_RPI_GPIO_BASE_ADDRESS) && (PLO_RPI_GPIO_BASE_ADDRESS != 0)
-	led_pulse 9
-#endif
         /* Assumptions:
          * x9 => PA of syspage from PLO */
         uart_putc 75

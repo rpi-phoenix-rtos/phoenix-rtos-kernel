@@ -26,10 +26,6 @@
 #include "test/test.h"
 #include "perf/perf.h"
 
-
-extern void hal_rpiDiagPulse(unsigned int stage);
-
-
 static struct {
 	vm_map_t kmap;
 	vm_object_t kernel;
@@ -114,7 +110,6 @@ int main(void)
 
 	syspage_init();
 	_hal_init();
-	hal_rpiDiagPulse(11u);
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
 	_usrv_init();
 
