@@ -313,7 +313,7 @@ _start:
 
 	/* Turn on MMU and caches with both TTBR0 identity mappings and TTBR1
 	 * higher-half kernel mappings already live. */
-	uart_tag2 88, 51
+	uart_tag2 51, 67
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 12)
 	orr x0, x0, #(1 << 2)
