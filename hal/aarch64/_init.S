@@ -33,6 +33,7 @@
 #define UARTLCRH_OFFSET 0x2c
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
+#define EARLY_UART_DEVICE_BLOCK_ATTRS 0x60000000000709
 
 .macro uart_putc imm
 991:
@@ -51,6 +52,15 @@
 	uart_putc \c1
 	uart_putc \c2
 	uart_putc 10
+.endm
+
+
+.macro early_vector slot
+	mov x18, #\slot
+	b _early_exception_common
+.rept 30
+	nop
+.endr
 .endm
 
 #if defined(PL011_TTY_CLOCK) && (PL011_TTY_CLOCK == 48000000u)
@@ -237,8 +247,22 @@ _start:
 	lsr x2, x9, #30
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
+	/* Map the 1 GB block containing PL011 so an early post-MMU exception
+	 * handler can still print through the physical UART path before the normal
+	 * kernel VBAR and full page-table setup are live. */
+	ldr x1, =PL011_TTY_BASE
+	lsr x2, x1, #30
+	ldr x3, =EARLY_UART_DEVICE_BLOCK_ATTRS
+	orr x1, x3, x2, lsl #30
+	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
 	uart_tag2 88, 50
+
+	adr x0, _early_vector_table
+	msr vbar_el1, x0
+	adrp x0, PMAP_COMMON_STACK
+	ldr x1, =SIZE_INITIAL_KSTACK
+	add sp, x0, x1
 
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
@@ -419,6 +443,83 @@ _fill_page_descr:
 	b.lo 1b
 	ret
 
+uart_putc_reg:
+1:
+	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
+	ldr w4, [x3]
+	tst w4, #UARTFR_TXFF
+	b.ne 1b
+	ldr x3, =PL011_TTY_BASE
+	str w0, [x3]
+	ret
+
+uart_puthex4:
+	and w0, w0, #0xf
+	cmp w0, #10
+	b.lo 1f
+	add w0, w0, #55
+	b uart_putc_reg
+1:
+	add w0, w0, #48
+	b uart_putc_reg
+
+uart_puthex64:
+	mov x2, x0
+	mov x1, #60
+1:
+	lsr x0, x2, x1
+	bl uart_puthex4
+	subs x1, x1, #4
+	b.pl 1b
+	ret
+
+_early_uart_print_tag:
+	/* x0 => pointer to a zero-terminated tag */
+	ldrb w1, [x0], #1
+	cbz w1, 1f
+	mov w0, w1
+	bl uart_putc_reg
+	b _early_uart_print_tag
+1:
+	ret
+
+_early_exception_common:
+	adrp x0, PMAP_COMMON_STACK
+	ldr x1, =SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+
+	mov w0, #10
+	bl uart_putc_reg
+	ldr x0, =_early_ex_tag
+	bl _early_uart_print_tag
+	mov x0, x18
+	bl uart_puthex64
+
+	mov w0, #10
+	bl uart_putc_reg
+	ldr x0, =_early_esr_tag
+	bl _early_uart_print_tag
+	mrs x0, esr_el1
+	bl uart_puthex64
+
+	mov w0, #10
+	bl uart_putc_reg
+	ldr x0, =_early_elr_tag
+	bl _early_uart_print_tag
+	mrs x0, elr_el1
+	bl uart_puthex64
+
+	mov w0, #10
+	bl uart_putc_reg
+	ldr x0, =_early_far_tag
+	bl _early_uart_print_tag
+	mrs x0, far_el1
+	bl uart_puthex64
+
+	mov w0, #10
+	bl uart_putc_reg
+	b .
+
 _inval_dcache_range:
 	/* Invalidate data-cache lines by VA over [x0, x1).
 	 * Assumes:
@@ -471,8 +572,60 @@ _set_up_vbar_and_stacks:
 .size _start, .-_start
 .ltorg
 
+
+.align 11
+_early_vector_table:
+.org (_early_vector_table + 0x000)
+	early_vector 0
+.org (_early_vector_table + 0x080)
+	early_vector 1
+.org (_early_vector_table + 0x100)
+	early_vector 2
+.org (_early_vector_table + 0x180)
+	early_vector 3
+.org (_early_vector_table + 0x200)
+	early_vector 4
+.org (_early_vector_table + 0x280)
+	early_vector 5
+.org (_early_vector_table + 0x300)
+	early_vector 6
+.org (_early_vector_table + 0x380)
+	early_vector 7
+.org (_early_vector_table + 0x400)
+	early_vector 8
+.org (_early_vector_table + 0x480)
+	early_vector 9
+.org (_early_vector_table + 0x500)
+	early_vector 10
+.org (_early_vector_table + 0x580)
+	early_vector 11
+.org (_early_vector_table + 0x600)
+	early_vector 12
+.org (_early_vector_table + 0x680)
+	early_vector 13
+.org (_early_vector_table + 0x700)
+	early_vector 14
+.org (_early_vector_table + 0x780)
+	early_vector 15
+
 _initNCpusFlag:
 	.word 1
+
+.align 4
+_early_ex_tag:
+	.asciz "EX="
+
+.align 4
+_early_esr_tag:
+	.asciz "ESR="
+
+.align 4
+_early_elr_tag:
+	.asciz "ELR="
+
+.align 4
+_early_far_tag:
+	.asciz "FAR="
 
 
 .align 4
