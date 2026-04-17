@@ -352,12 +352,21 @@ _core_0_virtual:
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
-	add x0, x0, x9
 1:
+	cmp x0, #8
+	b.lo 2f
 	ldr x3, [x9], #8
 	str x3, [x1], #8
-	cmp x9, x0
-	b.lo 1b
+	sub x0, x0, #8
+	cbnz x0, 1b
+	b 3f
+2:
+	cbz x0, 3f
+	ldrb w3, [x9], #1
+	strb w3, [x1], #1
+	sub x0, x0, #1
+	cbnz x0, 2b
+3:
 	uart_putc_virt 80
 
 	bl _set_up_vbar_and_stacks
