@@ -152,6 +152,7 @@
 #define PMAP_COMMON_SCRATCH_PAGE (pmap_common + (4 * SIZE_PAGE))
 #define PMAP_COMMON_STACK (pmap_common + (5 * SIZE_PAGE))
 #define VADDR_SYSPAGE (_hal_syspageCopied)
+#define SIZE_SYSPAGE_COPY (16 * SIZE_PAGE)
 
 .section .init, "ax"
 .global _start
@@ -327,30 +328,15 @@ _start:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
-	/* Ensure changes to translation tables are visible */
-	dsb ish
-	isb
-
-	/* Activate translation through ttbr1_el1 */
-	mrs x0, tcr_el1
-	bic x0, x0, #(1 << 23)
-	msr tcr_el1, x0
-	isb
-	uart_putc_virt 78
-
-	ldr x0, =_core_0_virtual
-	br x0
-
-_core_0_virtual:
-	uart_putc_virt 79
-	/* Copy syspage to the designated spot in virtual memory */
+	/* Copy syspage to its kernel backing while still executing in physical space. */
 	adrp x1, VADDR_SYSPAGE
 	add x1, x1, :lo12:VADDR_SYSPAGE
-	sub x2, x1, x9
+	ldr x2, =(VADDR_SYSPAGE)
+	sub x3, x2, x9
 	adrp x0, relOffs
-	str x2, [x0, #:lo12:relOffs]
+	str x3, [x0, #:lo12:relOffs]
 	adrp x0, hal_syspage
-	str x1, [x0, #:lo12:hal_syspage]
+	str x2, [x0, #:lo12:hal_syspage]
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
 1:
 	cmp x0, #8
@@ -367,6 +353,23 @@ _core_0_virtual:
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
+
+	/* Ensure changes to translation tables are visible */
+	dsb ish
+	isb
+
+	/* Activate translation through ttbr1_el1 */
+	mrs x0, tcr_el1
+	bic x0, x0, #(1 << 23)
+	msr tcr_el1, x0
+	isb
+	uart_putc_virt 78
+
+	ldr x0, =_core_0_virtual
+	br x0
+
+_core_0_virtual:
+	uart_putc_virt 79
 	uart_putc_virt 80
 
 	bl _set_up_vbar_and_stacks
@@ -511,5 +514,5 @@ hal_cpuInvalDataCacheAll:
 .section ".bss"
 .align 4
 _hal_syspageCopied:
-	.zero SIZE_PAGE
+	.zero SIZE_SYSPAGE_COPY
 .size _hal_syspageCopied, . - _hal_syspageCopied
