@@ -200,12 +200,12 @@ static void dtb_parseSOC(void *dtb, u32 si, u32 l)
 	}
 
 	if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#size-cells") == 0)) {
-		dtb_common.soc.sizeCells = ntoh32(*(u32 *)dtb);
-		return;
+	        dtb_common.soc.sizeCells = ntoh32(*(u32 *)dtb);
+	        return;
 	}
 
 	if (hal_strcmp(dtb_getString(si), "ranges") != 0) {
-		return;
+	        return;
 	}
 
 	tupleCells = dtb_common.soc.addressCells + dtb_common.rootAddressCells + dtb_common.soc.sizeCells;
@@ -247,40 +247,35 @@ static void dtb_parseCPU(void *dtb, u32 si, u32 l)
 
 static void dtb_parseInterruptController(void *dtb, u32 si, u32 l, int inSOC)
 {
-	u64 gicc, gicd;
-	u32 giccOffs;
-	u32 tupleCells;
+        u32 tupleCells;
 
-	if (hal_strcmp(dtb_getString(si), "reg") == 0) {
-		if ((inSOC != 0) && (dtb_common.soc.addressCells != 0U) && (dtb_common.soc.sizeCells != 0U)) {
-			tupleCells = dtb_common.soc.addressCells + dtb_common.soc.sizeCells;
-			if ((tupleCells != 0U) && (l >= (2U * tupleCells * sizeof(u32)))) {
-				if ((dtb_readCells(dtb, dtb_common.soc.addressCells, &dtb_common.apu_gic.gicd) == EOK) &&
-					(dtb_readCells(dtb + (tupleCells * sizeof(u32)), dtb_common.soc.addressCells, &dtb_common.apu_gic.gicc) == EOK)) {
-					(void)dtb_translateSocAddress(&dtb_common.apu_gic.gicd);
-					(void)dtb_translateSocAddress(&dtb_common.apu_gic.gicc);
-				}
-			}
-
-			return;
-		}
-
-		if (l >= 24U) {
-			/* The current ZynqMP path uses 12-byte tuples (64-bit address, 32-bit size),
-			 * while QEMU virt exposes 16-byte tuples (64-bit address, 64-bit size).
-			 */
-			giccOffs = (l >= 32U) ? 16U : 12U;
-
-			hal_memcpy(&gicd, dtb + 0, 8);
-			gicd = ntoh64(gicd);
-			hal_memcpy(&gicc, dtb + giccOffs, 8);
-			gicc = ntoh64(gicc);
-			dtb_common.apu_gic.gicd = gicd;
-			dtb_common.apu_gic.gicc = gicc;
-		}
-	}
+        if (hal_strcmp(dtb_getString(si), "reg") == 0) {
+                if ((inSOC != 0) && (dtb_common.soc.addressCells != 0U) && (dtb_common.soc.sizeCells != 0U)) {
+                        tupleCells = dtb_common.soc.addressCells + dtb_common.soc.sizeCells;
+                        if ((tupleCells != 0U) && (l >= (2U * tupleCells * sizeof(u32)))) {
+                                if ((dtb_readCells(dtb, dtb_common.soc.addressCells, &dtb_common.apu_gic.gicd) == EOK) &&
+                                        (dtb_readCells(dtb + (tupleCells * sizeof(u32)), dtb_common.soc.addressCells, &dtb_common.apu_gic.gicc) == EOK)) {
+                                        (void)dtb_translateSocAddress(&dtb_common.apu_gic.gicd);
+                                        (void)dtb_translateSocAddress(&dtb_common.apu_gic.gicc);
+                                }
+                        }
+                }
+                else {
+                        if (l >= 16U) {
+                                (void)dtb_readCells(dtb, 2, &dtb_common.apu_gic.gicd);
+                                if (l >= 32U) {
+                                        (void)dtb_readCells(dtb + 16, 2, &dtb_common.apu_gic.gicc);
+                                }
+                                else if (l >= 24U) {
+                                        (void)dtb_readCells(dtb + 12, 2, &dtb_common.apu_gic.gicc);
+                                }
+                                else {
+                                        /* Fallback for old ZynqMP or other layouts if needed */
+                                }
+                        }
+                }
+        }
 }
-
 
 static void dtb_parseSerial(void *dtb, u32 si, u32 l, int inSOC)
 {

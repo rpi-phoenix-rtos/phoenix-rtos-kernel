@@ -842,9 +842,10 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 	pmap_common.mem.kernelsz = CEIL_PAGE(&_end) - (addr_t)VADDR_KERNEL;
 	pmap_common.mem.vkernelEnd = CEIL_PAGE(&_end);
 
+	hal_tlbInvalAll_IS();
+
 	_dtb_init(dtbStart);
 	dtb_getMemory(&banks, &nBanks);
-
 	if (nBanks == 0) {
 	        while (1) {
 	                asm volatile("wfe");

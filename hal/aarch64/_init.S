@@ -229,10 +229,11 @@ _start:
 
 	/* Note: ADRP instruction will generate a PC-relative address.
 	 * Because now PC is in physical memory, the resulting address will also be physical */
-	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel
-	 * Note that there may be garbage data in this table - we will take care of it later. */
+	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel */
 	adrp x0, PMAP_COMMON_SCRATCH_TT
+	bl _fill_page_zero
 	/* Map syspage->pkernel ~ (syspage->pkernel + 1 GB) VA => syspage->pkernel ~ (syspage->pkernel + 1 GB) PA */
+
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
 	mov x3, #0xf01 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, not global */
 	mov x4, #(1 << 30)
