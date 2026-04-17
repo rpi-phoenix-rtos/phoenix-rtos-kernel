@@ -152,7 +152,6 @@
 #define PMAP_COMMON_SCRATCH_PAGE (pmap_common + (4 * SIZE_PAGE))
 #define PMAP_COMMON_STACK (pmap_common + (5 * SIZE_PAGE))
 #define VADDR_SYSPAGE (_hal_syspageCopied)
-#define SIZE_SYSPAGE_COPY (16 * SIZE_PAGE)
 
 .section .init, "ax"
 .global _start
@@ -517,5 +516,5 @@ hal_cpuInvalDataCacheAll:
 .section ".bss"
 .align 4
 _hal_syspageCopied:
-	.zero SIZE_SYSPAGE_COPY
+	.zero SIZE_PAGE
 .size _hal_syspageCopied, . - _hal_syspageCopied
