@@ -226,6 +226,10 @@ _start:
 	mrs x1, id_aa64mmfr0_el1
 	and x1, x1, #0x7
 	orr x0, x0, x1, lsl #32
+	/* Enable TTBR1 translation before MMU-on and keep TTBR0 as the active
+	 * identity map until we branch into the higher-half kernel, matching the
+	 * Linux arm64 early-switch model more closely. */
+	bic x0, x0, #(1 << 23)
 	msr tcr_el1, x0
 
 	ldr x0, =(MAIR_EL1_VALUE)
@@ -256,28 +260,6 @@ _start:
 
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
-
-	/* Turn on MMU and caches */
-	uart_tag2 88, 51
-	dsb ish
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 12)
-	orr x0, x0, #(1 << 2)
-	orr x0, x0, #(1 << 0)
-	msr sctlr_el1, x0
-	isb
-	/* Match Linux's arm64 early-MMU sequence: discard any instructions
-	 * speculatively fetched before the new translation regime became active. */
-	ic iallu
-	dsb nsh
-	isb
-
-	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
-	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
-
-	/* Zero out an additional page that will be used a bit later */
-	adrp x0, PMAP_COMMON_SCRATCH_PAGE
-	bl _fill_page_zero
 
 	/* Initialize counter of started CPUs.
 	 * The counter starts out uninitialized. We want to initialize it only once by only one core -
@@ -331,14 +313,27 @@ _start:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
+	/* Zero out an additional page that will be used a bit later. */
+	adrp x0, PMAP_COMMON_SCRATCH_PAGE
+	bl _fill_page_zero
+
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
 
-	/* Activate translation through ttbr1_el1 */
-	mrs x0, tcr_el1
-	bic x0, x0, #(1 << 23)
-	msr tcr_el1, x0
+	/* Turn on MMU and caches with both TTBR0 identity mappings and TTBR1
+	 * higher-half kernel mappings already live. */
+	uart_tag2 88, 51
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 12)
+	orr x0, x0, #(1 << 2)
+	orr x0, x0, #(1 << 0)
+	msr sctlr_el1, x0
+	isb
+	/* Match Linux's arm64 early-MMU sequence: discard any instructions
+	 * speculatively fetched before the new translation regime became active. */
+	ic iallu
+	dsb nsh
 	isb
 	uart_putc_virt 78
 
