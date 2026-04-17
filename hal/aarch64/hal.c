@@ -169,7 +169,7 @@ __attribute__((section(".init"))) void _hal_init(void)
 	addr_t dtbStart;
 	addr_t dtbEnd;
 
-	hal_rpiDiagPulse(9u);
+	hal_rpiDiagPulse(10u);
 	hal_common.started = 0;
 	schedulerLocked = 0;
 	_hal_spinlockInit();

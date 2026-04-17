@@ -28,6 +28,10 @@
 
 
 #define UARTFR_OFFSET 0x18
+#define UARTIBRD_OFFSET 0x24
+#define UARTFBRD_OFFSET 0x28
+#define UARTLCRH_OFFSET 0x2c
+#define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
 
 #if defined(PLO_RPI_LED_DIAG) && (PLO_RPI_LED_DIAG != 0) && defined(PLO_RPI_GPIO_BASE_ADDRESS) && (PLO_RPI_GPIO_BASE_ADDRESS != 0)
@@ -84,6 +88,27 @@
 	mov w4, #\imm
 	str w4, [x3]
 .endm
+
+#if defined(PL011_TTY_CLOCK) && (PL011_TTY_CLOCK == 48000000u)
+.macro uart_reinit_115200
+	ldr x3, =PL011_TTY_BASE
+	mov w4, wzr
+	str w4, [x3, #UARTCR_OFFSET]
+	mov w4, #26
+	str w4, [x3, #UARTIBRD_OFFSET]
+	mov w4, #3
+	str w4, [x3, #UARTFBRD_OFFSET]
+	mov w4, #0x70
+	str w4, [x3, #UARTLCRH_OFFSET]
+	mov w4, #0x301
+	str w4, [x3, #UARTCR_OFFSET]
+	dsb sy
+	isb
+.endm
+#else
+.macro uart_reinit_115200
+.endm
+#endif
 
 
 /* 16-bit ASID
@@ -152,8 +177,9 @@
 
 .org 0
 _start:
+	uart_reinit_115200
 #if defined(PLO_RPI_LED_DIAG) && (PLO_RPI_LED_DIAG != 0) && defined(PLO_RPI_GPIO_BASE_ADDRESS) && (PLO_RPI_GPIO_BASE_ADDRESS != 0)
-	led_pulse 8
+	led_pulse 9
 #endif
         /* Assumptions:
          * x9 => PA of syspage from PLO */

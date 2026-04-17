@@ -114,7 +114,7 @@ int main(void)
 
 	syspage_init();
 	_hal_init();
-	hal_rpiDiagPulse(10u);
+	hal_rpiDiagPulse(11u);
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
 	_usrv_init();
 
