@@ -317,6 +317,20 @@ _start:
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
 	bl _fill_page_zero
 
+	/* Linux arm64 explicitly invalidates page tables populated with the MMU
+	 * disabled to discard any speculatively loaded cache lines before the
+	 * page-table walker starts using them. Do the same for the contiguous
+	 * early kernel MMU region:
+	 *   PMAP_COMMON_KERNEL_TTL2
+	 *   PMAP_COMMON_KERNEL_TTL3
+	 *   PMAP_COMMON_DEVICES_TTL3
+	 *   PMAP_COMMON_SCRATCH_TT
+	 *   PMAP_COMMON_SCRATCH_PAGE
+	 */
+	adrp x0, PMAP_COMMON_KERNEL_TTL2
+	adrp x1, PMAP_COMMON_STACK
+	bl _inval_dcache_range
+
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
@@ -432,6 +446,28 @@ _fill_page_descr:
 	add x2, x2, #(2 * SIZE_PAGE)
 	cmp x0, x3
 	b.lo 1b
+	ret
+
+_inval_dcache_range:
+	/* Invalidate data-cache lines by VA over [x0, x1).
+	 * Assumes:
+	 *  - MMU is disabled
+	 *  - x0 and x1 are already page-aligned
+	 * Clobbers x0, x1, x2, x3
+	 */
+	dmb sy
+	mrs x2, ctr_el0
+	lsr x2, x2, #16
+	and x2, x2, #0xf
+	mov x3, #4
+	lsl x2, x3, x2
+1:
+	dc ivac, x0
+	add x0, x0, x2
+	cmp x0, x1
+	b.lo 1b
+	dsb sy
+	isb
 	ret
 
 _set_up_vbar_and_stacks:
