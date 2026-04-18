@@ -229,25 +229,17 @@ _start:
 
 	/* Note: ADRP instruction will generate a PC-relative address.
 	 * Because now PC is in physical memory, the resulting address will also be physical */
-	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel */
+	/* Create temporary TTBR0 identity map for the first MMU-on bootstrap.
+	 * Keep this deterministic instead of deriving it from syspage->pkernel:
+	 * - map the first 1 GB of low physical RAM as normal cacheable memory
+	 * - map the 1 GB block containing the BCM2711 peripherals as device memory
+	 * This matches the simpler bootstrap model used by common Pi 4 references
+	 * more closely than the older sparse map built around syspage->pkernel. */
 	adrp x0, PMAP_COMMON_SCRATCH_TT
 	bl _fill_page_zero
-	/* Map syspage->pkernel ~ (syspage->pkernel + 1 GB) VA => syspage->pkernel ~ (syspage->pkernel + 1 GB) PA */
-
-	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
 	mov x3, #0xf01 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, not global */
-	mov x4, #(1 << 30)
-	lsr x2, x1, #30
-	orr x1, x3, x2, lsl #30
-	str x1, [x0, x2, lsl 3]
-	add x1, x1, x4
-	add x2, x2, #1
-	str x1, [x0, x2, lsl 3]
-
-	/* Map syspage VA => syspage PA */
-	lsr x2, x9, #30
-	orr x1, x3, x2, lsl #30
-	str x1, [x0, x2, lsl 3]
+	mov x1, x3
+	str x1, [x0]
 	/* Map the 1 GB block containing PL011 so an early post-MMU exception
 	 * handler can still print through the physical UART path before the normal
 	 * kernel VBAR and full page-table setup are live. */
@@ -336,11 +328,8 @@ _start:
 	dsb ish
 	isb
 
-	/* Turn on MMU and caches while still executing through the TTBR0
-	 * identity-mapped bootstrap path. Keep TTBR1 disabled at this point and
-	 * enable it only once the low-alias continuation is live. This matches the
-	 * simpler Linux/Circle bring-up model more closely than immediately
-	 * branching into the higher-half alias at the first MMU-on transition. */
+	/* Turn on MMU and caches with both TTBR0 identity mappings and TTBR1
+	 * higher-half kernel mappings already live. */
 	uart_tag2 51, 67
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 12)
@@ -352,17 +341,6 @@ _start:
 	 * speculatively fetched before the new translation regime became active. */
 	ic iallu
 	dsb nsh
-	isb
-
-	adr x0, _core_0_idmap
-	br x0
-
-_core_0_idmap:
-	/* Activate translation through TTBR1 only after the MMU is already on and
-	 * execution is stable in the identity-mapped alias. */
-	mrs x0, tcr_el1
-	bic x0, x0, #(1 << 23)
-	msr tcr_el1, x0
 	isb
 
 	ldr x0, =_core_0_virtual
