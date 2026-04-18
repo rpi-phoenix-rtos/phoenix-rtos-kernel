@@ -336,8 +336,11 @@ _start:
 	dsb ish
 	isb
 
-	/* Turn on MMU and caches with both TTBR0 identity mappings and TTBR1
-	 * higher-half kernel mappings already live. */
+	/* Turn on MMU and caches while still executing through the TTBR0
+	 * identity-mapped bootstrap path. Keep TTBR1 disabled at this point and
+	 * enable it only once the low-alias continuation is live. This matches the
+	 * simpler Linux/Circle bring-up model more closely than immediately
+	 * branching into the higher-half alias at the first MMU-on transition. */
 	uart_tag2 51, 67
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 12)
@@ -349,6 +352,17 @@ _start:
 	 * speculatively fetched before the new translation regime became active. */
 	ic iallu
 	dsb nsh
+	isb
+
+	adr x0, _core_0_idmap
+	br x0
+
+_core_0_idmap:
+	/* Activate translation through TTBR1 only after the MMU is already on and
+	 * execution is stable in the identity-mapped alias. */
+	mrs x0, tcr_el1
+	bic x0, x0, #(1 << 23)
+	msr tcr_el1, x0
 	isb
 
 	ldr x0, =_core_0_virtual
