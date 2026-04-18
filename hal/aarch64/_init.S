@@ -349,14 +349,20 @@ _core_0_virtual:
 	sub x2, x1, x9
 	adrp x0, relOffs
 	str x2, [x0, #:lo12:relOffs]
+	uart_putc_virt 85
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
+	uart_putc_virt 86
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
+	uart_putc_virt 87
+	cbz x0, 3f
+	uart_putc_virt 90
 1:
 	cmp x0, #8
 	b.lo 2f
 	ldr x3, [x9], #8
 	str x3, [x1], #8
+	uart_putc_virt 89
 	sub x0, x0, #8
 	cbnz x0, 1b
 	b 3f
