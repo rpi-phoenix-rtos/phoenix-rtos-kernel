@@ -33,7 +33,7 @@
 #define UARTLCRH_OFFSET 0x2c
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
-#define EARLY_UART_DEVICE_BLOCK_ATTRS 0x60000000000709
+#define EARLY_UART_DEVICE_DESCR 0x6000000000070b
 
 .macro uart_putc imm
 991:
@@ -47,20 +47,28 @@
 .endm
 
 
+#if defined(PL011_TTY_EARLY_VADDR)
+.macro uart_putc_virt imm
+992:
+	ldr x3, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
+	ldr w4, [x3]
+	tst w4, #UARTFR_TXFF
+	b.ne 992b
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	mov w4, #\imm
+	str w4, [x3]
+.endm
+#else
+.macro uart_putc_virt imm
+.endm
+#endif
+
+
 .macro uart_tag2 c1 c2
 	uart_putc 10
 	uart_putc \c1
 	uart_putc \c2
 	uart_putc 10
-.endm
-
-
-.macro early_vector slot
-	mov x18, #\slot
-	b _early_exception_common
-.rept 30
-	nop
-.endr
 .endm
 
 #if defined(PL011_TTY_CLOCK) && (PL011_TTY_CLOCK == 48000000u)
@@ -218,10 +226,6 @@ _start:
 	mrs x1, id_aa64mmfr0_el1
 	and x1, x1, #0x7
 	orr x0, x0, x1, lsl #32
-	/* Enable TTBR1 translation before MMU-on and keep TTBR0 as the active
-	 * identity map until we branch into the higher-half kernel, matching the
-	 * Linux arm64 early-switch model more closely. */
-	bic x0, x0, #(1 << 23)
 	msr tcr_el1, x0
 
 	ldr x0, =(MAIR_EL1_VALUE)
@@ -229,36 +233,47 @@ _start:
 
 	/* Note: ADRP instruction will generate a PC-relative address.
 	 * Because now PC is in physical memory, the resulting address will also be physical */
-	/* Create temporary TTBR0 identity map for the first MMU-on bootstrap.
-	 * Keep this deterministic instead of deriving it from syspage->pkernel:
-	 * - map the first 1 GB of low physical RAM as normal cacheable memory
-	 * - map the 1 GB block containing the BCM2711 peripherals as device memory
-	 * This matches the simpler bootstrap model used by common Pi 4 references
-	 * more closely than the older sparse map built around syspage->pkernel. */
+	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel
+	 * Note that there may be garbage data in this table - we will take care of it later. */
 	adrp x0, PMAP_COMMON_SCRATCH_TT
-	bl _fill_page_zero
+	/* Map syspage->pkernel ~ (syspage->pkernel + 1 GB) VA => syspage->pkernel ~ (syspage->pkernel + 1 GB) PA */
+	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
 	mov x3, #0xf01 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, not global */
-	mov x1, x3
-	str x1, [x0]
-	/* Map the 1 GB block containing PL011 so an early post-MMU exception
-	 * handler can still print through the physical UART path before the normal
-	 * kernel VBAR and full page-table setup are live. */
-	ldr x1, =PL011_TTY_BASE
+	mov x4, #(1 << 30)
 	lsr x2, x1, #30
-	ldr x3, =EARLY_UART_DEVICE_BLOCK_ATTRS
+	orr x1, x3, x2, lsl #30
+	str x1, [x0, x2, lsl 3]
+	add x1, x1, x4
+	add x2, x2, #1
+	str x1, [x0, x2, lsl 3]
+
+	/* Map syspage VA => syspage PA */
+	lsr x2, x9, #30
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
 	uart_tag2 88, 50
 
-	adr x0, _early_vector_table
-	msr vbar_el1, x0
-	adrp x0, PMAP_COMMON_STACK
-	ldr x1, =SIZE_INITIAL_KSTACK
-	add sp, x0, x1
-
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
+
+	/* Turn on MMU and caches */
+	uart_tag2 88, 51
+	dsb ish
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 12)
+	orr x0, x0, #(1 << 2)
+	orr x0, x0, #(1 << 0)
+	msr sctlr_el1, x0
+	dsb ish
+	isb
+
+	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
+	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
+
+	/* Zero out an additional page that will be used a bit later */
+	adrp x0, PMAP_COMMON_SCRATCH_PAGE
+	bl _fill_page_zero
 
 	/* Initialize counter of started CPUs.
 	 * The counter starts out uninitialized. We want to initialize it only once by only one core -
@@ -299,6 +314,12 @@ _start:
 	/* Map TTL3 (VADDR_MAX - 2 MB) ~ VADDR_MAX => no access */
 	bl _fill_page_zero
 
+#if defined(PL011_TTY_EARLY_VADDR)
+	/* Reserve the first device TTL3 entry for a temporary post-MMU PL011 probe. */
+	ldr x1, =(PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR)
+	str x1, [x0]
+#endif
+
 	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
@@ -306,47 +327,22 @@ _start:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
-	/* Zero out an additional page that will be used a bit later. */
-	adrp x0, PMAP_COMMON_SCRATCH_PAGE
-	bl _fill_page_zero
-
-	/* Linux arm64 explicitly invalidates page tables populated with the MMU
-	 * disabled to discard any speculatively loaded cache lines before the
-	 * page-table walker starts using them. Do the same for the contiguous
-	 * early kernel MMU region:
-	 *   PMAP_COMMON_KERNEL_TTL2
-	 *   PMAP_COMMON_KERNEL_TTL3
-	 *   PMAP_COMMON_DEVICES_TTL3
-	 *   PMAP_COMMON_SCRATCH_TT
-	 *   PMAP_COMMON_SCRATCH_PAGE
-	 */
-	adrp x0, PMAP_COMMON_KERNEL_TTL2
-	adrp x1, PMAP_COMMON_STACK
-	bl _inval_dcache_range
-
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
 
-	/* Turn on MMU and caches with both TTBR0 identity mappings and TTBR1
-	 * higher-half kernel mappings already live. */
-	uart_tag2 51, 67
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 12)
-	orr x0, x0, #(1 << 2)
-	orr x0, x0, #(1 << 0)
-	msr sctlr_el1, x0
+	/* Activate translation through ttbr1_el1 */
+	mrs x0, tcr_el1
+	bic x0, x0, #(1 << 23)
+	msr tcr_el1, x0
 	isb
-	/* Match Linux's arm64 early-MMU sequence: discard any instructions
-	 * speculatively fetched before the new translation regime became active. */
-	ic iallu
-	dsb nsh
-	isb
+	uart_putc_virt 78
 
 	ldr x0, =_core_0_virtual
 	br x0
 
 _core_0_virtual:
+	uart_putc_virt 79
 	/* Copy syspage to the designated spot in virtual memory */
 	adrp x1, VADDR_SYSPAGE
 	add x1, x1, :lo12:VADDR_SYSPAGE
@@ -371,8 +367,11 @@ _core_0_virtual:
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
+	uart_putc_virt 80
 
 	bl _set_up_vbar_and_stacks
+	uart_putc_virt 81
+	uart_putc_virt 82
 	b main
 
 
@@ -436,105 +435,6 @@ _fill_page_descr:
 	b.lo 1b
 	ret
 
-uart_putc_reg:
-1:
-	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
-	ldr w4, [x3]
-	tst w4, #UARTFR_TXFF
-	b.ne 1b
-	ldr x3, =PL011_TTY_BASE
-	str w0, [x3]
-	ret
-
-uart_puthex4:
-	and w0, w0, #0xf
-	cmp w0, #10
-	b.lo 1f
-	add w0, w0, #55
-	b uart_putc_reg
-1:
-	add w0, w0, #48
-	b uart_putc_reg
-
-uart_puthex64:
-	mov x2, x0
-	mov x1, #60
-1:
-	lsr x0, x2, x1
-	bl uart_puthex4
-	subs x1, x1, #4
-	b.pl 1b
-	ret
-
-_early_uart_print_tag:
-	/* x0 => pointer to a zero-terminated tag */
-	ldrb w1, [x0], #1
-	cbz w1, 1f
-	mov w0, w1
-	bl uart_putc_reg
-	b _early_uart_print_tag
-1:
-	ret
-
-_early_exception_common:
-	adrp x0, PMAP_COMMON_STACK
-	ldr x1, =SIZE_INITIAL_KSTACK
-	add sp, x0, x1
-
-	mov w0, #10
-	bl uart_putc_reg
-	ldr x0, =_early_ex_tag
-	bl _early_uart_print_tag
-	mov x0, x18
-	bl uart_puthex64
-
-	mov w0, #10
-	bl uart_putc_reg
-	ldr x0, =_early_esr_tag
-	bl _early_uart_print_tag
-	mrs x0, esr_el1
-	bl uart_puthex64
-
-	mov w0, #10
-	bl uart_putc_reg
-	ldr x0, =_early_elr_tag
-	bl _early_uart_print_tag
-	mrs x0, elr_el1
-	bl uart_puthex64
-
-	mov w0, #10
-	bl uart_putc_reg
-	ldr x0, =_early_far_tag
-	bl _early_uart_print_tag
-	mrs x0, far_el1
-	bl uart_puthex64
-
-	mov w0, #10
-	bl uart_putc_reg
-	b .
-
-_inval_dcache_range:
-	/* Invalidate data-cache lines by VA over [x0, x1).
-	 * Assumes:
-	 *  - MMU is disabled
-	 *  - x0 and x1 are already page-aligned
-	 * Clobbers x0, x1, x2, x3
-	 */
-	dmb sy
-	mrs x2, ctr_el0
-	lsr x2, x2, #16
-	and x2, x2, #0xf
-	mov x3, #4
-	lsl x2, x3, x2
-1:
-	dc ivac, x0
-	add x0, x0, x2
-	cmp x0, x1
-	b.lo 1b
-	dsb sy
-	isb
-	ret
-
 _set_up_vbar_and_stacks:
 	/* Assumptions:
 	 * Running in kernel virtual memory (above VADDR_KERNEL)
@@ -565,60 +465,8 @@ _set_up_vbar_and_stacks:
 .size _start, .-_start
 .ltorg
 
-
-.align 11
-_early_vector_table:
-.org (_early_vector_table + 0x000)
-	early_vector 0
-.org (_early_vector_table + 0x080)
-	early_vector 1
-.org (_early_vector_table + 0x100)
-	early_vector 2
-.org (_early_vector_table + 0x180)
-	early_vector 3
-.org (_early_vector_table + 0x200)
-	early_vector 4
-.org (_early_vector_table + 0x280)
-	early_vector 5
-.org (_early_vector_table + 0x300)
-	early_vector 6
-.org (_early_vector_table + 0x380)
-	early_vector 7
-.org (_early_vector_table + 0x400)
-	early_vector 8
-.org (_early_vector_table + 0x480)
-	early_vector 9
-.org (_early_vector_table + 0x500)
-	early_vector 10
-.org (_early_vector_table + 0x580)
-	early_vector 11
-.org (_early_vector_table + 0x600)
-	early_vector 12
-.org (_early_vector_table + 0x680)
-	early_vector 13
-.org (_early_vector_table + 0x700)
-	early_vector 14
-.org (_early_vector_table + 0x780)
-	early_vector 15
-
 _initNCpusFlag:
 	.word 1
-
-.align 4
-_early_ex_tag:
-	.asciz "EX="
-
-.align 4
-_early_esr_tag:
-	.asciz "ESR="
-
-.align 4
-_early_elr_tag:
-	.asciz "ELR="
-
-.align 4
-_early_far_tag:
-	.asciz "FAR="
 
 
 .align 4
