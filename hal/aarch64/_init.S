@@ -34,6 +34,7 @@
 #define UARTCR_OFFSET 0x30
 #define UARTFR_TXFF   (1 << 5)
 #define EARLY_UART_DEVICE_DESCR 0x6000000000070b
+#define EARLY_UART_DEVICE_BLOCK 0x60000000000709
 
 .macro uart_putc imm
 991:
@@ -70,6 +71,15 @@
 	uart_putc \c2
 	uart_putc 10
 .endm
+
+.macro early_vector slot
+        mov x18, #\slot
+        b _early_exception_common
+.rept 30
+        nop
+.endr
+.endm
+
 
 #if defined(PL011_TTY_CLOCK) && (PL011_TTY_CLOCK == 48000000u)
 .macro uart_reinit_115200
@@ -109,23 +119,22 @@
  * * Inner cacheable
  * * Enable translation through TTBR0
  * * 512 GB virtual address range */
-#define TCR_EL1_VALUE ( \
-	(1 << 36) | \
-	(2 << 30) | \
-	(3 << 28) | \
-	(1 << 26) | \
-	(1 << 24) | \
-	(1 << 23) | \
-	(0 << 22) | \
-	(34 << 16) | \
-	(0 << 14) | \
-	(3 << 12) | \
-	(1 << 10) | \
-	(1 << 8) | \
-	(0 << 7) | \
-	(25 << 0) \
-)
-
+ #define TCR_EL1_VALUE ( \
+        (1 << 36) | \
+        (2 << 30) | \
+        (0 << 28) | \
+        (1 << 26) | \
+        (1 << 24) | \
+        (1 << 23) | \
+        (0 << 22) | \
+        (34 << 16) | \
+        (0 << 14) | \
+        (0 << 12) | \
+        (1 << 10) | \
+        (1 << 8) | \
+        (0 << 7) | \
+        (25 << 0) \
+ )
 /* Index 0: Normal memory, inner and outer cacheable, write-back, non-transient read-allocate, write-allocate
  * Index 1: Normal memory, inner and outer non-cacheable
  * Index 2: Device memory, Gathering, re-ordering disabled, early write acknowledge enabled (equiv. to AArch32 "Device" memory)
@@ -206,13 +215,16 @@ _start:
 
 	uart_putc 76
 
-#ifdef __TARGET_AARCH64A53
-	/* Enable SMP */
-	mrs x0, s3_1_c15_c2_1 /* CPUECTLR_EL1 */
-	orr x0, x0, #(0x1 << 6)
-	msr s3_1_c15_c2_1, x0
+#if defined(__TARGET_AARCH64A53) || defined(__TARGET_AARCH64A72)
+        /* Enable SMP */
+        mrs x0, s3_1_c15_c2_1 /* CPUECTLR_EL1 */
+        orr x0, x0, #(0x1 << 6)
+        msr s3_1_c15_c2_1, x0
+#endif
 
-	/* L1 Data prefetch control - 5, Enable device split throttle, 2 independent data prefetch streams */
+#ifdef __TARGET_AARCH64A53
+        /* L1 Data prefetch control - 5, Enable device split throttle, 2 independent data prefetch streams */
+
 	/* Set ENDCCASCI bit in CPUACTLR_EL1 register - needed due to Cortex-A53 erratum #855873 */
 	ldr	x0, =0x1000080ca000
 	msr	s3_1_c15_c2_0, x0 /* CPUACTLR_EL1 */
@@ -233,10 +245,11 @@ _start:
 
 	/* Note: ADRP instruction will generate a PC-relative address.
 	 * Because now PC is in physical memory, the resulting address will also be physical */
-	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel
-	 * Note that there may be garbage data in this table - we will take care of it later. */
+	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel */
 	adrp x0, PMAP_COMMON_SCRATCH_TT
+	bl _fill_page_zero
 	/* Map syspage->pkernel ~ (syspage->pkernel + 1 GB) VA => syspage->pkernel ~ (syspage->pkernel + 1 GB) PA */
+
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
 	mov x3, #0xf01 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, not global */
 	mov x4, #(1 << 30)
@@ -251,11 +264,27 @@ _start:
 	lsr x2, x9, #30
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
+
+	/* Map the 1 GB block containing PL011 so an early post-MMU exception
+	 * handler can still print through the physical UART path before the normal
+	 * kernel VBAR and full page-table setup are live. */
+	ldr x1, =PL011_TTY_BASE
+	lsr x2, x1, #30
+	ldr x3, =EARLY_UART_DEVICE_BLOCK
+	orr x1, x3, x2, lsl #30
+	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
 	uart_tag2 88, 50
 
+	adr x0, _early_vector_table
+	msr vbar_el1, x0
+	adrp x0, PMAP_COMMON_STACK
+	ldr x1, =SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
+
 
 	/* Turn on MMU and caches */
 	uart_tag2 88, 51
@@ -463,11 +492,139 @@ _set_up_vbar_and_stacks:
 	ret
 
 .size _start, .-_start
+uart_putc_reg:
+1:
+        ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
+        ldr w4, [x3]
+        tst w4, #UARTFR_TXFF
+        b.ne 1b
+        ldr x3, =PL011_TTY_BASE
+        str w0, [x3]
+        ret
+
+uart_puthex4:
+        and w0, w0, #0xf
+        cmp w0, #10
+        b.lo 1f
+        add w0, w0, #55
+        b uart_putc_reg
+1:
+        add w0, w0, #48
+        b uart_putc_reg
+
+uart_puthex64:
+        mov x2, x0
+        mov x1, #60
+1:
+        lsr x0, x2, x1
+        bl uart_puthex4
+        subs x1, x1, #4
+        b.pl 1b
+        ret
+
+_early_uart_print_tag:
+        /* x0 => pointer to a zero-terminated tag */
+        ldrb w1, [x0], #1
+        cbz w1, 1f
+        mov w0, w1
+        bl uart_putc_reg
+        b _early_uart_print_tag
+1:
+        ret
+
+_early_exception_common:
+        adrp x0, PMAP_COMMON_STACK
+        ldr x1, =SIZE_INITIAL_KSTACK
+        add sp, x0, x1
+
+        mov w0, #10
+        bl uart_putc_reg
+        ldr x0, =_early_ex_tag
+        bl _early_uart_print_tag
+        mov x0, x18
+        bl uart_puthex64
+
+        mov w0, #10
+        bl uart_putc_reg
+        ldr x0, =_early_esr_tag
+        bl _early_uart_print_tag
+        mrs x0, esr_el1
+        bl uart_puthex64
+
+        mov w0, #10
+        bl uart_putc_reg
+        ldr x0, =_early_elr_tag
+        bl _early_uart_print_tag
+        mrs x0, elr_el1
+        bl uart_puthex64
+
+        mov w0, #10
+        bl uart_putc_reg
+        ldr x0, =_early_far_tag
+        bl _early_uart_print_tag
+        mrs x0, far_el1
+        bl uart_puthex64
+
+        mov w0, #10
+        bl uart_putc_reg
+        b .
+
+
+.align 11
+_early_vector_table:
+.org (_early_vector_table + 0x000)
+        early_vector 0
+.org (_early_vector_table + 0x080)
+        early_vector 1
+.org (_early_vector_table + 0x100)
+        early_vector 2
+.org (_early_vector_table + 0x180)
+        early_vector 3
+.org (_early_vector_table + 0x200)
+        early_vector 4
+.org (_early_vector_table + 0x280)
+        early_vector 5
+.org (_early_vector_table + 0x300)
+        early_vector 6
+.org (_early_vector_table + 0x380)
+        early_vector 7
+.org (_early_vector_table + 0x400)
+        early_vector 8
+.org (_early_vector_table + 0x480)
+        early_vector 9
+.org (_early_vector_table + 0x500)
+        early_vector 10
+.org (_early_vector_table + 0x580)
+        early_vector 11
+.org (_early_vector_table + 0x600)
+        early_vector 12
+.org (_early_vector_table + 0x680)
+        early_vector 13
+.org (_early_vector_table + 0x700)
+        early_vector 14
+.org (_early_vector_table + 0x780)
+        early_vector 15
+
+.align 4
+_early_ex_tag:
+        .asciz "EX="
+
+.align 4
+_early_esr_tag:
+        .asciz "ESR="
+
+.align 4
+_early_elr_tag:
+        .asciz "ELR="
+
+.align 4
+_early_far_tag:
+        .asciz "FAR="
+
 .ltorg
 
 _initNCpusFlag:
-	.word 1
-
+        .word 1
 
 .align 4
 .globl hal_cpuInvalDataCacheAll
