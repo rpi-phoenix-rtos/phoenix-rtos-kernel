@@ -108,6 +108,21 @@ static void main_initthr(void *unused)
 int main(void)
 {
 	char s[128];
+	
+	/* DEBUG: Send marker immediately upon entry */
+	/* Use the correct Raspberry Pi 4 UART base address */
+	volatile unsigned int *uart = (volatile unsigned int *)0xfe201000;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xfe201018;
+	
+	/* Wait for UART to be ready */
+	while (*uartfr & 0x20) {}
+	
+	/* Send 'c' marker - we reached main()! */
+	*uart = 'c';
+	
+	/* Send additional markers to confirm execution */
+	while (*uartfr & 0x20) {}
+	*uart = 'd'; /* d marker - main() executing */
 
 	syspage_init();
 	_hal_init();
