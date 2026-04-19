@@ -842,6 +842,12 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 	pmap_common.mem.kernelsz = CEIL_PAGE(&_end) - (addr_t)VADDR_KERNEL;
 	pmap_common.mem.vkernelEnd = CEIL_PAGE(&_end);
 
+	/* Simple debug marker before TLB invalidation */
+	volatile unsigned int *uart = (volatile unsigned int *)0xfe201000;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xfe201018;
+	while (*uartfr & 0x20) {}
+	*uart = 'T'; /* T marker - before TLB invalidation */
+
 	hal_tlbInvalAll_IS();
 
 	_dtb_init(dtbStart);
