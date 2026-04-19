@@ -201,6 +201,16 @@ void syspage_init(void)
 	while (*uartfr & 0x20) {}
 	*uart = 'G'; /* G marker - after hal_syspageAddr */
 
+	/* DEBUG: Check if syspage is NULL and send marker */
+	if (syspage_common.syspage == NULL) {
+		while (*uartfr & 0x20) {}
+		*uart = 'N'; /* N marker - syspage is NULL! */
+	}
+	else {
+		while (*uartfr & 0x20) {}
+		*uart = 'V'; /* V marker - syspage is valid */
+	}
+
 	/* Map's relocation */
 	if (syspage_common.syspage->maps != NULL) {
 		syspage_common.syspage->maps = hal_syspageRelocate(syspage_common.syspage->maps);
