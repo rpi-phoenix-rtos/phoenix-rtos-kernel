@@ -124,12 +124,39 @@ int main(void)
 	while (*uartfr & 0x20) {}
 	*uart = 'd'; /* d marker - main() executing */
 
+	/* Marker before syspage_init */
+	while (*uartfr & 0x20) {}
+	*uart = 'e'; /* e marker - before syspage_init */
+
 	syspage_init();
+
+	/* Marker before hal_init */
+	while (*uartfr & 0x20) {}
+	*uart = 'f'; /* f marker - before hal_init */
+
 	_hal_init();
+
+	/* Marker after hal_init, before console print */
+	while (*uartfr & 0x20) {}
+	*uart = 'g'; /* g marker - after hal_init */
+
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
+
+	/* Marker before usrv_init */
+	while (*uartfr & 0x20) {}
+	*uart = 'h'; /* h marker - before usrv_init */
+
 	_usrv_init();
 
+	/* Marker before version print */
+	while (*uartfr & 0x20) {}
+	*uart = 'i'; /* i marker - before version print */
+
 	hal_consolePrint(ATTR_BOLD, "Phoenix-RTOS microkernel v. " RELEASE " rev. " VERSION "\n");
+
+	/* Marker after version print */
+	while (*uartfr & 0x20) {}
+	*uart = 'j'; /* j marker - after version print */
 
 	lib_printf("hal: %s\n", hal_cpuInfo(s));
 	lib_printf("hal: %s\n", hal_cpuFeatures(s, sizeof(s)));
