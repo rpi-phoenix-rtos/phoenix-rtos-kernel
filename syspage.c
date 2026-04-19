@@ -220,23 +220,51 @@ void syspage_init(void)
 		while (*uartfr & 0x20) {}
 		*uart = 'X'; /* X marker - syspage->maps is not NULL */
 		syspage_common.syspage->maps = hal_syspageRelocate(syspage_common.syspage->maps);
+		while (*uartfr & 0x20) {}
+		*uart = 'a'; /* a marker - after maps relocation */
 		map = syspage_common.syspage->maps;
 		do {
+			while (*uartfr & 0x20) {}
+			*uart = 'b'; /* b marker - in map loop */
 			map->next = hal_syspageRelocate(map->next);
+			while (*uartfr & 0x20) {}
+			*uart = 'c'; /* c marker - after next relocation */
 			map->prev = hal_syspageRelocate(map->prev);
+			while (*uartfr & 0x20) {}
+			*uart = 'd'; /* d marker - after prev relocation */
 			map->name = hal_syspageRelocate(map->name);
+			while (*uartfr & 0x20) {}
+			*uart = 'e'; /* e marker - after name relocation */
 
 			if (map->entries != NULL) {
+				while (*uartfr & 0x20) {}
+				*uart = 'f'; /* f marker - entries not NULL */
 				map->entries = hal_syspageRelocate(map->entries);
+				while (*uartfr & 0x20) {}
+				*uart = 'g'; /* g marker - after entries relocation */
 				entry = map->entries;
 				do {
+					while (*uartfr & 0x20) {}
+					*uart = 'h'; /* h marker - in entry loop */
 					entry->next = hal_syspageRelocate(entry->next);
+					while (*uartfr & 0x20) {}
+					*uart = 'i'; /* i marker - after entry next relocation */
 					entry->prev = hal_syspageRelocate(entry->prev);
+					while (*uartfr & 0x20) {}
+					*uart = 'j'; /* j marker - after entry prev relocation */
 					entry = entry->next;
 				} while (entry != map->entries);
+				while (*uartfr & 0x20) {}
+				*uart = 'k'; /* k marker - end of entry loop */
 			}
+			while (*uartfr & 0x20) {}
+			*uart = 'l'; /* l marker - before map next */
 			map = map->next;
+			while (*uartfr & 0x20) {}
+			*uart = 'm'; /* m marker - after map next */
 		} while (map != syspage_common.syspage->maps);
+		while (*uartfr & 0x20) {}
+		*uart = 'n'; /* n marker - end of map loop */
 	}
 
 	/* Program's relocation */
