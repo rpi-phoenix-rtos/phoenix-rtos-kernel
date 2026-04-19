@@ -254,4 +254,8 @@ void syspage_init(void)
 			prog = prog->next;
 		} while (prog != syspage_common.syspage->progs);
 	}
+
+	/* DEBUG: Send marker at end of syspage_init() */
+	while (*uartfr & 0x20) {}
+	*uart = 'Y'; /* Y marker - syspage_init() completed successfully */
 }
