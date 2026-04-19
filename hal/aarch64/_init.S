@@ -414,10 +414,13 @@ _start:
 	isb
 	uart_putc_virt 78
 
-	b _core_0_virtual
+	/* DEBUG: Marker before former branch point */
+	mov w0, #89  /* ASCII 'Y' - about to enter virtual memory code */
+	bl uart_putc_reg
 
-_core_0_virtual:
-	uart_putc_virt 79
+	/* INLINE the critical _core_0_virtual code to avoid branch issues */
+	uart_putc_virt 79  /* O marker - entered virtual memory code */
+	
 	/* Copy syspage to the designated spot in virtual memory */
 	adrp x1, VADDR_SYSPAGE
 	add x1, x1, :lo12:VADDR_SYSPAGE
@@ -442,7 +445,7 @@ _core_0_virtual:
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
-	uart_putc_virt 80
+	uart_putc_virt 80  /* P marker - syspage copy complete */
 
 	/* INLINE the critical parts of _set_up_vbar_and_stacks to avoid function call issues */
 	/* Set vector table */
@@ -474,6 +477,10 @@ _core_0_virtual:
 	
 	/* Debug: After stack setup (U marker) */
 	mov w0, #85
+	bl uart_putc_reg
+	
+	/* Final assembly debug marker before branching to C */
+	mov w0, #90  /* ASCII 'Z' - about to enter main() */
 	bl uart_putc_reg
 	
 	/* Branch to main - this is the actual kernel entry point */
