@@ -252,7 +252,11 @@ void syspage_init(void)
 					entry->prev = hal_syspageRelocate(entry->prev);
 					while (*uartfr & 0x20) {}
 					*uart = 'j'; /* j marker - after entry prev relocation */
+					while (*uartfr & 0x20) {}
+					*uart = 'k'; /* k marker - before entry next assignment */
 					entry = entry->next;
+					while (*uartfr & 0x20) {}
+					*uart = 'l'; /* l marker - after entry next assignment */
 				} while (entry != map->entries);
 				while (*uartfr & 0x20) {}
 				*uart = 'k'; /* k marker - end of entry loop */
