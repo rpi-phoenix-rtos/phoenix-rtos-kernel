@@ -243,6 +243,10 @@ void syspage_init(void)
 				while (*uartfr & 0x20) {}
 				*uart = 'g'; /* g marker - after entries relocation */
 				entry = map->entries;
+				/* FIX: Store original map->entries before relocation to avoid infinite loop */
+				mapent_t *original_entries = map->entries;
+				map->entries = hal_syspageRelocate(map->entries);
+				
 				do {
 					while (*uartfr & 0x20) {}
 					*uart = 'h'; /* h marker - in entry loop */
@@ -257,7 +261,7 @@ void syspage_init(void)
 					entry = entry->next;
 					while (*uartfr & 0x20) {}
 					*uart = 'l'; /* l marker - after entry next assignment */
-				} while (entry != map->entries);
+				} while (entry != original_entries);
 				while (*uartfr & 0x20) {}
 				*uart = 'k'; /* k marker - end of entry loop */
 			}
