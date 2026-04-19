@@ -211,8 +211,14 @@ void syspage_init(void)
 		*uart = 'V'; /* V marker - syspage is valid */
 	}
 
+	/* DEBUG: Send marker before accessing syspage->maps */
+	while (*uartfr & 0x20) {}
+	*uart = 'W'; /* W marker - about to access syspage->maps */
+
 	/* Map's relocation */
 	if (syspage_common.syspage->maps != NULL) {
+		while (*uartfr & 0x20) {}
+		*uart = 'X'; /* X marker - syspage->maps is not NULL */
 		syspage_common.syspage->maps = hal_syspageRelocate(syspage_common.syspage->maps);
 		map = syspage_common.syspage->maps;
 		do {
