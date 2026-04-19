@@ -189,7 +189,17 @@ void syspage_init(void)
 	syspage_map_t *map;
 	mapent_t *entry;
 
+	/* DEBUG: Send marker to confirm syspage_init entry */
+	volatile unsigned int *uart = (volatile unsigned int *)0xfe201000;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xfe201018;
+	while (*uartfr & 0x20) {}
+	*uart = 'F'; /* F marker - syspage_init entered */
+
 	syspage_common.syspage = (syspage_t *)hal_syspageAddr();
+
+	/* DEBUG: Send marker after hal_syspageAddr call */
+	while (*uartfr & 0x20) {}
+	*uart = 'G'; /* G marker - after hal_syspageAddr */
 
 	/* Map's relocation */
 	if (syspage_common.syspage->maps != NULL) {
