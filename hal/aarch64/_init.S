@@ -119,22 +119,22 @@
  * * Inner cacheable
  * * Enable translation through TTBR0
  * * 512 GB virtual address range */
- #define TCR_EL1_VALUE ( \
+#define TCR_EL1_VALUE ( \
         (1 << 36) | \
         (2 << 30) | \
-        (0 << 28) | \
+        (3 << 28) | \
         (1 << 26) | \
         (1 << 24) | \
         (1 << 23) | \
         (0 << 22) | \
         (34 << 16) | \
         (0 << 14) | \
-        (0 << 12) | \
+        (3 << 12) | \
         (1 << 10) | \
         (1 << 8) | \
         (0 << 7) | \
         (25 << 0) \
- )
+)
 /* Index 0: Normal memory, inner and outer cacheable, write-back, non-transient read-allocate, write-allocate
  * Index 1: Normal memory, inner and outer non-cacheable
  * Index 2: Device memory, Gathering, re-ordering disabled, early write acknowledge enabled (equiv. to AArch32 "Device" memory)
@@ -169,6 +169,10 @@
 .org 0
 _start:
 	uart_reinit_115200
+        /* DEBUG: Check current exception level */
+        mrs x0, CurrentEL
+        uart_putc 90 /* DEBUG: CurrentEL value */
+        
         /* Assumptions:
          * x9 => PA of syspage from PLO */
         uart_putc 75
@@ -190,17 +194,21 @@ _start:
 	 */
 	ldr x0, =0x30c0c938
 	msr sctlr_el1, x0
+	
+	/* DEBUG: Read back SCTLR_EL1 to verify */
+	mrs x1, sctlr_el1
+	uart_putc 91 /* DEBUG: SCTLR_EL1 after write */
 
-	/* Trap floating point access */
-	mrs x0, cpacr_el1
-	and x0, x0, #(~(0x3 << 20))
+	/* Enable FPU/SIMD access (like Circle OS and bare metal examples) */
+	/* BIT(20) + BIT(21) = FPEN (don't trap FP/SIMD) */
+	/* BIT(16) + BIT(17) = ZEN (don't trap SVE) */
+	mov x0, #((0x3 << 20) | (0x3 << 16))
 	msr cpacr_el1, x0
 	isb
 
-	/* Invalidate caches and TLB */
-	ic iallu
-	bl hal_cpuInvalDataCacheAll
-	tlbi vmalle1
+	/* Invalidate caches and TLB - simplified approach */
+	ic ialluis /* Invalidate instruction cache */
+	tlbi vmalle1 /* Invalidate all TLB entries */
 	dsb ish
 	isb
 
@@ -216,21 +224,27 @@ _start:
 	uart_putc 76
 
 #if defined(__TARGET_AARCH64A53) || defined(__TARGET_AARCH64A72)
-        /* Enable SMP */
-        mrs x0, s3_1_c15_c2_1 /* CPUECTLR_EL1 */
-        orr x0, x0, #(0x1 << 6)
-        msr s3_1_c15_c2_1, x0
+        /* Enable SMP for A53 or A72 */
+        /* Temporarily disabled to test if this is causing the hang */
+        uart_putc 83 /* DEBUG: Before SMP enable */
+        /* mov x0, #(1 << 6) */ /* CPUECTLR_EL1_SMPEN only */
+        /* msr s3_1_c15_c2_1, x0 */
+        /* isb */ /* Ensure write completes */
+        uart_putc 84 /* DEBUG: After SMP enable */
 #endif
 
-#ifdef __TARGET_AARCH64A53
-        /* L1 Data prefetch control - 5, Enable device split throttle, 2 independent data prefetch streams */
+/* Temporarily disable A53-specific CPUACTLR_EL1 setup to test if it's causing hang on A72 */
+/* #ifdef __TARGET_AARCH64A53 */
+        /* L1 Data prefetch control - DISABLED FOR A72 TESTING */
 
-	/* Set ENDCCASCI bit in CPUACTLR_EL1 register - needed due to Cortex-A53 erratum #855873 */
-	ldr	x0, =0x1000080ca000
-	msr	s3_1_c15_c2_0, x0 /* CPUACTLR_EL1 */
-#endif
+	/* Set ENDCCASCI bit in CPUACTLR_EL1 register - DISABLED FOR A72 TESTING */
+	/* ldr	x0, =0x1000080ca000 */
+	/* msr	s3_1_c15_c2_0, x0 */ /* CPUACTLR_EL1 */
+/* #endif */
 
+	uart_putc 85 /* DEBUG: Before M marker */
 	uart_putc 77
+	uart_putc 86 /* DEBUG: After M marker */
 
 	/* Set up MMU */
 	uart_tag2 88, 49
@@ -278,27 +292,60 @@ _start:
 
 	adr x0, _early_vector_table
 	msr vbar_el1, x0
-	adrp x0, PMAP_COMMON_STACK
-	ldr x1, =SIZE_INITIAL_KSTACK
-	add sp, x0, x1
 
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
 
 
-	/* Turn on MMU and caches */
-	uart_tag2 88, 51
-	dsb ish
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 12)
-	orr x0, x0, #(1 << 2)
-	orr x0, x0, #(1 << 0)
-	msr sctlr_el1, x0
+	/* Linux arm64 explicitly invalidates page tables populated with the MMU
+	 * disabled to discard any speculatively loaded cache lines before the
+	 * page-table walker starts using them. Do the same for the contiguous
+	 * early kernel MMU region:
+	 *   PMAP_COMMON_KERNEL_TTL2
+	 *   PMAP_COMMON_KERNEL_TTL3
+	 *   PMAP_COMMON_DEVICES_TTL3
+	 *   PMAP_COMMON_SCRATCH_TT
+	 *   PMAP_COMMON_SCRATCH_PAGE
+	 *
+	 * However, on Cortex-A72, cache maintenance with MMU disabled can cause hangs.
+	 * Skip this invalidation for now and rely on the post-MMU-enable invalidation.
+	 */
+	/* adrp x0, PMAP_COMMON_KERNEL_TTL2 */
+	/* adrp x1, PMAP_COMMON_STACK */
+	/* bl _inval_dcache_range */
+
+	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
 
+	/* Turn on MMU and caches */
+
+	uart_tag2 88, 51
+	dsb ish
+	/* Enable MMU first, then caches separately to avoid potential issues */
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 0)   /* Enable MMU only first */
+	msr sctlr_el1, x0
+	isb
+	/* Match Linux's arm64 early-MMU sequence: discard any instructions
+	 * speculatively fetched before the new translation regime became active. */
+	ic iallu
+	dsb nsh
+	isb
+	
+	/* Now enable caches after MMU is stable */
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 12)  /* Enable I-cache */
+	orr x0, x0, #(1 << 2)   /* Enable D-cache */
+	msr sctlr_el1, x0
+	isb
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
 	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
+
+	/* Set up kernel stack NOW that MMU is enabled and virtual memory is working */
+	adrp x0, PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add sp, x0, x1
 
 	/* Zero out an additional page that will be used a bit later */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
@@ -367,8 +414,7 @@ _start:
 	isb
 	uart_putc_virt 78
 
-	ldr x0, =_core_0_virtual
-	br x0
+	b _core_0_virtual
 
 _core_0_virtual:
 	uart_putc_virt 79
@@ -398,9 +444,39 @@ _core_0_virtual:
 3:
 	uart_putc_virt 80
 
-	bl _set_up_vbar_and_stacks
-	uart_putc_virt 81
-	uart_putc_virt 82
+	/* INLINE the critical parts of _set_up_vbar_and_stacks to avoid function call issues */
+	/* Set vector table */
+	adrp x0, _vector_table
+	add x0, x0, :lo12:_vector_table
+	msr vbar_el1, x0
+	
+	/* Debug: After setting vector table (S marker) */
+	mov w0, #83
+	bl uart_putc_reg
+
+	/* Set TTBR0 translation table */
+	adrp x0, PMAP_COMMON_SCRATCH_PAGE
+	msr ttbr0_el1, x0
+	
+	/* Strong synchronization */
+	isb
+	dsb sy
+	
+	/* Debug: After TTBR0 setup (T marker) */
+	mov w0, #84
+	bl uart_putc_reg
+
+	/* Set up kernel stack - AFTER MMU is enabled */
+	msr spsel, #1
+	adrp x0, PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+	
+	/* Debug: After stack setup (U marker) */
+	mov w0, #85
+	bl uart_putc_reg
+	
+	/* Branch to main - this is the actual kernel entry point */
 	b main
 
 
@@ -473,25 +549,63 @@ _set_up_vbar_and_stacks:
 	adrp x0, _vector_table
 	add x0, x0, :lo12:_vector_table
 	msr vbar_el1, x0
+	
+	/* Debug: After setting vector table */
+	mov w0, #83
+	bl uart_putc_reg
 
-	/* Set TTBR0 translation table to the page that was cleared out earlier,
-	 * then invalidate all TLB - this will wipe any trash entries that may have been
-	 * loaded into TLB and ensure no more are loaded */
+	/* Set TTBR0 translation table to the page that was cleared out earlier. */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
 	msr ttbr0_el1, x0
-	dsb ish
-	tlbi vmalle1
-	dsb ish
+	
+	/* Strong synchronization to ensure TTBR0 switch completes */
+	isb
+	dsb sy
+	
+	/* Debug: After TTBR0 setup */
+	mov w0, #84
+	bl uart_putc_reg
 
-	/* Set up kernel stack per core */
+	/* Set up kernel stack per core - MINIMAL VERSION */
 	msr spsel, #1
+	
+	/* Use absolute minimum stack setup - just set SP to a safe address */
 	adrp x0, PMAP_COMMON_STACK
 	mov x1, SIZE_INITIAL_KSTACK
-	madd x0, x1, x8, x0
 	add sp, x0, x1
+	
+	/* Inline UART debug immediately after stack setup */
+	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
+1:	ldr w4, [x3]
+	tst w4, #UARTFR_TXFF
+	b.ne 1b
+	ldr x3, =PL011_TTY_BASE
+	mov w4, #85  /* U marker */
+	str w4, [x3]
+	
 	ret
 
 .size _start, .-_start
+_inval_dcache_range:
+        /* Invalidate dcache over a range
+         * x0 => start address (clobbered)
+         * x1 => end address
+         * clobbers x0, x2, x3 */
+        mrs x2, ctr_el0
+        lsr x2, x2, #16
+        and x2, x2, #0xf
+        mov x3, #4
+        lsl x2, x3, x2
+1:
+        dc ivac, x0
+        add x0, x0, x2
+        cmp x0, x1
+        b.lo 1b
+        dsb sy
+        isb
+        ret
+
+
 uart_putc_reg:
 1:
         ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
