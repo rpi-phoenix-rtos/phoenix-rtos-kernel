@@ -454,8 +454,7 @@ _start:
 	msr vbar_el1, x0
 	
 	/* Debug: After setting vector table (S marker) */
-	mov w0, #83
-	bl uart_putc_reg
+	uart_putc_virt 83
 
 	/* Set TTBR0 translation table */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
@@ -466,8 +465,7 @@ _start:
 	dsb sy
 	
 	/* Debug: After TTBR0 setup (T marker) */
-	mov w0, #84
-	bl uart_putc_reg
+	uart_putc_virt 84
 
 	/* Set up kernel stack - AFTER MMU is enabled */
 	msr spsel, #1
@@ -476,13 +474,14 @@ _start:
 	add sp, x0, x1
 	
 	/* Debug: After stack setup (U marker) */
-	mov w0, #85
-	bl uart_putc_reg
+	uart_putc_virt 85
 	
 	/* Final assembly debug marker before branching to C */
-	mov w0, #90  /* ASCII 'Z' - about to enter main() */
-	bl uart_putc_reg
+	uart_putc_virt 90  /* ASCII 'Z' - about to enter main() */
 	
+	/* Final debug marker before branching to C */
+	uart_putc_virt 98  /* ASCII 'b' - about to branch to main() */
+
 	/* Branch to main - this is the actual kernel entry point */
 	b main
 
