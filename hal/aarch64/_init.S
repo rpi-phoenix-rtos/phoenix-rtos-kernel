@@ -414,6 +414,21 @@ _start:
 	isb
 	uart_putc_virt 78
 
+	/* TD-?? — Primary core must now branch absolutely to its linked high
+	 * canonical VA. Until this jump, PC is still at the kernel's low
+	 * physical load address, so every subsequent adrp/PC-relative op
+	 * (notably VADDR_SYSPAGE/relOffs/hal_syspage below) resolves to a LOW
+	 * address. The result: relOffs ≈ 0, hal_syspageRelocate becomes a
+	 * no-op, and C-side syspage walks read pointers through stale TTBR0
+	 * TLB entries — producing the non-deterministic map/entry-loop hangs.
+	 * The secondary-core path at _other_core_virtual already did this
+	 * (ldr abs; br); the primary-core inlining of _core_0_virtual dropped
+	 * the abs branch by accident. */
+	ldr x0, =_core_0_virtual
+	br x0
+_core_0_virtual:
+	uart_putc_virt 33  /* '!' — confirmed execution in kernel high VA */
+
 	/* DEBUG: Marker before former branch point */
 	mov w0, #89  /* ASCII 'Y' - about to enter virtual memory code */
 	bl uart_putc_reg
