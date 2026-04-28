@@ -412,22 +412,8 @@ _start:
 	bic x0, x0, #(1 << 23)
 	msr tcr_el1, x0
 	isb
-	uart_putc_virt 78
 
-	/* TD-?? — Primary core must now branch absolutely to its linked high
-	 * canonical VA. Until this jump, PC is still at the kernel's low
-	 * physical load address, so every subsequent adrp/PC-relative op
-	 * (notably VADDR_SYSPAGE/relOffs/hal_syspage below) resolves to a LOW
-	 * address. The result: relOffs ≈ 0, hal_syspageRelocate becomes a
-	 * no-op, and C-side syspage walks read pointers through stale TTBR0
-	 * TLB entries — producing the non-deterministic map/entry-loop hangs.
-	 * The secondary-core path at _other_core_virtual already did this
-	 * (ldr abs; br); the primary-core inlining of _core_0_virtual dropped
-	 * the abs branch by accident. */
-	ldr x0, =_core_0_virtual
-	br x0
-_core_0_virtual:
-	uart_putc_virt 33  /* '!' — confirmed execution in kernel high VA */
+	uart_putc_virt 78
 
 	/* DEBUG: Marker before former branch point */
 	mov w0, #89  /* ASCII 'Y' - about to enter virtual memory code */
@@ -436,14 +422,50 @@ _core_0_virtual:
 	/* INLINE the critical _core_0_virtual code to avoid branch issues */
 	uart_putc_virt 79  /* O marker - entered virtual memory code */
 	
-	/* Copy syspage to the designated spot in virtual memory */
-	adrp x1, VADDR_SYSPAGE
-	add x1, x1, :lo12:VADDR_SYSPAGE
-	sub x2, x1, x9
+	/* Compute relOffs and hal_syspage using the ABSOLUTE linked high VA
+	 * of _hal_syspageCopied (via literal pool), not the PC-relative form.
+	 *
+	 * Primary-core execution never transitions PC to the high canonical VA:
+	 * on Cortex-A72 + this TCR/MAIR/pmap configuration, data reads through
+	 * TTBR1 work, but instruction fetch through TTBR1 fails (verified by
+	 * a probe that successfully read kernel[0] at 0xffffffffc0000000 but
+	 * faulted on `br x0` to the same region). So PC stays at the low
+	 * physical load address and every `adrp` here resolves to a low PA.
+	 * If we used adrp for VADDR_SYSPAGE, relOffs would be ~0 and
+	 * hal_syspageRelocate would be a no-op — exactly the bug that made
+	 * syspage_init walk raw plo PAs in syspage.c.
+	 *
+	 * `ldr x1, =VADDR_SYSPAGE` loads the value 0xffffffffc00xxxxx from the
+	 * literal pool, giving the correct linked VA independent of PC. The
+	 * resulting relOffs = VA_dest - PA_src makes
+	 * hal_syspageRelocate(src_PA) = src_PA + relOffs = corresponding
+	 * high-VA slot inside _hal_syspageCopied, which TTBR1 data reads
+	 * can then dereference. */
+	ldr x1, =VADDR_SYSPAGE          /* absolute linked VA of dest (high) */
+	sub x2, x1, x9                  /* relOffs = VA_dest - PA_src */
 	adrp x0, relOffs
 	str x2, [x0, #:lo12:relOffs]
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
+
+	/* Clean+invalidate the plo-owned syspage cache range before reading it.
+	 * plo builds the syspage with MMU+D-cache enabled; when it jumps to the
+	 * kernel it does NOT flush D-cache. Some dirty lines (seen as bit-level
+	 * nondeterminism in the later half of the copied bytes) therefore never
+	 * reach DDR before this kernel reads it via identity-mapped PA. Force a
+	 * clean+invalidate by VA over [x9, x9+size) so DDR is authoritative. */
+	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
+	add x1, x9, x0
+	mov x0, x9
+	bl _clean_inval_dcache_range
+
+	/* The copy itself uses a LOW-PA destination (via adrp), because
+	 * instruction-side TTBR1 fetch is broken and we want to avoid
+	 * relying on TTBR1 data writes for bulk bytes until they are
+	 * explicitly confirmed to work. The low PA of _hal_syspageCopied
+	 * is identity-mapped through TTBR0 by the scratch TT. */
+	adrp x1, VADDR_SYSPAGE
+	add x1, x1, :lo12:VADDR_SYSPAGE
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
 1:
 	cmp x0, #8
@@ -619,6 +641,25 @@ _inval_dcache_range:
         lsl x2, x3, x2
 1:
         dc ivac, x0
+        add x0, x0, x2
+        cmp x0, x1
+        b.lo 1b
+        dsb sy
+        isb
+        ret
+
+
+_clean_inval_dcache_range:
+        /* Clean + invalidate dcache over a range — ensures any dirty lines
+         * are written back to DDR and subsequent reads bypass cache.
+         * x0 => start address (clobbered), x1 => end address; clobbers x2,x3 */
+        mrs x2, ctr_el0
+        lsr x2, x2, #16
+        and x2, x2, #0xf
+        mov x3, #4
+        lsl x2, x3, x2
+1:
+        dc civac, x0
         add x0, x0, x2
         cmp x0, x1
         b.lo 1b
