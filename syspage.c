@@ -199,7 +199,20 @@ void syspage_init(void)
 	while (*uartfr & 0x20) {}
 	*uart = 'F'; /* F marker - syspage_init entered */
 
-	syspage_common.syspage = (syspage_t *)hal_syspageAddr();
+	/* TD-04 hang-localization probe: a recent regression has the kernel
+	 * stopping between 'F' and 'G'. Pin down whether the call sequence
+	 * itself, hal_syspageAddr() return, or the syspage_common.syspage
+	 * write is the failing step. */
+	while (*uartfr & 0x20) {}
+	*uart = '1';
+	{
+		syspage_t *tmp = (syspage_t *)hal_syspageAddr();
+		while (*uartfr & 0x20) {}
+		*uart = '2';
+		syspage_common.syspage = tmp;
+	}
+	while (*uartfr & 0x20) {}
+	*uart = '3';
 
 	/* DEBUG: Send marker after hal_syspageAddr call */
 	while (*uartfr & 0x20) {}
@@ -404,7 +417,13 @@ void syspage_init(void)
 						while (*uartfr & 0x20) {}
 						*uart = '}';
 					}
-					if (entryCount++ >= 10) {
+					/* Safety cap: with the TD-04 NC-dest fix in place the
+					 * entry list walks cleanly with no spurious garbage
+					 * pointers, but plo can legitimately emit > 10 entries
+					 * per map (observed: 11 on Pi 4 first map). 64 is a
+					 * wide margin over any plausible map population while
+					 * still bounding the loop against pathological inputs. */
+					if (entryCount++ >= 64) {
 						while (*uartfr & 0x20) {}
 						*uart = 'Q'; /* Q marker - entry-loop safety cap hit */
 						break;

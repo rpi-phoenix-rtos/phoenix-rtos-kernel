@@ -145,6 +145,17 @@
 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, global */
 #define DEFAULT_ATTRS 0x703
 
+/* Same as DEFAULT_ATTRS but with AttrIndx=1 (MAIR slot 1 = 0x44 = Normal
+ * Non-Cacheable, inner+outer). Used for the single TTL3 entry that maps
+ * the page containing _hal_syspageCopied. The destination of plo's
+ * syspage copy must read back exactly what plo wrote into DDR; on
+ * BCM2711 silicon the A72 D-cache observes per-boot-randomized stale
+ * lines from the bootcode/start4.elf/armstub firmware chain (or VPU
+ * writes into firmware-reserved DRAM windows) at this PA, so the safe
+ * approach is to bypass the cache entirely for that one page. See
+ * docs/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md TD-04. */
+#define NC_ATTRS 0x707
+
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
 #define SYSPAGE_SIZE_OFFSET 40
@@ -403,6 +414,29 @@ _start:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
+	/* TD-04 fix: re-map the single page containing _hal_syspageCopied as
+	 * Normal Non-Cacheable (MAIR slot 1). _fill_page_descr above wrote
+	 * cacheable entries for the entire 2 MB window; we now overwrite the
+	 * one entry covering the syspage destination buffer so subsequent
+	 * writes during the kernel-side copy and reads in syspage_init()
+	 * bypass the A72 D-cache and go directly to DDR. The destination
+	 * symbol is .balign'd to SIZE_PAGE in the .bss section so it occupies
+	 * exactly one TTL3 entry's worth of address space. The MMU has been
+	 * enabled earlier but no high-VA accesses have happened yet, so
+	 * there are no TLB entries to invalidate — only the table-walk
+	 * barriers below are needed. */
+	adrp x0, PMAP_COMMON_KERNEL_TTL3   /* TTL3 base, re-load (x0 was clobbered) */
+	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]  /* pkernel = kernel load PA */
+	ldr x2, =_hal_syspageCopied         /* link-time high VA of the symbol */
+	ldr x3, =VADDR_KERNEL               /* high VA window base */
+	sub x4, x2, x3                       /* offset within the 2 MB mapping window */
+	lsr x5, x4, #12                      /* page index in TTL3 */
+	lsl x5, x5, #3                       /* byte offset (8 B per descriptor) */
+	add x6, x1, x4                       /* PA of the page (pkernel + offset) */
+	mov x7, #(NC_ATTRS)                  /* attrs with AttrIndx=1 */
+	orr x6, x6, x7                        /* full TTL3 entry value */
+	str x6, [x0, x5]                      /* override the one entry */
+
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
@@ -475,13 +509,23 @@ _start:
 	 * this comment as a do-not-redo marker; the real fix needs another
 	 * approach — see tracking/current-step.md.) */
 
-	/* The copy itself uses a LOW-PA destination (via adrp), because
-	 * instruction-side TTBR1 fetch is broken and we want to avoid
-	 * relying on TTBR1 data writes for bulk bytes until they are
-	 * explicitly confirmed to work. The low PA of _hal_syspageCopied
-	 * is identity-mapped through TTBR0 by the scratch TT. */
-	adrp x1, VADDR_SYSPAGE
-	add x1, x1, :lo12:VADDR_SYSPAGE
+	/* TD-04 fix: copy through the HIGH-VA mapping of VADDR_SYSPAGE
+	 * (loaded from the literal pool), not through a low-PA `adrp +
+	 * lo12`. The high-VA TTL3 entry was just overridden to AttrIndx=1
+	 * (Normal Non-Cacheable), so str instructions targeting this
+	 * pointer write directly to DDR and bypass the A72 D-cache —
+	 * exactly the behaviour we need to make the copied bytes immune
+	 * to the BCM2711 cache-coherency anomaly observed in the E2 probe.
+	 *
+	 * (The earlier comment here noted that "instruction-side TTBR1
+	 * fetch is broken" on this hardware. That observation still
+	 * stands for *instruction* fetches, but the E2 probe explicitly
+	 * verified that *data* reads via TTBR1 work — l{} and v{}
+	 * markers returned identical bytes every run. Data writes via
+	 * TTBR1 are likewise fine; the kernel binary's `_hal_syspageCopied`
+	 * symbol is at a high-VA address that the TTL3 we just installed
+	 * maps to its load PA.) */
+	ldr x1, =VADDR_SYSPAGE
 	ldr x0, [x9, #(SYSPAGE_SIZE_OFFSET)]
 1:
 	cmp x0, #8
@@ -500,12 +544,19 @@ _start:
 3:
 	uart_putc_virt 80  /* P marker - syspage copy complete */
 
-	/* E2 cache-flush experiment: clean+invalidate the DEST range
-	 * after the copy so any dirty lines are written back and any
-	 * prefetched stale lines are dropped. If the post-flush probe
-	 * reads now match plo's source bytes, the bug is purely a cache
-	 * coherency issue at the dest side. If reads still diverge, it's
-	 * not just cache. */
+	/* Post-copy `_clean_inval_dcache_range` over the LOW-PA dest range.
+	 * Empirically required: with TD-04 NC-dest mapping in place, the
+	 * COPY's str instructions go via the high-VA NC TTL3 entry directly
+	 * to DDR and never touch the A72 D-cache. But the LOW PA still has a
+	 * cacheable mapping in SCRATCH_TT, and removing this post-copy flush
+	 * regressed the boot to "no kernel UART output at all after plo's
+	 * hal: jump exit el1". Probable mechanism: speculative prefetch via
+	 * the cacheable LOW-PA mapping populates cache lines from DDR before
+	 * the COPY completes; the flush invalidates those stale lines so
+	 * later cacheable reads of dest re-fetch from DDR (which has plo's
+	 * correct data). The flush is a no-op for the lines that were never
+	 * populated, and benign even where the LOW-PA mapping covers
+	 * neighbouring kernel data. */
 	adrp x0, VADDR_SYSPAGE
 	add x0, x0, :lo12:VADDR_SYSPAGE
 	ldr x1, [x14, #(SYSPAGE_SIZE_OFFSET)]
@@ -1070,7 +1121,13 @@ hal_cpuInvalDataCacheAll:
 #include "hal/aarch64/_exceptions.S"
 
 .section ".bss"
-.align 4
+/* Page-align so the entire 4 KiB symbol fits exactly into one TTL3 entry.
+ * That single entry is overridden in _start to use Normal Non-Cacheable
+ * attributes (MAIR slot 1) — see the TD-04 fix block. Without alignment
+ * the symbol would straddle two pages and we'd need to override two
+ * entries; with alignment one is sufficient and the bookkeeping is
+ * trivial. */
+.balign SIZE_PAGE
 _hal_syspageCopied:
 	.zero SIZE_PAGE
 .size _hal_syspageCopied, . - _hal_syspageCopied
