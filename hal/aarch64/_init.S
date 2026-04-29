@@ -448,6 +448,12 @@ _start:
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
 
+	/* E2 probe: stash the original plo syspage PA into x14 so the
+	 * post-copy probe can read source bytes via x14 + 0x310 and
+	 * compare against the dest-side reads (the copy advances x9 by
+	 * `size`, so x9 alone isn't usable post-copy). */
+	mov x14, x9
+
 	/* Clean+invalidate the plo-owned syspage cache range before reading it.
 	 * plo builds the syspage with MMU+D-cache enabled; when it jumps to the
 	 * kernel it does NOT flush D-cache. Some dirty lines (seen as bit-level
@@ -458,6 +464,16 @@ _start:
 	add x1, x9, x0
 	mov x0, x9
 	bl _clean_inval_dcache_range
+
+	/* (Reverted: experimental pre-copy DEST flush. On real Pi 4 hardware
+	 * — but not in QEMU — adding a second `_clean_inval_dcache_range`
+	 * call here, over [VADDR_SYSPAGE, VADDR_SYSPAGE+size), caused the
+	 * kernel to hang at marker 'V' (line 247) before the X1 MMU-setup
+	 * marker. Same image boots cleanly under QEMU. Cache flush of the
+	 * dest BSS range likely interacts with whatever already-cached
+	 * firmware data sits there in a way that QEMU doesn't model. Left
+	 * this comment as a do-not-redo marker; the real fix needs another
+	 * approach — see tracking/current-step.md.) */
 
 	/* The copy itself uses a LOW-PA destination (via adrp), because
 	 * instruction-side TTBR1 fetch is broken and we want to avoid
@@ -483,6 +499,218 @@ _start:
 	cbnz x0, 2b
 3:
 	uart_putc_virt 80  /* P marker - syspage copy complete */
+
+	/* E2 cache-flush experiment: clean+invalidate the DEST range
+	 * after the copy so any dirty lines are written back and any
+	 * prefetched stale lines are dropped. If the post-flush probe
+	 * reads now match plo's source bytes, the bug is purely a cache
+	 * coherency issue at the dest side. If reads still diverge, it's
+	 * not just cache. */
+	adrp x0, VADDR_SYSPAGE
+	add x0, x0, :lo12:VADDR_SYSPAGE
+	ldr x1, [x14, #(SYSPAGE_SIZE_OFFSET)]
+	add x1, x0, x1
+	bl _clean_inval_dcache_range
+
+	/* E2 probe: read 8 bytes at offset 0x310 of the just-copied syspage
+	 * via TWO different paths and emit them both:
+	 *   l{...} = read via LOW PA (adrp + lo12 of VADDR_SYSPAGE)
+	 *   v{...} = read via HIGH VA (ldr from literal pool)
+	 * If TTBR1's mapping for _hal_syspageCopied actually points at the
+	 * same physical page where adrp wrote the bytes (which the code below
+	 * assumes), these two reads must be byte-identical. If they differ,
+	 * we have a high-VA/low-PA aliasing bug at the handoff and the
+	 * iter-7/8 corruption is the kernel reading from stale/uninitialised
+	 * physical memory under the high-VA mapping.
+	 *
+	 * Markers around each value tell summarize-rpi4b-uart-log.py what to
+	 * pick out. Trashes x10..x13 which are otherwise unused here. */
+	uart_putc_virt 115  /* 's' marker - source-PA read follows (via saved x14) */
+	uart_putc_virt 123  /* '{' */
+	ldr x11, [x14, #0x310]
+	mov x12, #60
+7:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 8f
+	add w13, w13, #('a' - 10)
+	b 9f
+8:	add w13, w13, #'0'
+9:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 7b
+	uart_putc_virt 125  /* '}' */
+
+	uart_putc_virt 108  /* 'l' marker - low-PA read follows */
+	uart_putc_virt 123  /* '{' */
+	adrp x10, VADDR_SYSPAGE
+	add x10, x10, :lo12:VADDR_SYSPAGE
+	ldr x11, [x10, #0x310]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	uart_putc_virt 118  /* 'v' marker - high-VA read follows */
+	uart_putc_virt 123  /* '{' */
+	ldr x10, =VADDR_SYSPAGE
+	ldr x11, [x10, #0x310]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Read dest at offset 0 — should be the syspage struct's resetReason
+	 * (plo writes 0). If d0{0} matches but s{0}/l{nonzero}/v{nonzero} as
+	 * before, the copy worked at offset 0 but failed at 0x310 — that
+	 * narrows the failure to a specific copy iteration. If d0{} also
+	 * has random data, the copy didn't write anywhere. */
+	uart_putc_virt 100  /* 'd' marker - dest at offset 0 */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	adrp x10, VADDR_SYSPAGE
+	add x10, x10, :lo12:VADDR_SYSPAGE
+	ldr x11, [x10]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Source at offset 0 (sanity check via x14). */
+	uart_putc_virt 115  /* 's' marker */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	ldr x11, [x14]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Read dest at offset 0x100 — should be inside plo's syspage struct
+	 * data (around the maps pointer area, plo writes valid pointer
+	 * here). If d100{} matches what plo wrote there, copy works through
+	 * 0x100. If garbage, copy died earlier than 0x310. */
+	uart_putc_virt 100  /* 'd' */
+	uart_putc_virt 49   /* '1' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	adrp x10, VADDR_SYSPAGE
+	add x10, x10, :lo12:VADDR_SYSPAGE
+	ldr x11, [x10, #0x100]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Source at same offset 0x100 (via x14) for comparison. */
+	uart_putc_virt 115  /* 's' */
+	uart_putc_virt 49   /* '1' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	ldr x11, [x14, #0x100]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Dest at offset 0x200 — also inside plo's syspage data. */
+	uart_putc_virt 100  /* 'd' */
+	uart_putc_virt 50   /* '2' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	ldr x11, [x10, #0x200]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
+
+	/* Source at offset 0x200. */
+	uart_putc_virt 115  /* 's' */
+	uart_putc_virt 50   /* '2' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 48   /* '0' */
+	uart_putc_virt 123  /* '{' */
+	ldr x11, [x14, #0x200]
+	mov x12, #60
+4:	lsr x13, x11, x12
+	and w13, w13, #0xf
+	cmp w13, #10
+	b.lo 5f
+	add w13, w13, #('a' - 10)
+	b 6f
+5:	add w13, w13, #'0'
+6:	mov w0, w13
+	bl uart_putc_reg
+	subs x12, x12, #4
+	b.ge 4b
+	uart_putc_virt 125  /* '}' */
 
 	/* INLINE the critical parts of _set_up_vbar_and_stacks to avoid function call issues */
 	/* Set vector table */
