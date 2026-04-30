@@ -437,6 +437,22 @@ _start:
 	orr x6, x6, x7                        /* full TTL3 entry value */
 	str x6, [x0, x5]                      /* override the one entry */
 
+	/* The early C stack is also touched through the high TTBR1 mapping.
+	 * Keep it non-cacheable during bring-up for the same BCM2711 stale-line
+	 * avoidance reason as _hal_syspageCopied. */
+	ldr x2, =PMAP_COMMON_STACK
+	ldr x3, =VADDR_KERNEL
+	sub x4, x2, x3
+	lsr x5, x4, #12
+	lsl x5, x5, #3
+	add x6, x1, x4
+	mov x7, #(NC_ATTRS)
+	orr x6, x6, x7
+	str x6, [x0, x5]
+	add x5, x5, #8
+	add x6, x6, #SIZE_PAGE
+	str x6, [x0, x5]
+
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
@@ -785,7 +801,7 @@ _start:
 
 	/* Set up kernel stack - AFTER MMU is enabled */
 	msr spsel, #1
-	adrp x0, PMAP_COMMON_STACK
+	ldr x0, =PMAP_COMMON_STACK
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
 	
@@ -1116,6 +1132,52 @@ hal_cpuInvalDataCacheAll:
 .cfi_endproc
 .size hal_cpuInvalDataCacheAll, .-hal_cpuInvalDataCacheAll
 .ltorg
+
+
+.globl _hal_init
+.type _hal_init, %function
+_hal_init:
+	uart_putc_virt 104  /* 'h' - _hal_init reached before C prologue */
+	msr spsel, #1
+	ldr x0, =PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+	uart_putc_virt 82   /* 'R' - early stack reset before C prologue */
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	ldr x0, =_hal_syspageCopied
+	add x0, x0, #SIZE_PAGE
+	sub x0, x0, #32
+	mov x4, #0x51
+	str x4, [x0]
+	mov w4, #113
+	str w4, [x3]        /* 'q' - direct store to known syspage page worked */
+	ldr x0, =PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add x0, x0, x1
+	sub x0, x0, #32
+	mov x4, #0x52
+	str x4, [x0]
+	mov w4, #119
+	str w4, [x3]        /* 'w' - direct store to stack page worked */
+	ldr x0, =PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+	mov x4, #0x53
+	str x4, [sp, #-16]!
+	mov w4, #117
+	str w4, [x3]        /* 'u' - SP pre-index single store worked */
+	add sp, sp, #16
+	stp x30, x19, [sp, #-32]!
+	stp x20, x21, [sp, #16]
+	mov w4, #87
+	str w4, [x3]        /* 'W' - manual C-style prologue stores worked */
+	ldp x20, x21, [sp, #16]
+	ldp x30, x19, [sp], #32
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	mov w4, #88
+	str w4, [x3]        /* 'X' - manual prologue restore worked */
+	b _hal_init_c
+.size _hal_init, .-_hal_init
 
 
 #include "hal/aarch64/_exceptions.S"

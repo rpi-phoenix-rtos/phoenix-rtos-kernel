@@ -46,6 +46,33 @@
 
 /* This macro creates an exception vector, so it cannot contain more than 32 instructions */
 .macro exception_vector fromUserspace doCheckFPUTrap dispatchFunction
+	ldr x26, =PL011_TTY_EARLY_VADDR
+	mov w27, #33
+	str w27, [x26]
+	mov w27, #101
+	str w27, [x26]
+	mov w27, #123
+	str w27, [x26]
+	mrs x28, esr_el1
+	mov x29, #28
+997:
+	lsr x27, x28, x29
+	and w27, w27, #0xf
+	cmp w27, #10
+	b.lo 998f
+	add w27, w27, #('a' - 10)
+	b 999f
+998:
+	add w27, w27, #'0'
+999:
+	str w27, [x26]
+	subs x29, x29, #4
+	b.ge 997b
+	mov w27, #125
+	str w27, [x26]
+996:
+	wfe
+	b 996b
 	stp x28, x29, [sp, #-0x20]
 .if \fromUserspace
 	mrs X_OLD_SP, sp_el0
@@ -386,6 +413,85 @@ hal_jmp:
 	msr spsr_el1, x1
 	eret
 .size hal_jmp, .-hal_jmp
+
+
+.align 4
+.type _early_exception_probe, %function
+_early_exception_probe:
+	ldr x26, =PL011_TTY_EARLY_VADDR
+	mrs x20, esr_el1
+	mrs x21, far_el1
+	mrs x22, elr_el1
+
+	mov w27, #33   /* '!' */
+	str w27, [x26]
+	mov w27, #69   /* 'E' */
+	str w27, [x26]
+	mov w27, #123  /* '{' */
+	str w27, [x26]
+	mov x23, #60
+1:
+	lsr x24, x20, x23
+	and w24, w24, #0xf
+	cmp w24, #10
+	b.lo 2f
+	add w24, w24, #('a' - 10)
+	b 3f
+2:
+	add w24, w24, #'0'
+3:
+	str w24, [x26]
+	subs x23, x23, #4
+	b.ge 1b
+	mov w27, #125  /* '}' */
+	str w27, [x26]
+
+	mov w27, #70   /* 'F' */
+	str w27, [x26]
+	mov w27, #123  /* '{' */
+	str w27, [x26]
+	mov x23, #60
+4:
+	lsr x24, x21, x23
+	and w24, w24, #0xf
+	cmp w24, #10
+	b.lo 5f
+	add w24, w24, #('a' - 10)
+	b 6f
+5:
+	add w24, w24, #'0'
+6:
+	str w24, [x26]
+	subs x23, x23, #4
+	b.ge 4b
+	mov w27, #125  /* '}' */
+	str w27, [x26]
+
+	mov w27, #76   /* 'L' */
+	str w27, [x26]
+	mov w27, #123  /* '{' */
+	str w27, [x26]
+	mov x23, #60
+7:
+	lsr x24, x22, x23
+	and w24, w24, #0xf
+	cmp w24, #10
+	b.lo 8f
+	add w24, w24, #('a' - 10)
+	b 9f
+8:
+	add w24, w24, #'0'
+9:
+	str w24, [x26]
+	subs x23, x23, #4
+	b.ge 7b
+	mov w27, #125  /* '}' */
+	str w27, [x26]
+
+10:
+	wfe
+	b 10b
+.size _early_exception_probe, .-_early_exception_probe
 
 
 .align 11, 0x00

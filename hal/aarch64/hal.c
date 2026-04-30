@@ -85,7 +85,10 @@ void hal_lockScheduler(void)
 }
 
 
-__attribute__((section(".init"))) void _hal_init(void)
+void _hal_init_c(void) __attribute__((section(".init"), noinline));
+
+
+void _hal_init_c(void)
 {
 	const syspage_prog_t *dtb;
 	addr_t dtbStart;
@@ -99,38 +102,29 @@ __attribute__((section(".init"))) void _hal_init(void)
 	 * Markers go through the same TTBR1-mapped early UART used by
 	 * the syspage_init probes. */
 	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
 
-	while (*uartfr & 0x20) {}
 	*uart = 'H'; /* H marker - _hal_init entry */
 
 	hal_common.started = 0;
-	while (*uartfr & 0x20) {}
 	*uart = '4';
 
 	schedulerLocked = 0;
-	while (*uartfr & 0x20) {}
 	*uart = '5';
 
 	_hal_spinlockInit();
-	while (*uartfr & 0x20) {}
 	*uart = '6';
 
 	if ((hal_syspage->hs.firmwareDtb != 0u) && (hal_syspage->hs.firmwareDtbSize != 0u)) {
-		while (*uartfr & 0x20) {}
 		*uart = 'F'; /* F marker - using firmware dtb */
 		dtbStart = hal_syspage->hs.firmwareDtb;
 		dtbEnd = dtbStart + hal_syspage->hs.firmwareDtbSize;
 		hal_consolePrint(ATTR_USER, "hal: using firmware dtb\n");
 	}
 	else {
-		while (*uartfr & 0x20) {}
 		*uart = 'S'; /* S marker - using syspage dtb */
 		dtb = syspage_progNameResolve("system.dtb");
-		while (*uartfr & 0x20) {}
 		*uart = 'r'; /* r marker - progNameResolve returned */
 		if (dtb == NULL) {
-			while (*uartfr & 0x20) {}
 			*uart = '!'; /* ! marker - DTB missing, halt */
 #ifdef NDEBUG
 			hal_cpuReboot();
@@ -140,11 +134,9 @@ __attribute__((section(".init"))) void _hal_init(void)
 			}
 #endif
 		}
-		while (*uartfr & 0x20) {}
 		*uart = 'D'; /* D marker - dtb non-NULL */
 
 		dtbStart = dtb->start;
-		while (*uartfr & 0x20) {}
 		*uart = 's'; /* s marker - after reading dtb->start */
 
 		/* TODO(TD-04-hack-3): dtb->end read hangs the kernel on real
@@ -159,41 +151,32 @@ __attribute__((section(".init"))) void _hal_init(void)
 		 * properly fixed once the underlying issue is rooted out.
 		 * See TEMPORARY-FIXES TD-04-hack-3. */
 		dtbEnd = dtbStart + 0x10000; /* HACK: 64 KiB upper bound, real size from DTB header */
-		while (*uartfr & 0x20) {}
 		*uart = 'E'; /* E marker - dtbEnd faked from dtbStart */
 		hal_consolePrint(ATTR_USER, "hal: using syspage dtb\n");
 	}
 
-	while (*uartfr & 0x20) {}
 	*uart = '7';
 	_pmap_preinit(dtbStart, dtbEnd);
-	while (*uartfr & 0x20) {}
 	*uart = '8';
 
 	_hal_platformInit();
-	while (*uartfr & 0x20) {}
 	*uart = '9';
 
 	_hal_consoleInit();
-	while (*uartfr & 0x20) {}
 	*uart = 'a';
 
 	hal_consolePrint(ATTR_USER, "hal: console init done\n");
 
 	_hal_exceptionsInit();
-	while (*uartfr & 0x20) {}
 	*uart = 'b';
 
 	_hal_interruptsInit();
-	while (*uartfr & 0x20) {}
 	*uart = 'c';
 
 	_hal_cpuInit();
-	while (*uartfr & 0x20) {}
 	*uart = 'd';
 
 	_hal_timerInit(SYSTICK_INTERVAL);
-	while (*uartfr & 0x20) {}
 	*uart = 'e';
 
 	return;

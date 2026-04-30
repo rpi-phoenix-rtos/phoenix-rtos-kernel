@@ -109,10 +109,10 @@ int main(void)
 {
 	char s[128];
 	
-	/* DEBUG: Send marker immediately upon entry */
-	/* Use the correct Raspberry Pi 4 UART base address */
-	volatile unsigned int *uart = (volatile unsigned int *)0xfe201000;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xfe201018;
+	/* DEBUG: Send marker immediately upon entry.
+	 * After MMU enable, use the TTBR1-mapped early PL011 alias. */
+	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
 	
 	/* Wait for UART to be ready */
 	while (*uartfr & 0x20) {}
