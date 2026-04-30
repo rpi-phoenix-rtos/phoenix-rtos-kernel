@@ -94,22 +94,7 @@ static struct {
 	intr_handler_t *handlers[SIZE_INTERRUPTS];
 	unsigned int counters[SIZE_INTERRUPTS];
 	int trace_irqs;
-	int timerTraceRegistered;
-	int timerTraceDispatched;
 } interrupts_common;
-
-
-static void interrupts_tracePrint(const char *fmt, ...)
-{
-	char buff[80];
-	va_list args;
-
-	va_start(args, fmt);
-	(void)lib_vsprintf(buff, fmt, args);
-	va_end(args);
-
-	hal_consolePrint(ATTR_USER, buff);
-}
 
 
 void _hal_interruptsInitPerCPU(void);
@@ -135,11 +120,6 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	trace = interrupts_common.trace_irqs != 0 && n != hal_timerIrq();
 	if (trace != 0) {
 		trace_eventInterruptEnter(n);
-	}
-
-	if ((n == hal_timerIrq()) && (interrupts_common.timerTraceDispatched == 0)) {
-		interrupts_common.timerTraceDispatched = 1;
-		hal_consolePrint(ATTR_USER, "gic: timer dispatch\n");
 	}
 
 	hal_spinlockSet(&interrupts_common.spinlock[n], &sc);
@@ -197,15 +177,6 @@ static void interrupts_setConf(unsigned int irqn, u32 conf)
 }
 
 
-static u32 interrupts_getGroup(unsigned int irqn)
-{
-	unsigned int irq_reg = irqn / 32U;
-	unsigned int irq_offs = irqn % 32U;
-
-	return (*(interrupts_common.gicd + gicd_igroupr0 + irq_reg) >> irq_offs) & 0x1U;
-}
-
-
 static void interrupts_setGroup(unsigned int irqn, u32 group)
 {
 	unsigned int irq_reg = irqn / 32U;
@@ -238,15 +209,6 @@ static void interrupts_setPriority(unsigned int irqn, u32 priority)
 }
 
 
-static u32 interrupts_getEnabled(unsigned int irqn)
-{
-	unsigned int irq_reg = irqn / 32U;
-	unsigned int irq_offs = irqn % 32U;
-
-	return (*(interrupts_common.gicd + gicd_isenabler0 + irq_reg) >> irq_offs) & 0x1U;
-}
-
-
 u32 interrupts_getPending(unsigned int irqn)
 {
 	unsigned int irq_reg = irqn / 32U;
@@ -263,18 +225,6 @@ u32 interrupts_getPrivatePending(unsigned int irqn)
 	}
 
 	return (*(interrupts_common.gicd + gicd_ppisr) >> (irqn - 16U)) & 0x1U;
-}
-
-
-u32 interrupts_getHighestPending(void)
-{
-	return *(interrupts_common.gicc + gicc_hppir) & 0x3ffU;
-}
-
-
-u32 interrupts_getAliasedHighestPending(void)
-{
-	return *(interrupts_common.gicc + gicc_ahppir) & 0x3ffU;
 }
 
 
@@ -304,10 +254,6 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 		interrupts_setCPU(h->n, DEFAULT_CPU_MASK);
 	}
 	interrupts_enableIRQ(h->n);
-	if ((h->n == hal_timerIrq()) && (interrupts_common.timerTraceRegistered == 0)) {
-		interrupts_common.timerTraceRegistered = 1;
-		interrupts_tracePrint("gic: timer handler set grp %u en %u\n", interrupts_getGroup(h->n), interrupts_getEnabled(h->n));
-	}
 
 	hal_spinlockClear(&interrupts_common.spinlock[h->n], &sc);
 
@@ -359,8 +305,6 @@ void _hal_interruptsInit(void)
 	addr_t gicc, gicd;
 
 	interrupts_common.trace_irqs = 0;
-	interrupts_common.timerTraceRegistered = 0;
-	interrupts_common.timerTraceDispatched = 0;
 
 	dtb_getGIC(&gicc, &gicd);
 	interrupts_common.gicd = _pmap_halMapDevice(gicd, 0, SIZE_PAGE);

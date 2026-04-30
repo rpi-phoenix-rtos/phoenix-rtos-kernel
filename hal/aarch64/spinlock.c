@@ -15,6 +15,7 @@
 
 #include "hal/spinlock.h"
 #include "hal/cpu.h"
+#include "hal/hal.h"
 #include "hal/list.h"
 
 static struct {
@@ -25,6 +26,29 @@ static struct {
 
 void hal_spinlockSet(spinlock_t *spinlock, spinlock_ctx_t *sc)
 {
+#if NUM_CPUS == 1
+	(void)spinlock;
+	__asm__ volatile(
+		"mrs x2, daif\n"
+		"msr daifSet, #3\n"
+		"str w2, [%0]\n"
+		:
+		: "r"(sc)
+		: "x2", "memory");
+	return;
+#else
+	if (hal_started() == 0) {
+		(void)spinlock;
+		__asm__ volatile(
+			"mrs x2, daif\n"
+			"msr daifSet, #3\n"
+			"str w2, [%0]\n"
+			:
+			: "r"(sc)
+			: "x2", "memory");
+		return;
+	}
+
 	/* clang-format off */
 	__asm__ volatile (
 		"mrs x2, daif\n"
@@ -42,11 +66,33 @@ void hal_spinlockSet(spinlock_t *spinlock, spinlock_ctx_t *sc)
 	: "r" (sc), "r" (&spinlock->lock)
 	: "x2", "memory");
 	/* clang-format on */
+#endif
 }
 
 
 void hal_spinlockClear(spinlock_t *spinlock, spinlock_ctx_t *sc)
 {
+#if NUM_CPUS == 1
+	(void)spinlock;
+	__asm__ volatile(
+		"ldr w2, [%0]\n"
+		"msr daif, x2\n"
+		:
+		: "r"(sc)
+		: "x2", "memory");
+	return;
+#else
+	if (hal_started() == 0) {
+		(void)spinlock;
+		__asm__ volatile(
+			"ldr w2, [%0]\n"
+			"msr daif, x2\n"
+			:
+			: "r"(sc)
+			: "x2", "memory");
+		return;
+	}
+
 	/* clang-format off */
 	__asm__ volatile (
 		"mov w2, #1\n"
@@ -57,6 +103,7 @@ void hal_spinlockClear(spinlock_t *spinlock, spinlock_ctx_t *sc)
 	: "r" (&spinlock->lock), "r" (sc)
 	: "x2", "memory");
 	/* clang-format on */
+#endif
 }
 
 
@@ -71,6 +118,14 @@ static void _hal_spinlockCreate(spinlock_t *spinlock, const char *name)
 void hal_spinlockCreate(spinlock_t *spinlock, const char *name)
 {
 	spinlock_ctx_t sc;
+
+	if (hal_started() == 0) {
+		/* Early boot is single-core with interrupts masked. Avoid taking the
+		 * global spinlock registry lock before the AArch64 cache/exclusive
+		 * monitor setup is fully proven on real Pi 4 hardware. */
+		_hal_spinlockCreate(spinlock, name);
+		return;
+	}
 
 	hal_spinlockSet(&spinlock_common.spinlock, &sc);
 	_hal_spinlockCreate(spinlock, name);

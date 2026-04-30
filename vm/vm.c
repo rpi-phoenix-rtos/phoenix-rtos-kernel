@@ -51,11 +51,17 @@ void _vm_init(vm_map_t *kmap, vm_object_t *kernel)
 	(void)_map_init(kmap, kernel, &vm.bss, &vm.top);
 	hal_consolePrint(ATTR_USER, "vm: map init done\n");
 
+	hal_consolePrint(ATTR_USER, "vm: zone init\n");
 	_zone_init(kmap, kernel, &vm.bss, &vm.top);
+	hal_consolePrint(ATTR_USER, "vm: kmalloc init\n");
 	(void)_kmalloc_init();
+	hal_consolePrint(ATTR_USER, "vm: kmalloc init done\n");
 
+	hal_consolePrint(ATTR_USER, "vm: object init\n");
 	(void)_object_init(kmap, kernel);
+	hal_consolePrint(ATTR_USER, "vm: amap init\n");
 	_amap_init(kmap, kernel);
+	hal_consolePrint(ATTR_USER, "vm: init done\n");
 
 	return;
 }

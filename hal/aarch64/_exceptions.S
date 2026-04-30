@@ -34,7 +34,6 @@
 	stlr wzr, [\scratchReg] /* Global monitor clear generates an event, SEV not necessary */
 .endm
 
-
 /* Unused vectors are filled with undefined instructions to cause an exception if they are ever triggered */
 .macro unused_vector
 .rept 31
@@ -46,33 +45,6 @@
 
 /* This macro creates an exception vector, so it cannot contain more than 32 instructions */
 .macro exception_vector fromUserspace doCheckFPUTrap dispatchFunction
-	ldr x26, =PL011_TTY_EARLY_VADDR
-	mov w27, #33
-	str w27, [x26]
-	mov w27, #101
-	str w27, [x26]
-	mov w27, #123
-	str w27, [x26]
-	mrs x28, esr_el1
-	mov x29, #28
-997:
-	lsr x27, x28, x29
-	and w27, w27, #0xf
-	cmp w27, #10
-	b.lo 998f
-	add w27, w27, #('a' - 10)
-	b 999f
-998:
-	add w27, w27, #'0'
-999:
-	str w27, [x26]
-	subs x29, x29, #4
-	b.ge 997b
-	mov w27, #125
-	str w27, [x26]
-996:
-	wfe
-	b 996b
 	stp x28, x29, [sp, #-0x20]
 .if \fromUserspace
 	mrs X_OLD_SP, sp_el0
@@ -211,14 +183,15 @@ _exceptions_dispatch:
 	stp X_ESR_EL1, x1, [sp, #-0x10]!
 	mov x1, sp
 
-	msr daifClr, #7
+	/* Do not implicitly unmask SError/FIQ while dispatching exceptions. */
+	msr daifClr, #2
 
 	/* Arguments to exceptions_dispatch:
 	 * * x0 - exception class
 	 * * x1 - pointer to exception context */
 	bl exceptions_dispatch
 
-	msr daifSet, #7
+	msr daifSet, #2
 
 	ldr x1, [sp, #0x10] /* Discard esr, far - not needed to restore context */
 	b _hal_cpuRestoreCtx
@@ -229,7 +202,8 @@ _syscalls_dispatch:
 	b.ne .L_el1_syscall
 	mov x1, X_OLD_SP
 	mov x2, sp
-	msr daifClr, #7
+	/* Do not implicitly unmask SError/FIQ while dispatching syscalls. */
+	msr daifClr, #2
 
 	/* Arguments to syscalls_dispatch:
 	 * * x0 - syscall number
@@ -237,7 +211,7 @@ _syscalls_dispatch:
 	 * * x2 - pointer to exception context */
 	bl syscalls_dispatch
 
-	msr daifSet, #7
+	msr daifSet, #2
 
 	ldr x1, [sp]
 	b _hal_cpuRestoreCtx
@@ -274,14 +248,11 @@ _syscalls_dispatch:
 _interrupts_dispatch:
 	mov x1, sp
 	mov x0, #0
-	msr daifClr, #4
 
 	/* Arguments to interrupts_dispatch:
 	 * * x0 - interrupt number (unused)
 	 * * x1 - pointer to CPU context */
 	bl interrupts_dispatch
-
-	msr daifSet, #4
 
 	ldr x1, [sp]
 	/* Check return value to see if reschedule was performed */
@@ -409,7 +380,7 @@ hal_jmp:
 	mov sp, x1
 	msr sp_el0, x2
 	/* TODO: There are some extensions that have their flags in SPSR and we clear them here. */
-	mov x1, #MODE_EL0
+	mov x1, #(MODE_EL0 | NO_SERR)
 	msr spsr_el1, x1
 	eret
 .size hal_jmp, .-hal_jmp

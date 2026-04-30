@@ -43,16 +43,26 @@ static void main_initthr(void *unused)
 
 	syspage_prog_t *prog;
 	char *argv[32], *cmdline;
+	char msg[96];
+
+	hal_consolePrint(ATTR_USER, "main_initthr: enter\n");
 
 	/* Enable locking and multithreading related mechanisms */
 	_hal_start();
+	hal_consolePrint(ATTR_USER, "main_initthr: hal started\n");
+
 	_usrv_start();
+	hal_consolePrint(ATTR_USER, "main_initthr: usrv started\n");
 
 	lib_printf("main: Starting syspage programs:");
 	syspage_progShow();
+	hal_consolePrint(ATTR_USER, "main_initthr: syspage listed\n");
 
 	posix_init();
+	hal_consolePrint(ATTR_USER, "main_initthr: posix init done\n");
+
 	(void)posix_clone(-1);
+	hal_consolePrint(ATTR_USER, "main_initthr: posix clone done\n");
 
 	/* Start programs from syspage */
 	prog = syspage_progList();
@@ -88,13 +98,16 @@ static void main_initthr(void *unused)
 			}
 			argv[argc] = NULL;
 
-			lib_printf("main: spawn %s\n", argv[0]);
+			(void)lib_sprintf(msg, "main: spawn %s\n", argv[0]);
+			hal_consolePrint(ATTR_USER, msg);
 			res = proc_syspageSpawn(prog, vm_getSharedMap((int)prog->imaps[0]), vm_getSharedMap((int)prog->dmaps[0]), argv[0], argv);
 			if (res < 0) {
-				lib_printf("main: failed to spawn %s (%d)\n", argv[0], res);
+				(void)lib_sprintf(msg, "main: failed to spawn %s (%d)\n", argv[0], res);
+				hal_consolePrint(ATTR_USER, msg);
 			}
 			else {
-				lib_printf("main: spawned %s (%d)\n", argv[0], res);
+				(void)lib_sprintf(msg, "main: spawned %s (%d)\n", argv[0], res);
+				hal_consolePrint(ATTR_USER, msg);
 			}
 		} while ((prog = prog->next) != syspage_progList());
 	}
@@ -164,9 +177,13 @@ int main(void)
 	lib_printf("hal: %s\n", hal_timerFeatures(s, sizeof(s)));
 
 	_vm_init(&main_common.kmap, &main_common.kernel);
+	hal_consolePrint(ATTR_USER, "main: vm init done\n");
 	(void)_perf_init(&main_common.kmap);
+	hal_consolePrint(ATTR_USER, "main: perf init done\n");
 	(void)_proc_init(&main_common.kmap, &main_common.kernel);
+	hal_consolePrint(ATTR_USER, "main: proc init done\n");
 	_syscalls_init();
+	hal_consolePrint(ATTR_USER, "main: syscalls init done\n");
 
 #if 0 /* Basic kernel tests */
 	/* Start tests */
@@ -179,9 +196,10 @@ int main(void)
 #endif
 
 	(void)proc_start(main_initthr, NULL, (const char *)"init");
+	hal_consolePrint(ATTR_USER, "main: init thread started\n");
 
-	/* Start scheduling, leave current stack */
-	hal_cpuEnableInterrupts();
+	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */
+	hal_consolePrint(ATTR_USER, "main: reschedule\n");
 	(void)hal_cpuReschedule(NULL, NULL);
 
 	return 0;

@@ -285,6 +285,15 @@ _start:
 	add x2, x2, #1
 	str x1, [x0, x2, lsl 3]
 
+	/* Real Raspberry Pi firmware + kernel8 handoff can place the currently
+	 * executing image in a block not covered by syspage->pkernel. The first
+	 * instruction fetch after SCTLR_EL1.M is enabled still uses the low PC, so
+	 * the temporary TTBR0 identity map must explicitly cover that block. */
+	adr x1, .
+	lsr x2, x1, #30
+	orr x1, x3, x2, lsl #30
+	str x1, [x0, x2, lsl 3]
+
 	/* Map syspage VA => syspage PA */
 	lsr x2, x9, #30
 	orr x1, x3, x2, lsl #30
@@ -338,18 +347,14 @@ _start:
 	orr x0, x0, #(1 << 0)   /* Enable MMU only first */
 	msr sctlr_el1, x0
 	isb
-	/* Match Linux's arm64 early-MMU sequence: discard any instructions
-	 * speculatively fetched before the new translation regime became active. */
-	ic iallu
-	dsb nsh
-	isb
-	
-	/* Now enable caches after MMU is stable */
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 12)  /* Enable I-cache */
-	orr x0, x0, #(1 << 2)   /* Enable D-cache */
-	msr sctlr_el1, x0
-	isb
+	uart_tag2 88, 52
+
+	/* Do not perform a global I-cache invalidation or enable caches on the
+	 * low-PC identity stream. Real Cortex-A72 hardware reaches X4 and then
+	 * hangs in this post-MMU cache-maintenance window, while QEMU tolerates
+	 * it. Keep the first transition minimal: enable translation, move to the
+	 * linked TTBR1 address, and let later kernel code enable/tune caches. */
+	uart_tag2 88, 53
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
 	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
 
@@ -461,9 +466,32 @@ _start:
 	mrs x0, tcr_el1
 	bic x0, x0, #(1 << 23)
 	msr tcr_el1, x0
+	dsb ish
+	isb
+	tlbi vmalle1is
+	dsb ish
 	isb
 
 	uart_putc_virt 78
+
+	/* Switch the primary core to the linked higher-half instruction stream.
+	 *
+	 * The firmware/plo handoff loads the kernel at a low physical address, so
+	 * PC remains low across MMU enable. Keeping the rest of the kernel entry
+	 * on that low-PC stream is architecturally wrong once TTBR0 is later
+	 * replaced: QEMU reports ESR_EL1=0x86000005 (same-EL instruction abort,
+	 * level-1 translation fault) immediately after the low-PC branch to main.
+	 *
+	 * Load the linked virtual target from a literal pool while the low identity
+	 * map is still valid, then branch once into the TTBR1 kernel mapping. The
+	 * preceding TLB invalidation makes the newly enabled TTBR1 path visible
+	 * before the instruction fetch.
+	 */
+	ldr x0, =_core_0_virtual
+	br x0
+
+_core_0_virtual:
+	uart_putc_virt 33  /* '!' - primary core now fetches through TTBR1 */
 
 	/* DEBUG: Marker before former branch point */
 	mov w0, #89  /* ASCII 'Y' - about to enter virtual memory code */

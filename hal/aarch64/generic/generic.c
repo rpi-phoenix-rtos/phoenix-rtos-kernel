@@ -100,6 +100,11 @@ void _hal_platformInit(void)
 
 void _hal_cpuInit(void)
 {
+	if (hal_started() == 0) {
+		nCpusStarted++;
+		return;
+	}
+
 	hal_cpuAtomicInc(&nCpusStarted);
 }
 

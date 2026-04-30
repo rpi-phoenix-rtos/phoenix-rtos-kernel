@@ -63,16 +63,17 @@ int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, si
 		ctx->x[i] = 0x0101010101010101UL * i;
 	}
 
+	/* Enable interrupts, set normal execution mode */
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "Need to assign function address to processor register" */
 	ctx->pc = (u64)start;
 
-	/* Enable interrupts, set normal execution mode */
 	if (ustack != NULL) {
-		ctx->psr = MODE_EL0;
+		ctx->psr = MODE_EL0 | NO_SERR;
 		ctx->sp = (u64)ustack;
 	}
 	else {
-		ctx->psr = MODE_EL1_SP1;
+		/* SError is asynchronous; keep it masked until the platform has a real handler/policy. */
+		ctx->psr = MODE_EL1_SP1 | NO_SERR;
 		ctx->sp = (u64)kstack + kstacksz;
 	}
 

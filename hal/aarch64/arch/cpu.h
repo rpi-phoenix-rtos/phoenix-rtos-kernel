@@ -86,7 +86,7 @@ static inline void hal_cpuDisableInterrupts(void)
 
 static inline void hal_cpuEnableInterrupts(void)
 {
-	__asm__ volatile("msr daifClr, #3\n dsb ish \n isb");
+	__asm__ volatile("msr daifClr, #2\n dsb ish \n isb");
 }
 
 

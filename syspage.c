@@ -469,25 +469,37 @@ void syspage_init(void)
 		*uart = 'n'; /* n marker - end of map loop */
 	}
 
-	/* TODO(TD-04-hack-1): Program-relocation loop is currently SKIPPED
-	 * on Pi 4. Empirically the very first head store
-	 *
-	 *     syspage_common.syspage->progs = hal_syspageRelocate(...)
-	 *
-	 * hangs the kernel on real Pi 4 hardware (works fine in QEMU and
-	 * on ZynqMP), even though the visually-equivalent map-iter loop
-	 * just above runs cleanly through all 11 entries with the same
-	 * NC-mapped destination. This is a Heisenbug-class follow-on to
-	 * TD-04: code-layout-sensitive hangs that the NC-dest mapping
-	 * alone does not fully address. Skipping the prog loop lets boot
-	 * proceed past syspage_init() and reach _hal_init(); the cost is
-	 * that the syspage's progs list still contains plo-PA pointers,
-	 * which will break userspace launch later. To be re-enabled (or
-	 * properly fixed) once the underlying coherency / layout
-	 * sensitivity is understood. See TEMPORARY-FIXES TD-04-hack-1. */
 	while (*uartfr & 0x20) {}
-	*uart = 'P'; /* P marker - entering program-reloc block (HACK: SKIPPED) */
-	(void)prog; /* suppress unused-var warning while loop body is gone */
+	*uart = 'P'; /* P marker - entering program-reloc block */
+	if (syspage_common.syspage->progs != NULL) {
+		int progCount = 0;
+		syspage_common.syspage->progs = hal_syspageRelocate(syspage_common.syspage->progs);
+		while (*uartfr & 0x20) {}
+		*uart = 'p'; /* p marker - program head relocated */
+		prog = syspage_common.syspage->progs;
+		do {
+			while (*uartfr & 0x20) {}
+			*uart = '0' + (progCount % 10);
+			if (progCount++ >= 64) {
+				while (*uartfr & 0x20) {}
+				*uart = 'Q'; /* Q marker - program-loop safety cap hit */
+				break;
+			}
+
+			prog->next = hal_syspageRelocate(prog->next);
+			prog->prev = hal_syspageRelocate(prog->prev);
+			prog->argv = hal_syspageRelocate(prog->argv);
+			if (prog->imaps != NULL) {
+				prog->imaps = hal_syspageRelocate(prog->imaps);
+			}
+			if (prog->dmaps != NULL) {
+				prog->dmaps = hal_syspageRelocate(prog->dmaps);
+			}
+			prog = prog->next;
+		} while (prog != syspage_common.syspage->progs);
+		while (*uartfr & 0x20) {}
+		*uart = 'Z'; /* Z marker - program relocation complete */
+	}
 
 	/* DEBUG: Send marker at end of syspage_init() */
 	while (*uartfr & 0x20) {}
