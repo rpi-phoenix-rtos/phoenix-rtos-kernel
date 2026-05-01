@@ -20,6 +20,18 @@
 #include "resource.h"
 
 
+static void proc_mutexTd13Probe(char c)
+{
+	static volatile unsigned int cnt = 0;
+	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+
+	if (cnt < 64U) {
+		cnt++;
+		*uart = c;
+	}
+}
+
+
 mutex_t *mutex_get(int h)
 {
 	thread_t *t = proc_current();
@@ -54,11 +66,14 @@ int proc_mutexCreate(const struct lockAttr *attr)
 	mutex_t *mutex;
 	int id;
 
+	proc_mutexTd13Probe('a'); /* TODO(TD-13): proc_mutexCreate entry, before user attr dereference */
 	if ((attr->type != PH_LOCK_NORMAL) && (attr->type != PH_LOCK_RECURSIVE) && (attr->type != PH_LOCK_ERRORCHECK)) {
 		return -EINVAL;
 	}
 
+	proc_mutexTd13Probe('b'); /* TODO(TD-13): attr read/validation passed */
 	mutex = vm_kmalloc(sizeof(*mutex));
+	proc_mutexTd13Probe('c'); /* TODO(TD-13): vm_kmalloc returned */
 	if (mutex == NULL) {
 		return -ENOMEM;
 	}
@@ -67,14 +82,17 @@ int proc_mutexCreate(const struct lockAttr *attr)
 	mutex->resource.type = rtLock;
 
 	id = resource_alloc(p, &mutex->resource);
+	proc_mutexTd13Probe('d'); /* TODO(TD-13): resource_alloc returned */
 	if (id < 0) {
 		vm_kfree(mutex);
 		return -ENOMEM;
 	}
 
 	(void)proc_lockInit(&mutex->lock, attr, "user.mutex");
+	proc_mutexTd13Probe('e'); /* TODO(TD-13): proc_lockInit returned */
 
 	(void)resource_put(p, &mutex->resource);
+	proc_mutexTd13Probe('f'); /* TODO(TD-13): resource_put returned */
 
 	return id;
 }
