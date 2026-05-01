@@ -133,6 +133,13 @@ static void main_initthr(void *unused)
 		} while ((prog = prog->next) != syspage_progList());
 	}
 
+	/* TD-13 probe: confirm main() reaches the proc_reap idle loop.
+	 * If this prints but user processes still produce no UART output,
+	 * the silence is downstream (pl011-tty / /dev/console binding).
+	 * If this DOES NOT print, something is hanging between the spawn
+	 * loop's last iteration and entering proc_reap. */
+	hal_consolePrint(ATTR_USER, "main: spawn loop done, entering proc_reap idle\n");
+
 	for (;;) {
 		proc_reap();
 	}

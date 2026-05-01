@@ -578,25 +578,37 @@ int syscalls_phMutexCreate(u8 *ustack)
 	handle_t *h;
 	const struct lockAttr *attr;
 	int res;
+	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+
+	(void)proc;
+	*uart = 'M'; /* TD-13: phMutexCreate entry */
 
 	GETFROMSTACK(ustack, handle_t *, h, 0U);
 	GETFROMSTACK(ustack, const struct lockAttr *, attr, 1U);
 
-	if (vm_mapBelongs(proc, h, sizeof(*h)) < 0) {
-		return -EFAULT;
-	}
+	*uart = '1';
 
-	if (vm_mapBelongs(proc, attr, sizeof(*attr)) < 0) {
-		return -EFAULT;
-	}
+	/* TODO(TD-13-mtxbypass): vm_mapBelongs() acquires proc->mapp->lock.
+	 * Empirically on real Pi 4 this hangs forever — every user process
+	 * makes exactly ONE syscall (phMutexCreate via libphoenix's
+	 * _errno_init mutexCreate(&errno_common.lock)) and never makes
+	 * another. Bypassing the validation here lets us see whether the
+	 * proc_mutexCreate path itself works, and whether user processes
+	 * can proceed to their actual main(). Risk: kernel could fault on
+	 * bad user pointers; acceptable during bring-up. */
+
+	*uart = '2';
 
 	res = proc_mutexCreate(attr);
+	*uart = '3';
 
 	if (res < 0) {
+		*uart = 'E';
 		return res;
 	}
 
 	*h = res;
+	*uart = 'K';
 	return EOK;
 }
 
@@ -1932,6 +1944,22 @@ void *syscalls_dispatch(int n, u8 *ustack, cpu_context_t *ctx)
 {
 	void *retval;
 	int tid;
+
+	/* TD-13 probe: log first 32 syscall numbers as 's<NN>' (decimal,
+	 * 2 digits). Tells us which syscalls user processes attempt and
+	 * in what order — without depending on /dev/console. Self-limits
+	 * after 32 events. */
+	{
+		static volatile unsigned int td13_syscall_count = 0;
+		if (td13_syscall_count < 32U) {
+			td13_syscall_count++;
+			volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+			*uart = 's';
+			*uart = '0' + (((unsigned int)n / 10) % 10);
+			*uart = '0' + ((unsigned int)n % 10);
+			*uart = ' ';
+		}
+	}
 
 	if (n >= (int)(sizeof(syscalls) / sizeof(syscalls[0]))) {
 		return (void *)-EINVAL;
