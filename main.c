@@ -67,6 +67,23 @@ static void main_initthr(void *unused)
 	/* Start programs from syspage */
 	prog = syspage_progList();
 	if (prog != NULL) {
+		/* TODO(TD-13-spawn-cap): hard cap on spawn-loop iterations on
+		 * real Pi 4. Empirically the loop iterates correctly through
+		 * all 9 progs (dummyfs-root → … → psh) once, prints each
+		 * legitimate "spawned X (PID)" line, and then keeps printing
+		 * "main: spawned psh (9)" tens of thousands of times — i.e.
+		 * the do-while termination
+		 *     `(prog = prog->next) != syspage_progList()`
+		 * never fires because `psh->next` doesn't return to the head
+		 * on real hardware (works in QEMU). Same shape as TD-04
+		 * cache-coherency on the syspage. Cap forces a clean exit so
+		 * the rest of the kernel (and the spawned user processes) can
+		 * actually run.
+		 *
+		 * Bound is 32 (well above the 9 progs we ship, well below the
+		 * 187 K iters seen without the cap). Once TD-13 root cause is
+		 * understood, this cap becomes a redundancy. */
+		int spawnIters = 0;
 		do {
 			cmdline = prog->argv;
 			/* If app shouldn't be executed then args should be discarded */
@@ -108,6 +125,10 @@ static void main_initthr(void *unused)
 			else {
 				(void)lib_sprintf(msg, "main: spawned %s (%d)\n", argv[0], res);
 				hal_consolePrint(ATTR_USER, msg);
+			}
+			if (++spawnIters >= 32) {
+				hal_consolePrint(ATTR_USER, "main: TD-13 spawn-cap hit, breaking spawn loop\n");
+				break;
 			}
 		} while ((prog = prog->next) != syspage_progList());
 	}
