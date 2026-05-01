@@ -169,54 +169,10 @@ _exceptions_untrapFPU:
 .word 0
 .word 0
 
-/* TD-13 probe: writable counter — increments to 16, then probe stops. */
-.pushsection ".data", "aw"
-.align 4
-_td13_probe_count: .word 0
-.popsection
-
 .align 4
 .globl _exceptions_dispatch
 .type _exceptions_dispatch, %function
 _exceptions_dispatch:
-	/* TD-13 probe: print one byte per arrival at _exceptions_dispatch
-	 * for the first 16 EL0-source exceptions, encoded as
-	 *   '*' + EC top-nibble-hex + EC low-nibble-hex
-	 * so we can tell whether user processes are syscalling normally
-	 * (EC=0x15 → "*15") or faulting on first instruction (e.g. EC=0x21
-	 * instruction abort → "*21", EC=0x24 data abort → "*24"). After
-	 * 16 prints the probe disables itself so it doesn't drown the
-	 * UART once syscalls start flowing. Only EL0-source events are
-	 * traced so kernel-side debug exceptions are unaffected.
-	 *
-	 * Uses x4..x7 (caller-clobbered in this context); X_SPSR_EL1=x3
-	 * and X_ESR_EL1=x28 are still valid from the entry stub. */
-	tst X_SPSR_EL1, #MODE_MASK
-	b.ne 100f                      /* not from EL0, skip probe */
-	adr x4, _td13_probe_count
-	ldr w5, [x4]
-	cmp w5, #16
-	b.hs 100f                      /* 16 hits already, skip */
-	add w5, w5, #1
-	str w5, [x4]
-	ldr x4, =PL011_TTY_EARLY_VADDR
-	mov w5, #0x2A                  /* '*' */
-	str w5, [x4]
-	lsr w6, W_ESR_EL1, #30         /* EC top 2 bits (bits 31:30 of ESR == EC[5:4]) */
-	and w6, w6, #0x3
-	add w7, w6, #'0'
-	cmp w6, #10
-	b.lo 101f
-	add w7, w6, #('a' - 10)
-101:	str w7, [x4]
-	lsr w6, W_ESR_EL1, #26         /* EC[3:0] within 6-bit EC field */
-	and w6, w6, #0xf
-	add w7, w6, #'0'
-	cmp w6, #10
-	b.lo 102f
-	add w7, w6, #('a' - 10)
-102:	str w7, [x4]
-100:
 	/* Extract exception class from syndrome */
 	lsr w0, W_ESR_EL1, #26
 	cmp w0, 0x15 /* SVC executed in AArch64 */
@@ -427,108 +383,8 @@ hal_jmp:
 	mov x1, #(MODE_EL0 | NO_SERR)
 	msr spsr_el1, x1
 
-	/* TD-13 probe: emit '>' to UART immediately before `eret` to user
-	 * mode so we can tell from the UART trace whether hal_jmp() ever
-	 * actually reaches the EL0 transition for any of the spawned
-	 * processes. Pair with the EL0-sync vector probe at
-	 * `_vector_table + 0x400` (bound to `_early_exception_probe`) so a
-	 * full sequence looks like:
-	 *   `>`           (user-mode entry attempted)
-	 *   `>`           (next user thread also attempting)
-	 *   `!E{...}F{...}L{...}`  (first user-mode sync fault, halts)
-	 * If `>` never appears, the bug is upstream of hal_jmp's user
-	 * branch (scheduler / context restore / context-switch path).
-	 * If many `>`s appear with no `!E{...}`, user mode is running but
-	 * silent (likely an output/console-driver issue, not a fault).
-	 *
-	 * x4/x5 are unused on this path: hal_jmp's user branch only
-	 * consumes x0 (entry) and x2 (ustack). Removing this probe also
-	 * means restoring the EL0-sync vector to `_exceptions_dispatch`. */
-	ldr x4, =PL011_TTY_EARLY_VADDR
-	mov w5, #62 /* '>' */
-	str w5, [x4]
-
 	eret
 .size hal_jmp, .-hal_jmp
-
-
-.align 4
-.type _early_exception_probe, %function
-_early_exception_probe:
-	ldr x26, =PL011_TTY_EARLY_VADDR
-	mrs x20, esr_el1
-	mrs x21, far_el1
-	mrs x22, elr_el1
-
-	mov w27, #33   /* '!' */
-	str w27, [x26]
-	mov w27, #69   /* 'E' */
-	str w27, [x26]
-	mov w27, #123  /* '{' */
-	str w27, [x26]
-	mov x23, #60
-1:
-	lsr x24, x20, x23
-	and w24, w24, #0xf
-	cmp w24, #10
-	b.lo 2f
-	add w24, w24, #('a' - 10)
-	b 3f
-2:
-	add w24, w24, #'0'
-3:
-	str w24, [x26]
-	subs x23, x23, #4
-	b.ge 1b
-	mov w27, #125  /* '}' */
-	str w27, [x26]
-
-	mov w27, #70   /* 'F' */
-	str w27, [x26]
-	mov w27, #123  /* '{' */
-	str w27, [x26]
-	mov x23, #60
-4:
-	lsr x24, x21, x23
-	and w24, w24, #0xf
-	cmp w24, #10
-	b.lo 5f
-	add w24, w24, #('a' - 10)
-	b 6f
-5:
-	add w24, w24, #'0'
-6:
-	str w24, [x26]
-	subs x23, x23, #4
-	b.ge 4b
-	mov w27, #125  /* '}' */
-	str w27, [x26]
-
-	mov w27, #76   /* 'L' */
-	str w27, [x26]
-	mov w27, #123  /* '{' */
-	str w27, [x26]
-	mov x23, #60
-7:
-	lsr x24, x22, x23
-	and w24, w24, #0xf
-	cmp w24, #10
-	b.lo 8f
-	add w24, w24, #('a' - 10)
-	b 9f
-8:
-	add w24, w24, #'0'
-9:
-	str w24, [x26]
-	subs x23, x23, #4
-	b.ge 7b
-	mov w27, #125  /* '}' */
-	str w27, [x26]
-
-10:
-	wfe
-	b 10b
-.size _early_exception_probe, .-_early_exception_probe
 
 
 .align 11, 0x00
@@ -563,14 +419,6 @@ _vector_table:
 
 /* from EL0 in AArch64 */
 .org (_vector_table + 0x400)
-	/* TD-13 probe (1st round): the EL0-sync vector was temporarily
-	 * routed to `_early_exception_probe` to learn what kind of
-	 * exception fires when the spawned user processes start running.
-	 * Result: ESR=0x56000010 (EC=0x15 = SVC instruction in AArch64),
-	 * FAR=0, ELR=0x4035b0. That's a legitimate syscall, not a fault
-	 * — so user mode IS running. Restoring the normal SVC dispatch
-	 * here. The `>` marker before `eret` in `hal_jmp` stays in place
-	 * so we can count user-mode entries in subsequent runs. */
 	exception_vector 1 1 _exceptions_dispatch
 
 .org (_vector_table + 0x480)
