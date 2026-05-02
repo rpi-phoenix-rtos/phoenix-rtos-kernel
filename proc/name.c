@@ -31,6 +31,8 @@ typedef struct _dcache_entry_t {
 static struct {
 	int root_registered;
 	oid_t root_oid;
+	int devfs_registered;
+	oid_t devfs_oid;
 
 	dcache_entry_t *dcache[0x1U << HASH_LEN];
 	lock_t dcache_lock;
@@ -137,6 +139,10 @@ int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
 	(void)proc_lockSet(&name_common.dcache_lock);
 	entry->next = name_common.dcache[hash];
 	name_common.dcache[hash] = entry;
+	if (name_traceIs(name, "devfs") != 0) {
+		name_common.devfs_oid = entry->oid;
+		name_common.devfs_registered = 1;
+	}
 	(void)proc_lockClear(&name_common.dcache_lock);
 	name_traceRegister(name);
 
@@ -203,6 +209,23 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 		}
 
 		return -EINVAL;
+	}
+
+	if (name_traceDevfsLookup(name) != 0) {
+		(void)proc_lockSet(&name_common.dcache_lock);
+		if (name_common.devfs_registered != 0) {
+			if (file != NULL) {
+				*file = name_common.devfs_oid;
+			}
+
+			if (dev != NULL) {
+				*dev = name_common.devfs_oid;
+			}
+			(void)proc_lockClear(&name_common.dcache_lock);
+			name_traceDevfs("name: devfs direct hit\n");
+			return EOK;
+		}
+		(void)proc_lockClear(&name_common.dcache_lock);
 	}
 
 	/* Search cache for full path */
@@ -288,9 +311,12 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 
 	/* Query servers */
 	do {
+		size_t skip = ((i == 0U) && (name[0] != '/')) ? 0U : 1U;
+		size_t offs = i + skip;
+
 		hal_memcpy(&msg->oid, &srv, sizeof(srv));
-		msg->i.size = len - i;
-		hal_memcpy(pptr, name + i + 1, len - i);
+		msg->i.size = len - offs + 1U;
+		hal_memcpy(pptr, name + offs, len - offs + 1U);
 		msg->i.data = pptr;
 
 		if (traceDevfs != 0) {
@@ -313,7 +339,7 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 			break;
 		}
 
-		i += (size_t)err + 1U;
+		i += (size_t)err + skip;
 		if (i > len) {
 			err = -EINVAL;
 			break;

@@ -14,6 +14,7 @@
  */
 
 #include "include/errno.h"
+#include "hal/timer.h"
 #include "lib/lib.h"
 #include "proc.h"
 
@@ -30,6 +31,7 @@ enum { msg_rejected = -1, msg_waiting = 0, msg_received, msg_responded };
 static struct {
 	vm_map_t *kmap;
 	vm_object_t *kernel;
+	unsigned int td14_lookupTrace;
 } msg_common;
 
 
@@ -354,7 +356,10 @@ int proc_send(u32 port, msg_t *msg)
 	kmsg_t kmsg;
 	thread_t *sender;
 	spinlock_ctx_t sc;
-	int state;
+	int state = msg_rejected;
+	int traceLookupDevfs = 0, sawReceived = 0;
+	time_t traceStart = 0, traceQueued = 0, traceEnd = 0;
+	char traceBuff[160];
 
 	/* TODO - check if msg pointer belongs to user vm_map */
 	if (msg == NULL) {
@@ -364,6 +369,14 @@ int proc_send(u32 port, msg_t *msg)
 	p = proc_portGet(port);
 	if (p == NULL) {
 		return -EINVAL;
+	}
+
+	if ((msg->type == mtLookup) && (msg->i.data != NULL) && (msg->i.size == sizeof("devfs")) &&
+			(hal_strcmp((const char *)msg->i.data, "devfs") == 0) &&
+			(msg_common.td14_lookupTrace < 16U)) {
+		traceLookupDevfs = 1;
+		msg_common.td14_lookupTrace++;
+		traceStart = hal_timerGetUs();
 	}
 
 	sender = proc_current();
@@ -386,10 +399,14 @@ int proc_send(u32 port, msg_t *msg)
 	else {
 		LIST_ADD(&p->kmessages, &kmsg);
 		(void)proc_threadWakeup(&p->threads);
+		if (traceLookupDevfs != 0) {
+			traceQueued = hal_timerGetUs();
+		}
 
 		state = kmsg.state;
 		while ((state != msg_responded) && (state != msg_rejected)) {
 			if (state == msg_received) {
+				sawReceived = 1;
 				/* FIXME: due to allocation of kmsg on sender's kstack, this thread cannot be properly killed (or, more precisely,
 				 * can't leave this while loop) when message is in msg_received state (between calls to proc_recv and proc_respond).
 				 * This uninterruptible wait is a workaround to prevent spinning on proc_threadWaitInterruptible when thread->exit != 0
@@ -424,6 +441,14 @@ int proc_send(u32 port, msg_t *msg)
 
 	hal_spinlockClear(&p->spinlock, &sc);
 	port_put(p, 0);
+
+	if (traceLookupDevfs != 0) {
+		traceEnd = hal_timerGetUs();
+		(void)lib_sprintf(traceBuff, "td14: send devfs port=%u total=%llu queued=%llu err=%d oerr=%d state=%d got=%d\n",
+			port, (unsigned long long)(traceEnd - traceStart), (unsigned long long)(traceQueued - traceStart),
+			err, kmsg.msg.o.err, state, sawReceived);
+		hal_consolePrint(ATTR_USER, traceBuff);
+	}
 
 	if (err == EOK) {
 		hal_memcpy(msg->o.raw, kmsg.msg.o.raw, sizeof(msg->o.raw));
