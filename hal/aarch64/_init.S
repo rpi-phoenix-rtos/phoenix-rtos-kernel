@@ -412,6 +412,19 @@ _start:
 	str x1, [x0]
 #endif
 
+#if defined(PLO_RPI_MAILBOX_BUFFER_ADDRESS) && (PLO_RPI_MAILBOX_BUFFER_ADDRESS != 0)
+	/* TODO(TD-15-mboxprobe): alias the VC4 mailbox buffer page at the
+	 * second device TTL3 entry (VA = 0xffffffffffe01000) so the kernel
+	 * can read back the pattern plo wrote at PA
+	 * PLO_RPI_MAILBOX_BUFFER_ADDRESS just before eret. Mapped Normal
+	 * Non-Cacheable (MAIR slot 1, AttrIdx=1) so reads see DDR fresh,
+	 * bypassing any stale L1/L2 cache contents. Used by the TD-15
+	 * phase 1 drift probe in main.c. Remove when TD-15 phase 2 moves
+	 * the buffer out of ARM-usable DRAM. */
+	ldr x1, =(PLO_RPI_MAILBOX_BUFFER_ADDRESS | NC_ATTRS)
+	str x1, [x0, #8]
+#endif
+
 	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]

@@ -160,10 +160,78 @@ int main(void)
 	
 	/* Send 'c' marker - we reached main()! */
 	*uart = 'c';
-	
+
 	/* Send additional markers to confirm execution */
 	while (*uartfr & 0x20) {}
 	*uart = 'd'; /* d marker - main() executing */
+
+	/* TD-15 phase 1: VC4 mailbox-buffer drift probe.
+	 *
+	 * Plo writes a known 64-byte pattern at PA PLO_RPI_MAILBOX_BUFFER_ADDRESS
+	 * just before eret (see plo/hal/aarch64/generic/hal.c
+	 * hal_td15ProbeWrite). The kernel maps that PA at VA 0xffffffffffe01000
+	 * Normal Non-Cacheable in _init.S. Compare what we read here to the
+	 * expected pattern. Drift = some agent (suspected VC4) is writing to
+	 * ARM-usable DRAM after plo's eret. Result tagged "td15:" for grep.
+	 * Remove with the rest of TD-15 phase 1 once VC6 hygiene is closed.
+	 */
+	{
+		volatile const unsigned int *mboxAlias = (volatile const unsigned int *)0xffffffffffe01000ull;
+		unsigned int seed = 0xa5a5a5a5u;
+		unsigned int diffs = 0u;
+		unsigned int firstBad = 16u;
+		unsigned int gotFirst = 0u;
+		unsigned int i;
+		for (i = 0u; i < 16u; ++i) {
+			unsigned int expected = seed ^ (i * 0x01010101u);
+			unsigned int got = mboxAlias[i];
+			if (got != expected) {
+				if (gotFirst == 0u) {
+					firstBad = i;
+					gotFirst = got;
+				}
+				diffs++;
+			}
+		}
+		while (*uartfr & 0x20) {}
+		*uart = 't';
+		while (*uartfr & 0x20) {}
+		*uart = 'd';
+		while (*uartfr & 0x20) {}
+		*uart = '1';
+		while (*uartfr & 0x20) {}
+		*uart = '5';
+		while (*uartfr & 0x20) {}
+		*uart = ':';
+		if (diffs == 0u) {
+			while (*uartfr & 0x20) {}
+			*uart = 'O';
+			while (*uartfr & 0x20) {}
+			*uart = 'K';
+		}
+		else {
+			while (*uartfr & 0x20) {}
+			*uart = 'D';
+			while (*uartfr & 0x20) {}
+			*uart = '=';
+			/* dump diff count + first-bad index as ASCII hex digits */
+			static const char hexdig[] = "0123456789abcdef";
+			while (*uartfr & 0x20) {}
+			*uart = hexdig[(diffs >> 4) & 0xfu];
+			while (*uartfr & 0x20) {}
+			*uart = hexdig[diffs & 0xfu];
+			while (*uartfr & 0x20) {}
+			*uart = '/';
+			while (*uartfr & 0x20) {}
+			*uart = hexdig[(firstBad >> 4) & 0xfu];
+			while (*uartfr & 0x20) {}
+			*uart = hexdig[firstBad & 0xfu];
+		}
+		while (*uartfr & 0x20) {}
+		*uart = '\r';
+		while (*uartfr & 0x20) {}
+		*uart = '\n';
+	}
 
 	/* Marker before syspage_init */
 	while (*uartfr & 0x20) {}
