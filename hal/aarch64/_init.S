@@ -331,13 +331,13 @@ _start:
 	 *   PMAP_COMMON_DEVICES_TTL3
 	 *   PMAP_COMMON_SCRATCH_TT
 	 *   PMAP_COMMON_SCRATCH_PAGE
-	 *
-	 * However, on Cortex-A72, cache maintenance with MMU disabled can cause hangs.
-	 * Skip this invalidation for now and rely on the post-MMU-enable invalidation.
+	 * This is retried after the TD-16 alias cleanup so later cache-enable
+	 * attempts have Linux-shaped page-table visibility instead of relying only
+	 * on barriers.
 	 */
-	/* adrp x0, PMAP_COMMON_KERNEL_TTL2 */
-	/* adrp x1, PMAP_COMMON_STACK */
-	/* bl _inval_dcache_range */
+	adrp x0, PMAP_COMMON_KERNEL_TTL2
+	adrp x1, PMAP_COMMON_STACK
+	bl _inval_dcache_range
 
 	/* Ensure changes to translation tables are visible */
 	dsb ish
