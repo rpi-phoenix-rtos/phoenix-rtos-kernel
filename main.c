@@ -233,6 +233,80 @@ int main(void)
 		*uart = '\n';
 	}
 
+	/* TD-16-1: timer + CPU-speed probe.
+	 *
+	 * Read CNTFRQ_EL0 and CNTPCT_EL0 deltas around a fixed nop-loop
+	 * count to discriminate among:
+	 *   (a) CNTFRQ matches actual hardware tick rate, CPU is fast
+	 *       → both numbers near QEMU baseline.
+	 *   (b) CNTFRQ matches but CPU runs slow (throttled / wrong PLL)
+	 *       → cycles delta is near expected, but wall time stretches.
+	 *   (c) CNTFRQ wrong → cycles delta out of proportion to nops.
+	 *   (d) Both wrong → both numbers off.
+	 *
+	 * Output format: "td16:cntfrq=<8-hex> dt=<16-hex>\r\n"
+	 * Loop body is 1<<20 (~1M) nops; a Cortex-A72 at 1.5 GHz with
+	 * I-cache on takes ~700 us = ~38000 ticks at 54 MHz. Anything
+	 * far above that points at CPU throttling / clock issue.
+	 *
+	 * Remove with the rest of TD-16 once the slowdown is understood.
+	 */
+	{
+		static const char hexdig2[] = "0123456789abcdef";
+		unsigned long cntfrq;
+		unsigned long t0;
+		unsigned long t1;
+		unsigned long dt;
+		unsigned long i;
+
+		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+		__asm__ volatile("isb" ::: "memory");
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
+		for (i = 0; i < (1UL << 20); ++i) {
+			__asm__ volatile("nop");
+		}
+		__asm__ volatile("isb" ::: "memory");
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t1));
+		dt = t1 - t0;
+
+		while (*uartfr & 0x20) {}
+		*uart = 't';
+		while (*uartfr & 0x20) {}
+		*uart = 'd';
+		while (*uartfr & 0x20) {}
+		*uart = '1';
+		while (*uartfr & 0x20) {}
+		*uart = '6';
+		while (*uartfr & 0x20) {}
+		*uart = ':';
+		while (*uartfr & 0x20) {}
+		*uart = 'c';
+		while (*uartfr & 0x20) {}
+		*uart = 'f';
+		while (*uartfr & 0x20) {}
+		*uart = '=';
+		for (i = 8; i > 0; --i) {
+			while (*uartfr & 0x20) {}
+			*uart = hexdig2[(cntfrq >> ((i - 1) * 4)) & 0xfUL];
+		}
+		while (*uartfr & 0x20) {}
+		*uart = ' ';
+		while (*uartfr & 0x20) {}
+		*uart = 'd';
+		while (*uartfr & 0x20) {}
+		*uart = 't';
+		while (*uartfr & 0x20) {}
+		*uart = '=';
+		for (i = 16; i > 0; --i) {
+			while (*uartfr & 0x20) {}
+			*uart = hexdig2[(dt >> ((i - 1) * 4)) & 0xfUL];
+		}
+		while (*uartfr & 0x20) {}
+		*uart = '\r';
+		while (*uartfr & 0x20) {}
+		*uart = '\n';
+	}
+
 	/* Marker before syspage_init */
 	while (*uartfr & 0x20) {}
 	*uart = 'e'; /* e marker - before syspage_init */
@@ -248,6 +322,58 @@ int main(void)
 	/* Marker after hal_init, before console print */
 	while (*uartfr & 0x20) {}
 	*uart = 'g'; /* g marker - after hal_init */
+
+	/* TD-16-1b: SECOND nop-loop measurement, AFTER _hal_init's
+	 * cache-enable sequence. Compare to the first td16 result
+	 * (pre-cache, in main() before _hal_init) — if dt drops by
+	 * an order of magnitude or more, caches are doing their job.
+	 * Same loop body so the comparison is direct.
+	 */
+	{
+		static const char hexdig3[] = "0123456789abcdef";
+		unsigned long cntfrq;
+		unsigned long t0;
+		unsigned long t1;
+		unsigned long dt;
+		unsigned long i;
+
+		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+		__asm__ volatile("isb" ::: "memory");
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
+		for (i = 0; i < (1UL << 20); ++i) {
+			__asm__ volatile("nop");
+		}
+		__asm__ volatile("isb" ::: "memory");
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t1));
+		dt = t1 - t0;
+
+		while (*uartfr & 0x20) {}
+		*uart = 't';
+		while (*uartfr & 0x20) {}
+		*uart = 'd';
+		while (*uartfr & 0x20) {}
+		*uart = '1';
+		while (*uartfr & 0x20) {}
+		*uart = '6';
+		while (*uartfr & 0x20) {}
+		*uart = 'b';
+		while (*uartfr & 0x20) {}
+		*uart = ':';
+		while (*uartfr & 0x20) {}
+		*uart = 'd';
+		while (*uartfr & 0x20) {}
+		*uart = 't';
+		while (*uartfr & 0x20) {}
+		*uart = '=';
+		for (i = 16; i > 0; --i) {
+			while (*uartfr & 0x20) {}
+			*uart = hexdig3[(dt >> ((i - 1) * 4)) & 0xfUL];
+		}
+		while (*uartfr & 0x20) {}
+		*uart = '\r';
+		while (*uartfr & 0x20) {}
+		*uart = '\n';
+	}
 
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
 
