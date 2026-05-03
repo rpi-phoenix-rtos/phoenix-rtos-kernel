@@ -1143,32 +1143,54 @@ _initNCpusFlag:
 .type hal_cpuInvalDataCacheAll, %function
 hal_cpuInvalDataCacheAll:
 .cfi_startproc
-	/* 5.3.1 Cleaning and invalidating the caches */
-	mov x0, #0x0             /* x0 = Cache level */
-	msr csselr_el1, x0       /* 0x0 for L1 Dcache 0x2 for L2 Dcache. */
-	mrs x4, ccsidr_el1       /* Read Cache Size ID. */
-	and x1, x4, #0x7
-	add x1, x1, #0x4         /* x1 = Cache Line Size. */
-	mov x3, #0x7fff
-	and x2, x3, x4, lsr #13  /* x2 = Cache Set Number – 1. */
-	mov x3, #0x3ff
-	and x3, x3, x4, lsr #3   /* x3 = Cache Associativity Number – 1. */
-	clz w4, w3               /* x4 = way position in the CISW instruction. */
-	mov x5, #0               /* x5 = way counter way_loop. */
-.Lway_loop:
-	mov x6, #0               /* x6 = set counter set_loop. */
-.Lset_loop:
-	lsl x7, x5, x4
-	orr x7, x0, x7           /* Set way. */
-	lsl x8, x6, x1
-	orr x7, x7, x8           /* Set set. */
-	dc isw, x7               /* Invalidate cache line. */
-	add x6, x6, #1           /* Increment set counter. */
-	cmp x6, x2               /* Last set reached yet? */
-	b.le .Lset_loop          /* If not, iterate set_loop, */
-	add x5, x5, #1           /* else, next way. */
-	cmp x5, x3               /* Last way reached yet? */
-	b.le .Lway_loop          /* If not, iterate way_loop. */
+	/* Clean+invalidate all data/unified caches by set/way. The previous
+	 * implementation selected L1 only and read CCSIDR_EL1 immediately after
+	 * CSSelR_EL1 without the architecturally required ISB, which can make
+	 * later D-cache enable experiments hang on real cores or QEMU. */
+	dsb sy
+	mrs x0, clidr_el1
+	and x3, x0, #0x07000000
+	lsr x3, x3, #23          /* LoC * 2 */
+	cbz x3, .Ldcache_all_done
+
+	mov x10, #0              /* cache level selector: level << 1 */
+.Ldcache_level_loop:
+	add x2, x10, x10, lsr #1 /* CLIDR cache-type field shift: level * 3 */
+	lsr x1, x0, x2
+	and x1, x1, #0x7
+	cmp x1, #2               /* no data or unified cache at this level */
+	b.lt .Ldcache_next_level
+
+	msr csselr_el1, x10
+	isb
+	mrs x1, ccsidr_el1
+	and x2, x1, #0x7
+	add x2, x2, #0x4         /* line-length field shift */
+	ubfx x4, x1, #3, #10     /* ways - 1 */
+	clz w5, w4               /* way field shift */
+	ubfx x6, x1, #13, #15    /* sets - 1 */
+
+.Ldcache_set_loop:
+	mov x7, x4
+.Ldcache_way_loop:
+	lsl x8, x7, x5
+	orr x8, x10, x8
+	lsl x9, x6, x2
+	orr x8, x8, x9
+	dc cisw, x8
+	subs x7, x7, #1
+	b.ge .Ldcache_way_loop
+	subs x6, x6, #1
+	b.ge .Ldcache_set_loop
+
+.Ldcache_next_level:
+	add x10, x10, #2
+	cmp x3, x10
+	b.gt .Ldcache_level_loop
+
+.Ldcache_all_done:
+	dsb sy
+	isb
 	ret
 .cfi_endproc
 .size hal_cpuInvalDataCacheAll, .-hal_cpuInvalDataCacheAll
