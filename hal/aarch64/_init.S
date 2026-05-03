@@ -156,6 +156,11 @@
  * docs/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md TD-04. */
 #define NC_ATTRS 0x707
 
+/* Temporary TTBR0 level-1 RAM block descriptor, Normal Non-Cacheable.
+ * Keep the low identity aliases cache-consistent with the TD-04 NC pages
+ * while the live boot path still runs with SCTLR.C disabled. */
+#define NC_BLOCK_ATTRS 0xf05
+
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
 #define SYSPAGE_SIZE_OFFSET 40
@@ -276,7 +281,7 @@ _start:
 	/* Map syspage->pkernel ~ (syspage->pkernel + 1 GB) VA => syspage->pkernel ~ (syspage->pkernel + 1 GB) PA */
 
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
-	mov x3, #0xf01 /* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, not global */
+	mov x3, #(NC_BLOCK_ATTRS) /* Temporary low identity RAM aliases: Normal Non-Cacheable */
 	mov x4, #(1 << 30)
 	lsr x2, x1, #30
 	orr x1, x3, x2, lsl #30
