@@ -354,21 +354,13 @@ _start:
 	isb
 	uart_tag2 88, 52
 
-	/* TODO(TD-16-cache-enable): A working M+C+I together transition is
-	 * not yet found for real Cortex-A72 / Pi 4. Most recent attempt
-	 * (with hal_cpuInvalDataCacheAll + ic ialluis + SCTLR_EL1 |= M|C|I)
-	 * faulted during the high-VA instruction-stream branch right after
-	 * the X4/X5 markers. The no-call early exception dump captured:
-	 *   EX=0000000000000004
-	 *   ESR=0000000002000000          (EC=0, "Unknown reason")
-	 *   ELR=ffffffffc00005ac          (high-VA target of br x0)
-	 *   FAR=0000000000000000
-	 * meaning the I-cache fetched bytes that don't decode as a valid
-	 * instruction. Most plausible cause is A72 erratum #851672 (set/way
-	 * cache maintenance can leave cache in inconsistent state). Keep
-	 * MMU-only enable for now; let later kernel code enable/tune caches
-	 * once a VA-range invalidation strategy over the kernel image is in
-	 * place. */
+	/* TODO(TD-16-cache-enable): cache enable is parked for now.
+	 * Multiple iterations of VA-range invalidation + M|C|I-together
+	 * placements all produced layered translation faults on real
+	 * Pi 4 (level-3 then level-1 with FAR/ELR moving each time).
+	 * Detailed iteration log lives in the comment block right
+	 * before the `br x0` to _core_0_virtual below.
+	 * Keeping MMU-only enable for now — the boot-correct baseline. */
 	uart_tag2 88, 53
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
 	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
@@ -515,6 +507,57 @@ _start:
 	 * preceding TLB invalidation makes the newly enabled TTBR1 path visible
 	 * before the instruction fetch.
 	 */
+
+	/* TODO(TD-16-cache-enable): cache enable iteration — three Pi 4
+	 * cycles produced a sequence of decoded faults via the no-call
+	 * early exception dump:
+	 *
+	 *   Iteration 1 — set/way invalidation (hal_cpuInvalDataCacheAll)
+	 *                + M|C|I together pre-`br x0`:
+	 *     EC=0 (Unknown, undecodable instruction). Suspected A72
+	 *     erratum #851672 (set/way unreliable on A72).
+	 *
+	 *   Iteration 2 — VA-range invalidation (dc civac + ic ivau)
+	 *                over [pkernel, pkernel + 2 MB) only,
+	 *                pre-MMU-enable: silent hang on real Pi between
+	 *                X3 and X4 markers (no exception fired).
+	 *
+	 *   Iteration 3 — VA-range invalidation post-MMU,
+	 *                pre-cache-enable, kernel image only,
+	 *                C|I (M already set), pre-`br x0`:
+	 *     ESR=0x96000003 (Data abort, level-3 translation fault),
+	 *     ELR=0xffffffffc00006b0, FAR=0xffffffffc0001890.
+	 *     The TTL3 entry for kernel page 1 was read as invalid by
+	 *     a literal-pool load right after the high-VA branch.
+	 *
+	 *   Iteration 4 — added post-enable tlbi vmalle1:
+	 *     ESR=0x96000001 (Data abort, level-1 translation fault),
+	 *     ELR=0x400658 (low-PA kernel image), FAR=0xfe201018 (PL011).
+	 *     The TTBR0 TTL1 entry for the PL011 1 GB block was read as
+	 *     invalid during the X7 marker print (`uart_tag2 88, 55`).
+	 *
+	 *   Iteration 5 — added PT region invalidation (PMAP_COMMON_*)
+	 *                in addition to kernel image:
+	 *     SAME fault as iteration 4. The page-table region
+	 *     invalidation didn't help — the TTBR0 TTL1 still reads
+	 *     stale on first walk after cache enable.
+	 *
+	 * Pattern: every cache-enable attempt on real Pi 4 produces a
+	 * walk-time translation fault even though the page tables were
+	 * written correctly with caches off (going directly to DDR).
+	 * Most plausible remaining hypothesis: A72 speculatively fills
+	 * cache lines for these PAs while caches are "off" and those
+	 * lines persist past dc civac. Linux's __enable_mmu does cache
+	 * maintenance in __cpu_setup BEFORE turning on the MMU; we'd
+	 * need to do all our PT writes BEFORE MMU enable too.
+	 *
+	 * For now, keep MMU enabled but caches off (the boot-correct
+	 * baseline that reliably reaches `(psh)%`). The no-call early
+	 * exception dump and the VA-range cache helpers stay in place
+	 * as building blocks for the next attempt. See TD-16 in
+	 * docs/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md.
+	 */
+
 	ldr x0, =_core_0_virtual
 	br x0
 
@@ -824,6 +867,32 @@ _clean_inval_dcache_range:
         cmp x0, x1
         b.lo 1b
         dsb sy
+        isb
+        ret
+
+
+/* TODO(TD-16-cache-enable): VA-range I-cache invalidation, matching
+ * Linux arm64's __inval_icache_area. Uses ic ivau (Invalidate I-cache
+ * line by VA to Point of Unification) per IminLine, which is the
+ * architecturally reliable form on Cortex-A72 — set/way-based
+ * invalidation triggers erratum #851672 (cache lines can become
+ * inconsistent during cache maintenance).
+ *
+ * The IminLine field of CTR_EL0 (bits 3:0) gives log2(line size in
+ * words). Multiply by 4 to get bytes per line.
+ *
+ * x0 => start address (clobbered), x1 => end address; clobbers x2,x3 */
+_inval_icache_range:
+        mrs x2, ctr_el0
+        and x2, x2, #0xf       /* IminLine = bits 3:0 */
+        mov x3, #4
+        lsl x2, x3, x2          /* line size in bytes */
+1:
+        ic ivau, x0
+        add x0, x0, x2
+        cmp x0, x1
+        b.lo 1b
+        dsb ish
         isb
         ret
 
