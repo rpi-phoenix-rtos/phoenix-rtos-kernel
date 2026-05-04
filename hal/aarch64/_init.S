@@ -354,11 +354,21 @@ _start:
 	isb
 	uart_tag2 88, 52
 
-	/* Do not perform a global I-cache invalidation or enable caches on the
-	 * low-PC identity stream. Real Cortex-A72 hardware reaches X4 and then
-	 * hangs in this post-MMU cache-maintenance window, while QEMU tolerates
-	 * it. Keep the first transition minimal: enable translation, move to the
-	 * linked TTBR1 address, and let later kernel code enable/tune caches. */
+	/* TODO(TD-16-cache-enable): A working M+C+I together transition is
+	 * not yet found for real Cortex-A72 / Pi 4. Most recent attempt
+	 * (with hal_cpuInvalDataCacheAll + ic ialluis + SCTLR_EL1 |= M|C|I)
+	 * faulted during the high-VA instruction-stream branch right after
+	 * the X4/X5 markers. The no-call early exception dump captured:
+	 *   EX=0000000000000004
+	 *   ESR=0000000002000000          (EC=0, "Unknown reason")
+	 *   ELR=ffffffffc00005ac          (high-VA target of br x0)
+	 *   FAR=0000000000000000
+	 * meaning the I-cache fetched bytes that don't decode as a valid
+	 * instruction. Most plausible cause is A72 erratum #851672 (set/way
+	 * cache maintenance can leave cache in inconsistent state). Keep
+	 * MMU-only enable for now; let later kernel code enable/tune caches
+	 * once a VA-range invalidation strategy over the kernel image is in
+	 * place. */
 	uart_tag2 88, 53
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
 	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
@@ -858,41 +868,99 @@ _early_uart_print_tag:
 1:
         ret
 
+/* TODO(TD-16-exdump): no-call early exception dump.
+ *
+ * The previous version used many bl/ret to PL011 helpers and to a string
+ * walker that read low-PA literal-pool data. When TD-16 cache-enable
+ * attempts faulted, those helpers themselves re-faulted, leaving the
+ * UART log with only a single "E" repeated forever (recursive exception
+ * spam). This shape uses ONLY direct loads/stores and inline branches
+ * (no bl, no string-table reads via literal pool, no ret), so it can
+ * survive a fault that left SP/x30 corrupted. We get exactly four
+ * 16-hex-digit values per fault: vector slot (x18), ESR_EL1, ELR_EL1,
+ * FAR_EL1 — separated by '\n'. Kept across builds as the diagnostic
+ * floor for any future early-MMU/cache transition.
+ *
+ * x18 holds the vector slot number set by early_vector. The macro
+ * `early_putc_inline` and `early_puthex64_inline` operate purely on
+ * x18..x29 so they don't trample the architecturally-defined exception
+ * context. They use the early PL011 alias when MMU is on (so device
+ * memory) which is mapped in PMAP_COMMON_DEVICES_TTL3; if the fault
+ * happened pre-MMU we would not reach this code anyway.
+ *
+ * Rejected by the previous agent on the grounds that real Pi was
+ * "slow not crashed" — but the user clarified the boot was simply
+ * waiting on a cache-disabled tty, not in a crashed state, so the
+ * diagnostic value of this dump outweighs the fact that any fault
+ * here followed by a slow boot is more informative than a fault
+ * followed by silence. */
+.macro early_putc_inline ch
+997991:
+        ldr x21, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
+        ldr w22, [x21]
+        tst w22, #UARTFR_TXFF
+        b.ne 997991b
+        ldr x21, =PL011_TTY_EARLY_VADDR
+        mov w22, #\ch
+        str w22, [x21]
+.endm
+
+.macro early_puthex64_inline reg
+        mov x23, \reg
+        mov x24, #60
+998991:
+        lsr x25, x23, x24
+        and x25, x25, #0xf
+        cmp x25, #10
+        b.lo 998992f
+        add x25, x25, #('a' - 10)
+        b 998993f
+998992:
+        add x25, x25, #'0'
+998993:
+997992:
+        ldr x21, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
+        ldr w22, [x21]
+        tst w22, #UARTFR_TXFF
+        b.ne 997992b
+        ldr x21, =PL011_TTY_EARLY_VADDR
+        str w25, [x21]
+        subs x24, x24, #4
+        b.pl 998991b
+.endm
+
 _early_exception_common:
-        adrp x0, PMAP_COMMON_STACK
-        ldr x1, =SIZE_INITIAL_KSTACK
-        add sp, x0, x1
+        early_putc_inline 10              /* '\n' */
+        early_putc_inline 'E'
+        early_putc_inline 'X'
+        early_putc_inline '='
+        early_puthex64_inline x18
 
-        mov w0, #10
-        bl uart_putc_reg
-        ldr x0, =_early_ex_tag
-        bl _early_uart_print_tag
-        mov x0, x18
-        bl uart_puthex64
+        early_putc_inline 10
+        early_putc_inline 'E'
+        early_putc_inline 'S'
+        early_putc_inline 'R'
+        early_putc_inline '='
+        mrs x26, esr_el1
+        early_puthex64_inline x26
 
-        mov w0, #10
-        bl uart_putc_reg
-        ldr x0, =_early_esr_tag
-        bl _early_uart_print_tag
-        mrs x0, esr_el1
-        bl uart_puthex64
+        early_putc_inline 10
+        early_putc_inline 'E'
+        early_putc_inline 'L'
+        early_putc_inline 'R'
+        early_putc_inline '='
+        mrs x26, elr_el1
+        early_puthex64_inline x26
 
-        mov w0, #10
-        bl uart_putc_reg
-        ldr x0, =_early_elr_tag
-        bl _early_uart_print_tag
-        mrs x0, elr_el1
-        bl uart_puthex64
+        early_putc_inline 10
+        early_putc_inline 'F'
+        early_putc_inline 'A'
+        early_putc_inline 'R'
+        early_putc_inline '='
+        mrs x26, far_el1
+        early_puthex64_inline x26
 
-        mov w0, #10
-        bl uart_putc_reg
-        ldr x0, =_early_far_tag
-        bl _early_uart_print_tag
-        mrs x0, far_el1
-        bl uart_puthex64
-
-        mov w0, #10
-        bl uart_putc_reg
+        early_putc_inline 10
         b .
 
 
