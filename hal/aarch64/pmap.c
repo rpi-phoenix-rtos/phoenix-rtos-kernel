@@ -76,7 +76,8 @@ typedef u64 descr_t;
 #define N_ASIDS     ((u32)1U << ASID_BITS)
 #define N_ASID_MAP  ((N_ASIDS + 63U) / 64U)
 
-#define PMAP_MEM_ENTRIES 64U
+#define PMAP_MEM_ENTRIES        64U
+#define PMAP_RESV_MEM_REGIONS   16U
 
 #define CEIL_PAGE(x) ((((ptr_t)(x)) + SIZE_PAGE - 1U) & (~(SIZE_PAGE - 1U)))
 
@@ -86,6 +87,17 @@ typedef struct {
 	addr_t end;
 	u8 flags;
 } pmap_memEntry_t;
+
+
+/* TD-15 / Stage 2 phase 4b: cached copy of the /reserved-memory regions
+ * the DTB parser captured. Held alongside the free-memory entries so the
+ * page allocator can mark addresses inside any reserved region with
+ * PAGE_OWNER_BOOT instead of PAGE_FREE — keeping firmware/VC4 windows
+ * out of the kernel and user-space allocator. */
+typedef struct {
+	addr_t start;
+	addr_t end;
+} pmap_resvRegion_t;
 
 
 struct {
@@ -115,6 +127,10 @@ struct {
 
 		pmap_memEntry_t entries[PMAP_MEM_ENTRIES];
 		size_t count;
+
+		/* TD-15 / Stage 2 phase 4b: cached /reserved-memory regions. */
+		pmap_resvRegion_t resvRegions[PMAP_RESV_MEM_REGIONS];
+		size_t nResvRegions;
 	} mem;
 
 	u64 asidInUse[N_ASID_MAP];
@@ -708,7 +724,21 @@ int pmap_getPage(page_t *page, addr_t *addr)
 		page->flags |= PAGE_OWNER_BOOT;
 	}
 	else {
-		page->flags |= PAGE_FREE;
+		/* TD-15 / Stage 2 phase 4b: skip /reserved-memory regions.
+		 * If the page falls inside a region the firmware/VC4 reserved
+		 * (per DTB), mark it PAGE_OWNER_BOOT instead of PAGE_FREE so
+		 * the allocator does not hand it to kernel or user space. */
+		size_t r;
+		int reserved = 0;
+		for (r = 0U; r < pmap_common.mem.nResvRegions; ++r) {
+			if ((page->addr >= pmap_common.mem.resvRegions[r].start) &&
+				(page->addr <= pmap_common.mem.resvRegions[r].end)) {
+				reserved = 1;
+				break;
+			}
+		}
+
+		page->flags |= (reserved != 0) ? PAGE_OWNER_BOOT : PAGE_FREE;
 	}
 
 	return EOK;
@@ -851,6 +881,29 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 	                asm volatile("wfe");
 	        }
 	}
+
+	/* TD-15 / Stage 2 phase 4b: cache /reserved-memory regions for the
+	 * page allocator. _pmap_getPage will mark pages inside any of these
+	 * regions PAGE_OWNER_BOOT so they stay out of the kernel/user
+	 * free-page pool. Truncated to PMAP_RESV_MEM_REGIONS; in practice
+	 * Pi 4 reports ≤8 regions (CMA pool, framebuffer, atomic-pool,
+	 * armstub spin-table, etc). */
+	{
+		dtb_resvMemRegion_t *resv;
+		size_t nResv;
+		size_t r;
+
+		dtb_getReservedMemory(&resv, &nResv);
+		if (nResv > PMAP_RESV_MEM_REGIONS) {
+			nResv = PMAP_RESV_MEM_REGIONS;
+		}
+		for (r = 0U; r < nResv; ++r) {
+			pmap_common.mem.resvRegions[r].start = resv[r].start;
+			pmap_common.mem.resvRegions[r].end = resv[r].end;
+		}
+		pmap_common.mem.nResvRegions = nResv;
+	}
+
 	pmap_common.mem.min = banks[0].start;	pmap_common.mem.max = banks[0].end;
 
 	pmap_common.mem.count = 0;
