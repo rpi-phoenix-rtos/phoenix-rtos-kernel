@@ -25,10 +25,12 @@
 
 #define STR_AND_LEN(x) (x), (sizeof(x) - 1U)
 
-#define MAX_CPUS       8U
-#define MAX_MEM_BANKS  8U
-#define MAX_SERIALS    4U
-#define MAX_SOC_RANGES 4U
+#define MAX_CPUS         8U
+#define MAX_MEM_BANKS    8U
+#define MAX_SERIALS      4U
+#define MAX_SOC_RANGES   4U
+#define MAX_RESV_REGIONS 16U
+#define MAX_DMA_RANGES   4U
 
 struct _fdt_header_t {
 	u32 magic;
@@ -74,7 +76,27 @@ static struct {
 			addr_t cpu;
 			addr_t size;
 		} ranges[MAX_SOC_RANGES];
+
+		/* TD-15 / Stage 2 phase 4: /soc/dma-ranges. Same shape as
+		 * `ranges` but populated from the dma-ranges property; used by
+		 * dtb_armToBus() so DMA descriptors get the correct bus alias
+		 * (Pi 4: legacy 0xc0000000 vs the full-RAM 0x0 alias). */
+		size_t nDmaRanges;
+		dtb_dmaRange_t dmaRanges[MAX_DMA_RANGES];
 	} soc;
+
+	/* TD-15 / Stage 2 phase 4: /reserved-memory tracking. These regions
+	 * must be excluded from the kernel page-frame allocator; firmware /
+	 * VC4 / armstub spin-table / framebuffer use them. */
+	struct {
+		unsigned int depth;        /* depth at which we entered /reserved-memory */
+		u32 addressCells;
+		u32 sizeCells;
+
+		size_t nRegions;
+		dtb_resvMemRegion_t regions[MAX_RESV_REGIONS];
+		const char *currentName;   /* node name of the in-progress child */
+	} resvMem;
 
 	struct {
 		addr_t gicd;
@@ -193,18 +215,21 @@ static void dtb_parseSOC(void *dtb, u32 si, u32 l)
 {
 	addr_t bus, cpu, size;
 	u32 tupleCells;
+	const char *name = dtb_getString(si);
+	int isRanges = (hal_strcmp(name, "ranges") == 0);
+	int isDmaRanges = (hal_strcmp(name, "dma-ranges") == 0);
 
-	if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#address-cells") == 0)) {
+	if ((l >= 4U) && (hal_strcmp(name, "#address-cells") == 0)) {
 		dtb_common.soc.addressCells = ntoh32(*(u32 *)dtb);
 		return;
 	}
 
-	if ((l >= 4U) && (hal_strcmp(dtb_getString(si), "#size-cells") == 0)) {
+	if ((l >= 4U) && (hal_strcmp(name, "#size-cells") == 0)) {
 	        dtb_common.soc.sizeCells = ntoh32(*(u32 *)dtb);
 	        return;
 	}
 
-	if (hal_strcmp(dtb_getString(si), "ranges") != 0) {
+	if ((isRanges == 0) && (isDmaRanges == 0)) {
 	        return;
 	}
 
@@ -213,20 +238,86 @@ static void dtb_parseSOC(void *dtb, u32 si, u32 l)
 		return;
 	}
 
-	while ((l >= (tupleCells * sizeof(u32))) && (dtb_common.soc.nRanges < MAX_SOC_RANGES)) {
+	while (l >= (tupleCells * sizeof(u32))) {
 		if ((dtb_readCells(dtb, dtb_common.soc.addressCells, &bus) < 0) ||
 			(dtb_readCells(dtb + (dtb_common.soc.addressCells * sizeof(u32)), dtb_common.rootAddressCells, &cpu) < 0) ||
 			(dtb_readCells(dtb + ((dtb_common.soc.addressCells + dtb_common.rootAddressCells) * sizeof(u32)), dtb_common.soc.sizeCells, &size) < 0)) {
 			break;
 		}
 
-		dtb_common.soc.ranges[dtb_common.soc.nRanges].bus = bus;
-		dtb_common.soc.ranges[dtb_common.soc.nRanges].cpu = cpu;
-		dtb_common.soc.ranges[dtb_common.soc.nRanges].size = size;
-		dtb_common.soc.nRanges++;
+		if ((isRanges != 0) && (dtb_common.soc.nRanges < MAX_SOC_RANGES)) {
+			dtb_common.soc.ranges[dtb_common.soc.nRanges].bus = bus;
+			dtb_common.soc.ranges[dtb_common.soc.nRanges].cpu = cpu;
+			dtb_common.soc.ranges[dtb_common.soc.nRanges].size = size;
+			dtb_common.soc.nRanges++;
+		}
+		else if ((isDmaRanges != 0) && (dtb_common.soc.nDmaRanges < MAX_DMA_RANGES)) {
+			dtb_common.soc.dmaRanges[dtb_common.soc.nDmaRanges].bus = bus;
+			dtb_common.soc.dmaRanges[dtb_common.soc.nDmaRanges].cpu = cpu;
+			dtb_common.soc.dmaRanges[dtb_common.soc.nDmaRanges].size = size;
+			dtb_common.soc.nDmaRanges++;
+		}
+		else {
+			break;
+		}
 
 		dtb += tupleCells * sizeof(u32);
 		l -= tupleCells * sizeof(u32);
+	}
+}
+
+
+/* TD-15 / Stage 2 phase 4: parse properties on /reserved-memory itself
+ * (just #address-cells and #size-cells). */
+static void dtb_parseResvMemRoot(void *dtb, u32 si, u32 l)
+{
+	const char *name = dtb_getString(si);
+
+	if ((l >= 4U) && (hal_strcmp(name, "#address-cells") == 0)) {
+		dtb_common.resvMem.addressCells = ntoh32(*(u32 *)dtb);
+	}
+	else if ((l >= 4U) && (hal_strcmp(name, "#size-cells") == 0)) {
+		dtb_common.resvMem.sizeCells = ntoh32(*(u32 *)dtb);
+	}
+}
+
+
+/* TD-15 / Stage 2 phase 4: parse a child of /reserved-memory. The reg
+ * property may contain multiple <addr size> tuples; each becomes one
+ * reserved region. */
+static void dtb_parseResvMemChild(void *dtb, u32 si, u32 l)
+{
+	addr_t start = 0, size = 0;
+	u32 tupleCells;
+	u32 ac, sc;
+
+	if (hal_strcmp(dtb_getString(si), "reg") != 0) {
+		return;
+	}
+
+	ac = (dtb_common.resvMem.addressCells != 0U) ? dtb_common.resvMem.addressCells : dtb_common.rootAddressCells;
+	sc = (dtb_common.resvMem.sizeCells != 0U) ? dtb_common.resvMem.sizeCells : dtb_common.rootSizeCells;
+
+	tupleCells = ac + sc;
+	if ((tupleCells == 0U) || (tupleCells > 4U)) {
+		return;
+	}
+
+	while ((l >= (tupleCells * sizeof(u32))) && (dtb_common.resvMem.nRegions < MAX_RESV_REGIONS)) {
+		if ((dtb_readCells(dtb, ac, &start) < 0) ||
+			(dtb_readCells(dtb + (ac * sizeof(u32)), sc, &size) < 0)) {
+			break;
+		}
+
+		if (size != 0U) {
+			dtb_common.resvMem.regions[dtb_common.resvMem.nRegions].start = start;
+			dtb_common.resvMem.regions[dtb_common.resvMem.nRegions].end = start + size - 1U;
+			dtb_common.resvMem.regions[dtb_common.resvMem.nRegions].name = dtb_common.resvMem.currentName;
+			dtb_common.resvMem.nRegions++;
+		}
+
+		l -= tupleCells * sizeof(u32);
+		dtb += tupleCells * sizeof(u32);
 	}
 }
 
@@ -515,6 +606,8 @@ static void dtb_parse(void)
 		stateTimer,
 		stateChosen,
 		stateSerial,
+		stateResvMemRoot,    /* properties on /reserved-memory itself */
+		stateResvMemChild,   /* properties on a child node of /reserved-memory */
 	} state = stateIdle;
 
 	if (dtb_common.fdth->magic != ntoh32(0xd00dfeedU)) {
@@ -539,6 +632,14 @@ static void dtb_parse(void)
 				state = stateIdle;
 				dtb_common.soc.depth = depth + 1U;
 			}
+			else if ((depth == 1U) && (hal_strcmp(dtb, "reserved-memory") == 0)) {
+				/* TD-15 / Stage 2 phase 4: enter /reserved-memory.
+				 * Properties on this node carry #address-cells /
+				 * #size-cells; child nodes carry the actual reg
+				 * descriptors. */
+				state = stateResvMemRoot;
+				dtb_common.resvMem.depth = depth + 1U;
+			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("timer")) == 0)) {
 				state = stateTimer;
 			}
@@ -547,6 +648,15 @@ static void dtb_parse(void)
 			}
 			else if ((depth == 1U) && (hal_strncmp(dtb, STR_AND_LEN("amba_apu")) == 0)) {
 				state = stateAMBA_APU;
+			}
+			else if ((dtb_common.resvMem.depth != 0U) && (depth == dtb_common.resvMem.depth)) {
+				/* TD-15 / Stage 2 phase 4: child of /reserved-memory.
+				 * Capture the node name so dtb_parseResvMemChild can
+				 * tag the regions for diagnostics. */
+				if (dtb_common.resvMem.nRegions < MAX_RESV_REGIONS) {
+					state = stateResvMemChild;
+					dtb_common.resvMem.currentName = dtb;
+				}
 			}
 			else if ((depth == 2U) && ((hal_strncmp(dtb, STR_AND_LEN("cpu")) == 0) || (hal_strncmp(dtb, STR_AND_LEN("apu_cpu")) == 0))) {
 				if (dtb_common.nCpus < MAX_CPUS) {
@@ -614,6 +724,14 @@ static void dtb_parse(void)
 					dtb_parseSerial(dtb, si, l, (dtb_common.soc.depth != 0U) && (depth > dtb_common.soc.depth));
 					break;
 
+				case stateResvMemRoot:
+					dtb_parseResvMemRoot(dtb, si, l);
+					break;
+
+				case stateResvMemChild:
+					dtb_parseResvMemChild(dtb, si, l);
+					break;
+
 				default:
 					/* No action required */
 					break;
@@ -639,6 +757,16 @@ static void dtb_parse(void)
 					state = stateIdle;
 					break;
 
+				case stateResvMemChild:
+					/* Returning to the /reserved-memory parent. */
+					state = stateResvMemRoot;
+					dtb_common.resvMem.currentName = NULL;
+					break;
+
+				case stateResvMemRoot:
+					state = stateIdle;
+					break;
+
 				default:
 					state = stateIdle;
 					break;
@@ -646,6 +774,10 @@ static void dtb_parse(void)
 			/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "The algorithm is designed not to underflow" */
 			if ((dtb_common.soc.depth != 0U) && (depth == dtb_common.soc.depth)) {
 				dtb_common.soc.depth = 0U;
+			}
+			if ((dtb_common.resvMem.depth != 0U) && (depth == dtb_common.resvMem.depth)) {
+				/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "Algorithm balanced by FDT_NODE_BEGIN" */
+				dtb_common.resvMem.depth = 0U;
 			}
 			depth--;
 		}
@@ -683,6 +815,45 @@ void dtb_getMemory(dtb_memBank_t **banks, size_t *nBanks)
 {
 	*banks = dtb_common.memBanks;
 	*nBanks = dtb_common.nMemBanks;
+}
+
+
+void dtb_getReservedMemory(dtb_resvMemRegion_t **regions, size_t *nRegions)
+{
+	*regions = dtb_common.resvMem.regions;
+	*nRegions = dtb_common.resvMem.nRegions;
+}
+
+
+void dtb_getDmaRanges(dtb_dmaRange_t **ranges, size_t *nRanges)
+{
+	*ranges = dtb_common.soc.dmaRanges;
+	*nRanges = dtb_common.soc.nDmaRanges;
+}
+
+
+int dtb_armToBus(addr_t cpuAddr, addr_t *busAddr)
+{
+	addr_t offset;
+	size_t i;
+
+	if (busAddr == NULL) {
+		return -EINVAL;
+	}
+
+	for (i = 0U; i < dtb_common.soc.nDmaRanges; ++i) {
+		if (cpuAddr < dtb_common.soc.dmaRanges[i].cpu) {
+			continue;
+		}
+
+		offset = cpuAddr - dtb_common.soc.dmaRanges[i].cpu;
+		if (offset < dtb_common.soc.dmaRanges[i].size) {
+			*busAddr = dtb_common.soc.dmaRanges[i].bus + offset;
+			return EOK;
+		}
+	}
+
+	return -ENODEV;
 }
 
 

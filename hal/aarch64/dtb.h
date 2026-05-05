@@ -28,6 +28,27 @@ typedef struct {
 } dtb_memBank_t;
 
 
+/* TD-15 / Stage 2 phase 4: reserved-memory region.
+ * Populated from /reserved-memory child nodes' reg properties. The kernel
+ * page-frame allocator must skip these regions; firmware/VC4 uses them. */
+typedef struct {
+	addr_t start;
+	addr_t end;
+	const char *name; /* node name for diagnostics; points into the live DTB */
+} dtb_resvMemRegion_t;
+
+
+/* TD-15 / Stage 2 phase 4: ARM↔BUS DMA address translation entry.
+ * Populated from /soc/dma-ranges. dtb_armToBus(arm_pa) maps a CPU PA into
+ * the bus PA that peripherals see (Pi 4: legacy 0xc0000000 alias and the
+ * full-RAM 0x0 alias). */
+typedef struct {
+	addr_t bus;
+	addr_t cpu;
+	addr_t size;
+} dtb_dmaRange_t;
+
+
 typedef struct {
 	addr_t base;
 	int intr;
@@ -56,6 +77,21 @@ int dtb_getCPU(unsigned int n, char **compatible, u32 *clock);
 
 
 void dtb_getMemory(dtb_memBank_t **banks, size_t *nBanks);
+
+
+/* TD-15 / Stage 2 phase 4. */
+void dtb_getReservedMemory(dtb_resvMemRegion_t **regions, size_t *nRegions);
+
+
+/* TD-15 / Stage 2 phase 4: ARM↔BUS DMA range table from /soc/dma-ranges. */
+void dtb_getDmaRanges(dtb_dmaRange_t **ranges, size_t *nRanges);
+
+
+/* TD-15 / Stage 2 phase 4: translate an ARM CPU PA into the bus PA a
+ * peripheral DMA descriptor must use. Returns EOK on success and writes the
+ * translated address into *busAddr; returns -ENODEV when no /soc/dma-ranges
+ * entry covers cpuAddr. */
+int dtb_armToBus(addr_t cpuAddr, addr_t *busAddr);
 
 
 void dtb_getGIC(addr_t *gicc, addr_t *gicd);
