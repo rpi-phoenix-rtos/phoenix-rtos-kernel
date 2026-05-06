@@ -185,10 +185,71 @@
 .org 0
 _start:
 	uart_reinit_115200
-        /* DEBUG: Check current exception level */
+
+        /*
+         * Drop EL2 -> EL1 if we entered at EL2.
+         *
+         * Phoenix's armstub (phoenix-armstub8-rpi4.S line 171-175) does
+         * `eret` to SPSR_EL3_MODE_EL2H, so on a clean cold boot every
+         * core arrives here at EL2. The rest of _init.S writes EL1
+         * sysregs (SCTLR_EL1, TTBR0_EL1, TTBR1_EL1, TCR_EL1, MAIR_EL1,
+         * VBAR_EL1, CPACR_EL1) which only affect the running execution
+         * context if the kernel is actually at EL1. Without this drop,
+         * the SCTLR_EL1.M=1 below stages a value that is consulted only
+         * by a future eret-to-EL1 (which never comes), so the MMU never
+         * actually turns on. This explains why earlier cache-enable
+         * attempts (TD-16) silent-hung on real Pi 4: SCTLR_EL1 writes
+         * had no observable effect on the running execution context.
+         *
+         * A72 has no FEAT_VHE / TTBR1_EL2 (armv8.0 baseline) so we
+         * cannot keep running at EL2 with our dual-VA pmap. The fix is
+         * to drop to EL1 here, mirroring Linux's nvhe init_kernel_el
+         * pattern. Cross-OS survey (FreeBSD, NetBSD, OpenBSD, seL4,
+         * Genode) confirms every kernel-at-EL1 project drops EL2->EL1
+         * before any SCTLR_EL1.M write. See docs/research/el2-to-el1-drop.md
+         * and docs/research/boot-mmu-bringup-non-linux.md.
+         */
+        mrs x0, CurrentEL
+        cmp x0, #(2 << 2)            /* CurrentEL.EL == 0b10 ? */
+        b.ne el1_entry               /* already at EL1: skip drop */
+
+        /* HCR_EL2.RW = 1: lower exception level (EL1) is AArch64. */
+        mov x0, #(1 << 31)
+        msr hcr_el2, x0
+
+        /* Stage-2 translation off (we are not a hypervisor). */
+        msr vttbr_el2, xzr
+
+        /* Timer plumbing: enable EL1 physical counter (EL0PCTEN bit 0)
+         * and EL1 physical timer (EL0PTEN bit 1) as in Linux nvhe
+         * __init_el2_timers; zero CNTVOFF so EL1 sees firmware time. */
+        mov x0, #3
+        msr cnthctl_el2, x0
+        msr cntvoff_el2, xzr
+
+        /* Mirror VBAR_EL2 (set by armstub line 179) into VBAR_EL1 so
+         * any exception taken between here and the kernel's real
+         * VBAR_EL1 install (line ~319) lands in armstub vector code
+         * rather than at PC=0. */
+        mrs x0, vbar_el2
+        msr vbar_el1, x0
+
+        /* Don't trap FP/SIMD/SVE at EL2 on the way through. */
+        msr cptr_el2, xzr
+
+        /* SPSR_EL2 = 0x3c5: EL1h, DAIF masked. */
+        mov x0, #0x3c5
+        msr spsr_el2, x0
+        adr x0, el1_entry
+        msr elr_el2, x0
+        isb
+        eret
+
+el1_entry:
+        /* DEBUG: Check current exception level (expect 0x4 == EL1). */
         mrs x0, CurrentEL
         uart_putc 90 /* DEBUG: CurrentEL value */
-        
+
         /* Assumptions:
          * x9 => PA of syspage from PLO */
         uart_putc 75
