@@ -256,19 +256,44 @@ el1_entry:
 	/* Mask all interrupts */
 	msr daifSet, #0xf
 
-	/* Interesting bits:
-		EE == 0, E0E == 0 => little-endian at EL1 and EL0
-		WXN == 0 => write permission doesn't imply execute never
-		nTWE == 0, nTWI == 0 => trap WFE/WFI instructions at EL0
-		UMA == 0 => trap accesses to DAIF system reg. from EL0
-		SED == 1 => trap SETEND instruction in AArch32
-		SA0 == 1, SA == 1 => alignment checks for SP accesses
-		A == 0 => disable data alignment checks
-		C, I, M == 0 => disable D-cache, I-cache, MMU (for now)
-		UCT == 1 => don't trap accesses to CTR_EL0 (cache type reg.) from EL0
-		DZE == 1 => don't trap DC ZVA instructions from EL0
-		UCI == 0 => trap cache maintenance instructions executed at EL0
+	/* SCTLR_EL1 baseline (MMU + caches OFF for now).
+	 *
+	 * Value 0x30d4d938 = full A57/A72 RES1 baseline + the bits Phoenix
+	 * relies on (matches Linux INIT_SCTLR_EL1_MMU_OFF derivation):
+	 *   bit  0 (M):      0 — MMU off
+	 *   bit  1 (A):      0 — alignment checks disabled
+	 *   bit  2 (C):      0 — D-cache off
+	 *   bit  3 (SA):     1 — SP alignment check at EL1
+	 *   bit  4 (SA0):    1 — SP alignment check at EL0
+	 *   bit  5 (CP15BEN):1 — RES1 on A57/A72 (CP15 barrier enable)
+	 *   bit  7 (ITD):    0 — IT disable; left 0 to match Linux
+	 *   bit  8 (SED):    1 — SETEND disable
+	 *   bit 11 (RES1):   1 — A57/A72 RES1
+	 *   bit 12 (I):      0 — I-cache off
+	 *   bit 14 (DZE):    1 — DC ZVA at EL0 allowed
+	 *   bit 15 (UCT):    1 — CTR_EL0 from EL0 allowed
+	 *   bit 16 (nTWI):   1 — don't trap WFI from EL0
+	 *   bit 18 (nTWE):   1 — don't trap WFE from EL0
+	 *   bit 20 (RES1):   1 — A57/A72 RES1
+	 *   bit 22 (RES1):   1 — A57/A72 RES1
+	 *   bit 23 (SPAN):   0 — Linux nvhe leaves clear
+	 *   bit 26 (UCI):    0 — trap cache maint from EL0
+	 *   bit 28 (RES1):   1 — A57/A72 RES1
+	 *   bit 29 (RES1):   1 — A57/A72 RES1
+	 *   (all other bits 0)
+	 *
+	 * Earlier value 0x30c0c938 omitted bits 11, 16, 18 — RES1 by ARM
+	 * SDEN for A57/A72; QEMU is lenient, real silicon may not be.
+	 * Updated per docs/research/boot-mmu-bringup-non-linux.md §4 R1
+	 * (cross-OS convergent recommendation: use full RES1 baseline).
 	 */
+	/* TEMP REVERT 2026-05-08: 0x30d4d938 (RES1 baseline) regressed even
+	 * the M-only baseline boot. Reverting to the previously-working
+	 * 0x30c0c938. The RES1-baseline change is likely correct in
+	 * principle (per docs/research/round3-netbsd-aarch64-rpi4-deep.md
+	 * and round3-freebsd-arm64-rpi4-deep.md) but interacts badly with
+	 * something else in our boot path; investigate after research wave
+	 * synthesis. */
 	ldr x0, =0x30c0c938
 	msr sctlr_el1, x0
 	
@@ -283,9 +308,29 @@ el1_entry:
 	msr cpacr_el1, x0
 	isb
 
-	/* Invalidate caches and TLB - simplified approach */
-	ic ialluis /* Invalidate instruction cache */
-	tlbi vmalle1 /* Invalidate all TLB entries */
+	/* Invalidate caches and TLB.
+	 *
+	 * Step 1 of the round-3 canonical-idiom alignment (see
+	 * docs/research/round3-cache-enable-synthesis.md §5):
+	 * the kernel must run a full set/way D-cache invalidate at _start
+	 * to match the canonical Phoenix A-class idiom (imx6ull, zynq7000,
+	 * zynqmp). A72 r0p3 hardware-invalidates L1 at cold reset so this
+	 * is a no-op functionally on a clean boot, but it makes the
+	 * handoff contract explicit and matches what every other A-class
+	 * Phoenix port does. The function walks CLIDR_EL1 levels and
+	 * issues `dc isw` per set/way.
+	 */
+	ic ialluis        /* I-cache invalidate, broadcast IS  */
+	tlbi vmalle1is    /* TLB invalidate, broadcast IS      */
+	dsb ish
+	isb
+	/* hal_cpuInvalDataCacheAll uses x0-x10 (including x9). Phoenix's
+	 * x9 here holds the syspage PA from plo and is load-bearing
+	 * later. Stash it in x28 (caller-saved, not used by the bl
+	 * target) across the call. */
+	mov x28, x9
+	bl hal_cpuInvalDataCacheAll  /* D-cache set/way invalidate-all */
+	mov x9, x28
 	dsb ish
 	isb
 
@@ -301,23 +346,25 @@ el1_entry:
 	uart_putc 76
 
 #if defined(__TARGET_AARCH64A53) || defined(__TARGET_AARCH64A72)
-        /* Enable SMP for A53 or A72 */
-        /* Temporarily disabled to test if this is causing the hang */
-        uart_putc 83 /* DEBUG: Before SMP enable */
-        /* mov x0, #(1 << 6) */ /* CPUECTLR_EL1_SMPEN only */
-        /* msr s3_1_c15_c2_1, x0 */
-        /* isb */ /* Ensure write completes */
-        uart_putc 84 /* DEBUG: After SMP enable */
+        /* SMPEN bit (CPUECTLR_EL1[6]) — left commented because the
+         * register access traps from EL1 on A72 (system-register S3_1_*
+         * implementation-defined; A72 traps reads/writes from EL1
+         * unless explicitly granted). The Phoenix armstub
+         * (phoenix-armstub8-rpi4.S) sets this at EL3 before the eret
+         * to EL2/EL1. If we ever need to re-assert it, the right place
+         * is in the armstub itself, not here.
+         *
+         * Same applies to A72 erratum 859971 workaround
+         * (CPUACTLR_EL1[47] DIS_INSTR_PREFETCH): ARM Trusted Firmware
+         * applies this in cortex_a72_reset_func at EL3. Phoenix
+         * empirically observed an EL1 trap when attempting it from
+         * here (boot stalls at uart_putc 83 = 'S' marker). The
+         * workaround needs to migrate to the armstub for the cache
+         * enable Stage 1 path to progress past Phase A.
+         */
+        uart_putc 83 /* DEBUG: SMPEN site (no-op; relies on armstub) */
+        uart_putc 84 /* DEBUG: erratum 859971 site (no-op; relies on armstub) */
 #endif
-
-/* Temporarily disable A53-specific CPUACTLR_EL1 setup to test if it's causing hang on A72 */
-/* #ifdef __TARGET_AARCH64A53 */
-        /* L1 Data prefetch control - DISABLED FOR A72 TESTING */
-
-	/* Set ENDCCASCI bit in CPUACTLR_EL1 register - DISABLED FOR A72 TESTING */
-	/* ldr	x0, =0x1000080ca000 */
-	/* msr	s3_1_c15_c2_0, x0 */ /* CPUACTLR_EL1 */
-/* #endif */
 
 	uart_putc 85 /* DEBUG: Before M marker */
 	uart_putc 77
@@ -404,13 +451,48 @@ el1_entry:
 	dsb ish
 	isb
 
-	/* Turn on MMU and caches */
-
+	/* Turn on MMU. Caches stay OFF (C=0, I=0) — known-good baseline.
+	 *
+	 * Stage 1 cache enable was attempted in many variants; all fail:
+	 *   - Phase A (M+I): boot reaches X4/X5/td15/td16, faults at
+	 *     syspage.c:476 (hal_syspageRelocate). RES1 baseline didn't
+	 *     change it. armstub-side 859971 didn't change it.
+	 *   - Phase B (M+C+I): boot hangs at X3 (before X4 marker) —
+	 *     immediate post-flip stall, classic "stale D-cache shadows
+	 *     page tables" failure mode.
+	 *
+	 * Conclusion: we are missing something fundamental. Spawned a
+	 * deep-research wave (FreeBSD/NetBSD/seL4/ARM ARM authoritative
+	 * spec, plo->kernel handoff cache maintenance, BCM2711 firmware
+	 * state, diagnostic technique survey). Reverting to known-good
+	 * (EL drop + M-only) until research wave returns with concrete
+	 * direction.
+	 */
+	/* Stage 1: MMU only (caches OFF) — known-good baseline.
+	 *
+	 * Step 5 of canonical-idiom alignment was attempted (single M|C|I
+	 * write with full canonical barrier ritual: ic ialluis; dsb ish;
+	 * tlbi vmalle1is; dsb ish; isb; SCTLR.{M,C,I}; isb; ic ialluis;
+	 * dsb ish; isb). Result: same hang as previous Phase B —
+	 * boot reaches X3, then hangs at the SCTLR write itself. No X4
+	 * marker. Steps 1+2 are functionally no-ops in plo's caches-off
+	 * configuration (no dirty lines exist to clean), so they don't
+	 * change Phase B outcome.
+	 *
+	 * Step 3 (plo runs with MMU+caches ON, matching zynqmp idiom) is
+	 * the missing prerequisite — it makes plo's writes go through
+	 * the D-cache and Step 2's full-DDR civac becomes load-bearing.
+	 *
+	 * For now the kernel boots cleanly with EL drop + M-only, and
+	 * Steps 1+2 are no-ops on caches-off. Step 5 reverted; the diff
+	 * is preserved in
+	 *   docs/plans/canonical-idiom-step5-mci-flip.md
+	 * for re-application after Step 3 lands in plo.
+	 */
 	uart_tag2 88, 51
 	dsb ish
-	/* Enable MMU first, then caches separately to avoid potential issues */
 	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 0)   /* Enable MMU only first */
+	orr x0, x0, #(1 << 0)   /* SCTLR_EL1.M (MMU only) */
 	msr sctlr_el1, x0
 	isb
 	uart_tag2 88, 52
