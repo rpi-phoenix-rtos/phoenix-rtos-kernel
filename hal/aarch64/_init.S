@@ -468,32 +468,55 @@ el1_entry:
 	 * (EL drop + M-only) until research wave returns with concrete
 	 * direction.
 	 */
-	/* Stage 1: MMU only (caches OFF) — known-good baseline.
+	/* Stage 1 cache enable (Step 5 of canonical-idiom alignment plan):
+	 * M | C | I in a single SCTLR_EL1 write with canonical barrier ritual.
 	 *
-	 * Step 5 of canonical-idiom alignment was attempted (single M|C|I
-	 * write with full canonical barrier ritual: ic ialluis; dsb ish;
-	 * tlbi vmalle1is; dsb ish; isb; SCTLR.{M,C,I}; isb; ic ialluis;
-	 * dsb ish; isb). Result: same hang as previous Phase B —
-	 * boot reaches X3, then hangs at the SCTLR write itself. No X4
-	 * marker. Steps 1+2 are functionally no-ops in plo's caches-off
-	 * configuration (no dirty lines exist to clean), so they don't
-	 * change Phase B outcome.
-	 *
-	 * Step 3 (plo runs with MMU+caches ON, matching zynqmp idiom) is
-	 * the missing prerequisite — it makes plo's writes go through
-	 * the D-cache and Step 2's full-DDR civac becomes load-bearing.
-	 *
-	 * For now the kernel boots cleanly with EL drop + M-only, and
-	 * Steps 1+2 are no-ops on caches-off. Step 5 reverted; the diff
-	 * is preserved in
-	 *   docs/plans/canonical-idiom-step5-mci-flip.md
-	 * for re-application after Step 3 lands in plo.
+	 * Prerequisites in tree:
+	 *   - kernel _start invokes hal_cpuInvalDataCacheAll (Step 1)
+	 *   - plo flushes full DDR before handoff (Step 2)
+	 *   - plo's mmu.c + cache.c generalised to dispatch on currentEL
+	 *     (Path A) + TCR_EL2 field-layout fixup for the EL2 path
+	 *     (RES0 bit 23 cleared; IPS moved from bits 34:32 -> 18:16)
+	 *   - plo runs with MMU+caches ON via hal_memoryInit + canonical
+	 *     teardown in hal_cpuJump (Step 3)
+	 *   - all TLB/I-cache maintenance uses Inner-Shareable variants
+	 *     (vmalle1is, ialluis, dsb ish) — Step 4
 	 */
 	uart_tag2 88, 51
-	dsb ish
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 0)   /* SCTLR_EL1.M (MMU only) */
-	msr sctlr_el1, x0
+
+	/* Pre-flip canonical fence. */
+	ic   ialluis
+	dsb  ish
+	tlbi vmalle1is
+	dsb  ish
+	isb
+
+	/* M-only enable, matching plo's "MMU on, caches off" model.
+	 *
+	 * Root cause (multi-subagent investigation 2026-05-11,
+	 * docs/status.md): BCM2711 has a VPU-side 1 MB "system L2" on
+	 * a fabric that A72 cache ops do not reach in the inner-shareable
+	 * broadcast domain. start4.elf primes that cache before handoff;
+	 * `dc isw` (set/way) and `dc ivac`/`ic ialluis` (VA-based IS
+	 * broadcast) both fail to drop those lines. When SCTLR_EL1.C or
+	 * .I is set, the first cache fill returns stale VC4 data instead
+	 * of RAM-resident kernel data, causing reproducible wild-pointer
+	 * derefs (FAR=0x3918... etc.) in syspage_entryAdd and similar.
+	 *
+	 * The architecturally-correct fix is a mailbox call to VC4 asking
+	 * it to clean its system L2 — until that lands (TD-plo-icache),
+	 * the kernel runs with caches off. Performance penalty for the
+	 * boot path; can be re-enabled at runtime once syspage parsing is
+	 * complete and the mailbox-flush ritual is added. */
+	mrs  x0, sctlr_el1
+	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable (only) */
+	msr  sctlr_el1, x0
+	isb
+
+	/* Post-flip canonical fence (Linux set_sctlr ritual shape:
+	 * msr -> isb -> ic iallu -> dsb nsh -> isb). */
+	ic   iallu
+	dsb  nsh
 	isb
 	uart_tag2 88, 52
 
