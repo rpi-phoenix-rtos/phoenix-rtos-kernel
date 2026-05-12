@@ -484,37 +484,24 @@ el1_entry:
 	 */
 	uart_tag2 88, 51
 
-	/* Pre-flip canonical fence. */
+	/* Pre-flip canonical fence (Linux set_sctlr ritual shape). */
 	ic   ialluis
 	dsb  ish
 	tlbi vmalle1is
 	dsb  ish
 	isb
 
-	/* M-only enable, matching plo's "MMU on, caches off" model.
-	 *
-	 * Root cause (multi-subagent investigation 2026-05-11,
-	 * docs/status.md): BCM2711 has a VPU-side 1 MB "system L2" on
-	 * a fabric that A72 cache ops do not reach in the inner-shareable
-	 * broadcast domain. start4.elf primes that cache before handoff;
-	 * `dc isw` (set/way) and `dc ivac`/`ic ialluis` (VA-based IS
-	 * broadcast) both fail to drop those lines. When SCTLR_EL1.C or
-	 * .I is set, the first cache fill returns stale VC4 data instead
-	 * of RAM-resident kernel data, causing reproducible wild-pointer
-	 * derefs (FAR=0x3918... etc.) in syspage_entryAdd and similar.
-	 *
-	 * The architecturally-correct fix is a mailbox call to VC4 asking
-	 * it to clean its system L2 — until that lands (TD-plo-icache),
-	 * the kernel runs with caches off. Performance penalty for the
-	 * boot path; can be re-enabled at runtime once syspage parsing is
-	 * complete and the mailbox-flush ritual is added. */
+	/* MMU only (M=1, C=0, I=0). Matches plo's stable config.
+	 * D-cache enable broke exec-kernel inside plo (TD-plo-dcache);
+	 * I-cache enable triggers I-fetch garbage (TD-plo-icache). Both
+	 * open. Keeping MMU on (essential for any kernel work) and
+	 * caches off (slow but correct). */
 	mrs  x0, sctlr_el1
-	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable (only) */
+	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
 	msr  sctlr_el1, x0
 	isb
 
-	/* Post-flip canonical fence (Linux set_sctlr ritual shape:
-	 * msr -> isb -> ic iallu -> dsb nsh -> isb). */
+	/* Post-flip canonical fence: msr -> isb -> ic iallu -> dsb nsh -> isb. */
 	ic   iallu
 	dsb  nsh
 	isb
