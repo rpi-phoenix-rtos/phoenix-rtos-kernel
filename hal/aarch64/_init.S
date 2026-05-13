@@ -695,6 +695,19 @@ el1_entry:
 	 *     invalidation didn't help — the TTBR0 TTL1 still reads
 	 *     stale on first walk after cache enable.
 	 *
+	 *   Iteration 6 (2026-05-13) — staged M-then-C with C=1 deferred
+	 *                until AFTER all kernel TTL2/TTL3 writes + tlbi
+	 *                vmalle1is, with armstub A72 erratum 1319367
+	 *                workaround (CPUACTLR2_EL1[0]=1) now applied
+	 *                upstream of kernel entry. Image SHA
+	 *                06af0ead…d1107ae4:
+	 *     ESR=0x96000007 (Data abort, level-3 translation fault),
+	 *     ELR=0xffffffffc00006fc, FAR=0xffffffffc0001890. SAME
+	 *     fault as iteration 3 — deferring C=1 past the PT writes
+	 *     did NOT help. The TTL3 entry for kernel page 1 reads
+	 *     invalid even though _fill_page_descr wrote all 512
+	 *     entries via the TTBR0 identity Non-Cacheable mapping.
+	 *
 	 * Pattern: every cache-enable attempt on real Pi 4 produces a
 	 * walk-time translation fault even though the page tables were
 	 * written correctly with caches off (going directly to DDR).
