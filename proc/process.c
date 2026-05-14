@@ -561,6 +561,9 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 
 		if ((phdr->p_flags & PF_W) != 0U) {
 			prot |= PROT_WRITE;
+			/* TODO(TD-17): make writable ELF data cacheable again once
+			 * anonymous-page cache maintenance is fixed. */
+			flags |= MAP_UNCACHED;
 		}
 
 		if ((phdr->p_flags & PF_X) != 0U) {
@@ -576,7 +579,8 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if (filesz != memsz) {
-			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
+			if ((round_page(memsz) != round_page(filesz)) &&
+					(vm_mmap(map, vaddr + round_page(filesz), NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, flags & MAP_UNCACHED) == NULL)) {
 				return -ENOMEM;
 			}
 
@@ -653,6 +657,9 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 
 		if ((phdr->p_flags & PF_W) != 0U) {
 			prot |= PROT_WRITE;
+			/* TODO(TD-17): make writable ELF data cacheable again once
+			 * anonymous-page cache maintenance is fixed. */
+			flags |= MAP_UNCACHED;
 		}
 
 		if ((phdr->p_flags & PF_X) != 0U) {
@@ -668,7 +675,8 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if (filesz != memsz) {
-			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
+			if ((round_page(memsz) != round_page(filesz)) &&
+					(vm_mmap(map, vaddr + round_page(filesz), NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, flags & MAP_UNCACHED) == NULL)) {
 				return -ENOMEM;
 			}
 

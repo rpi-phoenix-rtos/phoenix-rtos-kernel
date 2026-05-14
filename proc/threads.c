@@ -570,6 +570,10 @@ int threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 	spinlock_ctx_t sc;
 	int ret;
 
+	if (threads_common.scheduleTraceCount < 8U) {
+		hal_consolePrint(ATTR_USER, "threads: wrapper enter\n");
+	}
+
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 	ret = _threads_schedule(n, context, arg);
 	hal_spinlockClear(&threads_common.spinlock, &sc);

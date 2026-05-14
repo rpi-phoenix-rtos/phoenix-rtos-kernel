@@ -21,7 +21,6 @@
 #include "amap.h"
 #include "map.h"
 
-
 static struct {
 	vm_object_t *kernel;
 	vm_map_t *kmap;
@@ -208,11 +207,13 @@ static anon_t *anon_new(page_t *p)
 
 static void *amap_map(vm_map_t *map, page_t *p)
 {
+	/* TODO(TD-17): replace this Pi 4 cache-enable workaround with precise
+	 * cache maintenance for freshly allocated/COW anonymous pages. */
 	if (map == amap_common.kmap) {
-		return _vm_mmap(amap_common.kmap, NULL, p, SIZE_PAGE, PROT_READ | PROT_WRITE, amap_common.kernel, VM_OFFS_MAX, MAP_NONE);
+		return _vm_mmap(amap_common.kmap, NULL, p, SIZE_PAGE, PROT_READ | PROT_WRITE, amap_common.kernel, VM_OFFS_MAX, MAP_UNCACHED);
 	}
 
-	return vm_mmap(amap_common.kmap, NULL, p, SIZE_PAGE, PROT_READ | PROT_WRITE, amap_common.kernel, -1, MAP_NONE);
+	return vm_mmap(amap_common.kmap, NULL, p, SIZE_PAGE, PROT_READ | PROT_WRITE, amap_common.kernel, -1, MAP_UNCACHED);
 }
 
 
