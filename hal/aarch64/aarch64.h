@@ -169,6 +169,7 @@ static inline void hal_tlbInvalASID(asid_t asid)
 	u64 arg = (u64)asid << 48;
 	__asm__ volatile("tlbi aside1, %0" : : "r"(arg));
 	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
 }
 
 
@@ -178,6 +179,7 @@ static inline void hal_tlbInvalASID_IS(asid_t asid)
 	u64 arg = (u64)asid << 48;
 	__asm__ volatile("tlbi aside1is, %0" : : "r"(arg));
 	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
 }
 
 
@@ -187,6 +189,7 @@ static inline void hal_tlbInvalVA_IS(ptr_t vaddr)
 	u64 arg = (vaddr >> 12) & ((1UL << 44) - 1U);
 	__asm__ volatile("tlbi vaae1is, %0" : : "r"(arg));
 	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
 }
 
 
@@ -196,6 +199,7 @@ static inline void hal_tlbInvalVAASID_IS(ptr_t vaddr, asid_t asid)
 	u64 arg = ((vaddr >> 12) & ((1UL << 44) - 1U)) | ((u64)asid << 48);
 	__asm__ volatile("tlbi vae1is, %0" : : "r"(arg));
 	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
 }
 
 
@@ -204,6 +208,7 @@ static inline void hal_tlbInvalAll_IS(void)
 {
 	__asm__ volatile("tlbi vmalle1is");
 	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
 }
 
 /* parasoft-end-suppress MISRAC2012-DIR_4_3 */

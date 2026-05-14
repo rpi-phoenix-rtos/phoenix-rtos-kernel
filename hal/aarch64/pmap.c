@@ -530,6 +530,9 @@ static void _pmap_writeTtl3(descr_t *tt, void *va, addr_t pa, vm_attr_t attr, as
 	tt[idx] = descr;
 	_pmap_cleanDescr(&tt[idx]);
 	hal_cpuDataSyncBarrier();
+	if (((oldDescr & DESCR_VALID) == 0U) && ((descr & DESCR_VALID) != 0U)) {
+		pmap_tlbInval((ptr_t)va, asid);
+	}
 	_pmap_cacheOpAfterChange(descr, (ptr_t)va, 3);
 }
 
