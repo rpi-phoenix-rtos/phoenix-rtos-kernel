@@ -120,12 +120,7 @@
  * * Enable translation through TTBR0
  * * 512 GB virtual address range */
 /* Linux-standard TCR: walker uses Inner+Outer WB cacheable +
- * Inner-Shareable attributes for BOTH TTBR0 and TTBR1. The C-3
- * diagnostic that forced NC + Non-shareable walks is reverted now
- * that `hal_cpuInvalDataCacheAll` correctly uses `dc isw` (discard
- * dirty firmware-era lines instead of writing them back). With the
- * cache truly clean at MMU enable, cacheable walks should read
- * correct PT data from DDR. */
+ * Inner-Shareable attributes for BOTH TTBR0 and TTBR1. */
 #define TCR_EL1_VALUE ( \
         (1 << 36) | \
         (2 << 30) | \
@@ -601,27 +596,25 @@ el1_entry:
 	dsb  ish
 	isb
 
-	/* MMU only (M=1, C=0, I=0). Matches plo's stable config on this
-	 * SoC — slow but boot-correct on Pi 4.
+	/* C-3 deferred-enable variant (2026-05-15 evening): SCTLR.M=1
+	 * only here. Boot reaches _hal_init_c with M-only (known-good
+	 * baseline). D-cache is enabled LATER from C code, after the
+	 * kernel has completed the most error-prone early-init paths
+	 * (syspage relocation, _hal_init platform setup). See
+	 * `hal_cpuEnableDCache` for the late-enable function and
+	 * `main.c` call site after `_hal_init()` returns.
 	 *
-	 * C-3 experiment (2026-05-15): tried enabling SCTLR.M|C with the
-	 * Linux __enable_mmu ritual (single MSR, pre/post canonical fences,
-	 * pre-MMU PT setup per C-1, cacheable low-PA aliases per C-2, plo
-	 * teardown using `dc ivac` for firmware-stale lines, kernel
-	 * `dc isw` for cold-start cleanup). All variants faulted at the
-	 * first post-MMU low-VA PL011 access (FAR=0xfe201018, ELR=line
-	 * 635/X4 marker, ESR=0x96000005 = level-1 translation fault). The
-	 * walker reads SCRATCH_TT[3] as invalid even though `_inval_dcache_range`
-	 * covers the PT memory and `hal_cpuInvalDataCacheAll` is the
-	 * Linux-pattern `dc isw` invalidate-all. Switching TCR walks to
-	 * NC + Non-Shareable avoided the fault but the boot then hung
-	 * inside _hal_init_c (first stack store).
-	 *
-	 * Root cause not yet identified — likely a Pi 4-specific cache /
-	 * walker interaction not seen on other A72 platforms. The dc isw
-	 * fix below and the _hal_init asm cleanup are kept as independent
-	 * improvements. Cache enable is parked here pending hardware
-	 * gdbstub or a JTAG-level investigation. */
+	 * Why deferred:
+	 *   - c3a (M|C|I single-shot): EX=4 handler-self-fault loop
+	 *   - c3b/c3h (M|C cache walks): L1 translation fault FAR=0xfe201018
+	 *   - c3d-g, c3k (M|C NC walks): hang at _hal_init_c first stack store
+	 *   - c3j (staged M-then-C, cache walks): L3 fault on first TTBR1
+	 *     data load after `br x0` to _core_0_virtual
+	 * The kernel reaches _hal_init_c entry reliably at M-only with
+	 * Linux-standard cacheable TCR walks (c3i verified). Enabling C
+	 * later, when the kernel state is known healthy and we can issue
+	 * an explicit `dc isw + ic iallu` ritual right before the SCTLR
+	 * write, isolates the cache-enable from the early-MMU complexity. */
 	mrs  x0, sctlr_el1
 	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M — MMU enable */
 	msr  sctlr_el1, x0
@@ -633,13 +626,6 @@ el1_entry:
 	isb
 	uart_tag2 88, 52
 
-	/* TODO(TD-16-cache-enable): cache enable is parked for now.
-	 * Multiple iterations of VA-range invalidation + M|C|I-together
-	 * placements all produced layered translation faults on real
-	 * Pi 4 (level-3 then level-1 with FAR/ELR moving each time).
-	 * Detailed iteration log lives in the comment block right
-	 * before the `br x0` to _core_0_virtual below.
-	 * Keeping MMU-only enable for now — the boot-correct baseline. */
 	uart_tag2 88, 53
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
 	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
@@ -1361,6 +1347,107 @@ hal_cpuInvalDataCacheAll:
 	ret
 .cfi_endproc
 .size hal_cpuInvalDataCacheAll, .-hal_cpuInvalDataCacheAll
+
+
+/* hal_cpuEnableDCache — deferred D-cache enable (C-3).
+ * hal_cpuEnableICache — deferred I-cache enable (C-3 split).
+ *
+ * Called from C code in main.c AFTER _hal_init() has succeeded.
+ *
+ * Both follow the Linux set_sctlr ritual shape:
+ *   dsb sy + isb
+ *   ic ialluis + dsb ish + tlbi vmalle1is + dsb ish + isb  (pre-flip)
+ *   bl hal_cpuInvalDataCacheAll  (set/way invalidate — D-cache enable only)
+ *   msr SCTLR with C or I bit set
+ *   isb
+ *   ic iallu + dsb nsh + isb  (post-flip)
+ *
+ * Split D and I so we can land them independently. I-cache enable is
+ * the lower-risk of the two on Pi 4 (instruction fetch is read-only,
+ * .text is loaded by plo without writes through cache, so the same
+ * "first cacheable read after enable returns stale data" pattern that
+ * keeps biting D-cache enable doesn't apply to I-fetch).
+ */
+.align 4
+.globl hal_cpuEnableDCache
+.type hal_cpuEnableDCache, %function
+hal_cpuEnableDCache:
+.cfi_startproc
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+
+	dsb sy
+	isb
+
+	ic   ialluis
+	dsb  ish
+	tlbi vmalle1is
+	dsb  ish
+	isb
+
+	bl hal_cpuInvalDataCacheAll
+
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 2)
+	msr sctlr_el1, x0
+	isb
+
+	ic   iallu
+	dsb  nsh
+	isb
+
+	bl hal_cpuInvalDataCacheAll
+
+	dsb sy
+	isb
+
+	ldp x29, x30, [sp], #16
+	ret
+.cfi_endproc
+.size hal_cpuEnableDCache, .-hal_cpuEnableDCache
+
+
+.align 4
+.globl hal_cpuEnableICache
+.type hal_cpuEnableICache, %function
+hal_cpuEnableICache:
+.cfi_startproc
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+
+	dsb sy
+	isb
+
+	/* Pre-flip: invalidate I-cache + TLB. */
+	ic   ialluis
+	dsb  ish
+	tlbi vmalle1is
+	dsb  ish
+	isb
+
+	/* Set/way invalidate the L2 unified cache too — A72's L2 caches
+	 * both data and instructions, so any stale firmware-era I-fetches
+	 * resident there would be re-served to the I-cache as soon as
+	 * SCTLR.I=1 enables instruction caching. hal_cpuInvalDataCacheAll
+	 * walks all CLIDR levels including L2 unified, so this discards
+	 * both old D and old I lines from L2. */
+	bl hal_cpuInvalDataCacheAll
+
+	/* Flip SCTLR.I=1. */
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 12)
+	msr sctlr_el1, x0
+	isb
+
+	/* Post-flip canonical fence. */
+	ic   iallu
+	dsb  nsh
+	isb
+
+	ldp x29, x30, [sp], #16
+	ret
+.cfi_endproc
+.size hal_cpuEnableICache, .-hal_cpuEnableICache
 .ltorg
 
 

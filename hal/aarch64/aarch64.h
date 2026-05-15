@@ -161,6 +161,22 @@ void hal_cpuFlushDataCache(ptr_t vstart, ptr_t vend);
 void hal_cpuInvalDataCacheAll(void);
 
 
+/* Deferred D-cache enable (C-3 fallback): full set/way invalidate-all
+ * + SCTLR_EL1.C=1 + canonical fence ritual. Called from main.c after
+ * _hal_init() has succeeded so the SCTLR.C transition happens with
+ * the kernel in a known-healthy state. Defined in _init.S. */
+/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly" */
+void hal_cpuEnableDCache(void);
+
+
+/* Deferred I-cache enable (C-3 split): SCTLR_EL1.I=1 + canonical
+ * fence ritual. Independent from D-cache enable — I-fetch is
+ * read-only on this kernel so the cache-state hazards that block
+ * D-cache enable don't apply. Defined in _init.S. */
+/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly" */
+void hal_cpuEnableICache(void);
+
+
 /* parasoft-begin-suppress MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 
 /* Invalidate TLB entries by ASID Match */

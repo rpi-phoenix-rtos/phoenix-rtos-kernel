@@ -15,6 +15,9 @@
  */
 
 #include "hal/hal.h"
+#if defined(__TARGET_AARCH64A72) || defined(__TARGET_AARCH64A53)
+#include "hal/aarch64/aarch64.h"
+#endif
 
 #include "usrv.h"
 #include "lib/lib.h"
@@ -323,6 +326,15 @@ int main(void)
 	while (*uartfr & 0x20) {}
 	*uart = 'g'; /* g marker - after hal_init */
 
+	/* C-3 split-enable (2026-05-15): try I-cache only first.
+	 * D-cache enable hit the post-enable stale-read hang (c3l-c3r);
+	 * I-cache enable is read-only and should be safer on this SoC. */
+	while (*uartfr & 0x20) {}
+	*uart = 'I'; /* I marker - about to enable I-cache */
+	hal_cpuEnableICache();
+	while (*uartfr & 0x20) {}
+	*uart = 'i'; /* i marker - I-cache enable returned */
+
 	/* TD-16-1b: SECOND nop-loop measurement, AFTER _hal_init's
 	 * cache-enable sequence. Compare to the first td16 result
 	 * (pre-cache, in main() before _hal_init) — if dt drops by
@@ -375,7 +387,12 @@ int main(void)
 		*uart = '\n';
 	}
 
+	/* C-3 markers around the cache-enable transition. */
+	while (*uartfr & 0x20) {}
+	*uart = '1'; /* 1 marker - post-td16b */
 	hal_consolePrint(ATTR_USER, "main: hal init done\n");
+	while (*uartfr & 0x20) {}
+	*uart = '2'; /* 2 marker - post hal_consolePrint */
 
 	/* Marker before usrv_init */
 	while (*uartfr & 0x20) {}
