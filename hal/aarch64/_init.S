@@ -429,6 +429,97 @@ el1_entry:
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
 
+	/* C-1 (2026-05-15, Linux __cpu_setup pattern): construct ALL kernel
+	 * TTBR1 page tables BEFORE SCTLR.M=1. The walker then sees a fully-
+	 * populated table from the very first translation request; no
+	 * post-MMU PT writes are needed. Replaces the legacy post-MMU PT
+	 * setup that lived at lines 551-646; that block is deleted below.
+	 *
+	 * For Pi 4, every store with MMU off is treated as Normal-NC
+	 * (EL1 default per ARM ARM B2.4.6) → goes direct to DDR. The
+	 * walker will then read these entries through TCR-controlled
+	 * cacheable inner-shareable walks once SCTLR.M=1, observing a
+	 * coherent view because the bytes are already in DDR.
+	 *
+	 * Cores 1-3 also reach this block; they write the same values
+	 * (race-free same-write convergence). The MPIDR check that traps
+	 * them to _other_core_trap remains post-MMU. */
+
+	/* Zero KERNEL_TTL2 */
+	adrp x0, PMAP_COMMON_KERNEL_TTL2
+	bl _fill_page_zero
+
+	/* TTL2[0] = KERNEL_TTL3 | table-descriptor */
+	adrp x1, PMAP_COMMON_KERNEL_TTL3
+	orr x1, x1, #0x3
+	str x1, [x0]
+
+	/* TTL2[last] = DEVICES_TTL3 | table-descriptor */
+	add x2, x0, #(SIZE_PAGE - 8)
+	adrp x0, PMAP_COMMON_DEVICES_TTL3
+	orr x1, x0, #0x3
+	str x1, [x2]
+
+	/* Zero DEVICES_TTL3 (x0 still holds its PA) */
+	bl _fill_page_zero
+
+#if defined(PL011_TTY_EARLY_VADDR)
+	/* DEVICES_TTL3[0] = PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR */
+	ldr x1, =(PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR)
+	str x1, [x0]
+#endif
+
+#if defined(PLO_RPI_MAILBOX_BUFFER_ADDRESS) && (PLO_RPI_MAILBOX_BUFFER_ADDRESS != 0)
+	/* TD-15 mailbox-buffer NC alias at DEVICES_TTL3[1] */
+	ldr x1, =(PLO_RPI_MAILBOX_BUFFER_ADDRESS | NC_ATTRS)
+	str x1, [x0, #8]
+#endif
+
+	/* Fill KERNEL_TTL3 with 512 page descriptors covering
+	 * VADDR_KERNEL..VADDR_KERNEL+2MB → pkernel..pkernel+2MB */
+	adrp x0, PMAP_COMMON_KERNEL_TTL3
+	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
+	mov x2, #(DEFAULT_ATTRS)
+	orr x1, x1, x2
+	bl _fill_page_descr
+
+	/* TD-04: override the one TTL3 entry covering _hal_syspageCopied as NC */
+	adrp x0, PMAP_COMMON_KERNEL_TTL3
+	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
+	ldr x2, =_hal_syspageCopied
+	ldr x3, =VADDR_KERNEL
+	sub x4, x2, x3
+	lsr x5, x4, #12
+	lsl x5, x5, #3
+	add x6, x1, x4
+	mov x7, #(NC_ATTRS)
+	orr x6, x6, x7
+	str x6, [x0, x5]
+
+	/* TD-04 sibling: keep the early C stack NC (2 pages) */
+	ldr x2, =PMAP_COMMON_STACK
+	ldr x3, =VADDR_KERNEL
+	sub x4, x2, x3
+	lsr x5, x4, #12
+	lsl x5, x5, #3
+	add x6, x1, x4
+	mov x7, #(NC_ATTRS)
+	orr x6, x6, x7
+	str x6, [x0, x5]
+	add x5, x5, #8
+	add x6, x6, #SIZE_PAGE
+	str x6, [x0, x5]
+
+	/* Activate TTBR1 walks (clear EPD1) — still pre-MMU. */
+	mrs x0, tcr_el1
+	bic x0, x0, #(1 << 23)
+	msr tcr_el1, x0
+
+	/* dsb sy: with MMU off, stores use Normal-NC; full-system barrier
+	 * is the safe choice to drain the write buffer to DDR before MMU
+	 * enable. */
+	dsb sy
+	isb
 
 	/* Linux arm64 explicitly invalidates page tables populated with the MMU
 	 * disabled to discard any speculatively loaded cache lines before the
@@ -439,9 +530,9 @@ el1_entry:
 	 *   PMAP_COMMON_DEVICES_TTL3
 	 *   PMAP_COMMON_SCRATCH_TT
 	 *   PMAP_COMMON_SCRATCH_PAGE
-	 * This is retried after the TD-16 alias cleanup so later cache-enable
-	 * attempts have Linux-shaped page-table visibility instead of relying only
-	 * on barriers.
+	 * Performed after the writes above so any speculative cache fills
+	 * during the writes are discarded; subsequent walker reads then
+	 * hit RAM via TCR-controlled cacheable inner-shareable walks.
 	 */
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	adrp x1, PMAP_COMMON_STACK
@@ -548,103 +639,9 @@ el1_entry:
 	and x8, x8, #0xff
 	cbnz x8, _other_core_trap
 
-	/* Set up translation tables */
-	adrp x0, PMAP_COMMON_KERNEL_TTL2
-	bl _fill_page_zero
-
-	/* Map TTL2 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => PMAP_COMMON_KERNEL_TTL3 */
-	adrp x1, PMAP_COMMON_KERNEL_TTL3
-	orr x1, x1, #0x3 /* Valid, table descriptor */
-	str x1, [x0]
-
-	/* Map TTL2 (VADDR_MAX - 2 MB) ~ VADDR_MAX => PMAP_COMMON_DEVICES_TTL3 */
-	add x2, x0, #(SIZE_PAGE - 8)
-	adrp x0, PMAP_COMMON_DEVICES_TTL3
-	orr x1, x0, #0x3 /* Valid, table descriptor */
-	str x1, [x2]
-
-	/* Map TTL3 (VADDR_MAX - 2 MB) ~ VADDR_MAX => no access */
-	bl _fill_page_zero
-
-#if defined(PL011_TTY_EARLY_VADDR)
-	/* Reserve the first device TTL3 entry for a temporary post-MMU PL011 probe. */
-	ldr x1, =(PL011_TTY_BASE | EARLY_UART_DEVICE_DESCR)
-	str x1, [x0]
-#endif
-
-#if defined(PLO_RPI_MAILBOX_BUFFER_ADDRESS) && (PLO_RPI_MAILBOX_BUFFER_ADDRESS != 0)
-	/* TODO(TD-15-mboxprobe): alias the VC4 mailbox buffer page at the
-	 * second device TTL3 entry (VA = 0xffffffffffe01000) so the kernel
-	 * can read back the pattern plo wrote at PA
-	 * PLO_RPI_MAILBOX_BUFFER_ADDRESS just before eret. Mapped Normal
-	 * Non-Cacheable (MAIR slot 1, AttrIdx=1) so reads see DDR fresh,
-	 * bypassing any stale L1/L2 cache contents. Used by the TD-15
-	 * phase 1 drift probe in main.c. Remove when TD-15 phase 2 moves
-	 * the buffer out of ARM-usable DRAM. */
-	ldr x1, =(PLO_RPI_MAILBOX_BUFFER_ADDRESS | NC_ATTRS)
-	str x1, [x0, #8]
-#endif
-
-	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
-	adrp x0, PMAP_COMMON_KERNEL_TTL3
-	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
-	mov x2, #(DEFAULT_ATTRS)
-	orr x1, x1, x2
-	bl _fill_page_descr
-
-	/* TD-04 fix: re-map the single page containing _hal_syspageCopied as
-	 * Normal Non-Cacheable (MAIR slot 1). _fill_page_descr above wrote
-	 * cacheable entries for the entire 2 MB window; we now overwrite the
-	 * one entry covering the syspage destination buffer so subsequent
-	 * writes during the kernel-side copy and reads in syspage_init()
-	 * bypass the A72 D-cache and go directly to DDR. The destination
-	 * symbol is .balign'd to SIZE_PAGE in the .bss section so it occupies
-	 * exactly one TTL3 entry's worth of address space. The MMU has been
-	 * enabled earlier but no high-VA accesses have happened yet, so
-	 * there are no TLB entries to invalidate — only the table-walk
-	 * barriers below are needed. */
-	adrp x0, PMAP_COMMON_KERNEL_TTL3   /* TTL3 base, re-load (x0 was clobbered) */
-	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]  /* pkernel = kernel load PA */
-	ldr x2, =_hal_syspageCopied         /* link-time high VA of the symbol */
-	ldr x3, =VADDR_KERNEL               /* high VA window base */
-	sub x4, x2, x3                       /* offset within the 2 MB mapping window */
-	lsr x5, x4, #12                      /* page index in TTL3 */
-	lsl x5, x5, #3                       /* byte offset (8 B per descriptor) */
-	add x6, x1, x4                       /* PA of the page (pkernel + offset) */
-	mov x7, #(NC_ATTRS)                  /* attrs with AttrIndx=1 */
-	orr x6, x6, x7                        /* full TTL3 entry value */
-	str x6, [x0, x5]                      /* override the one entry */
-
-	/* The early C stack is also touched through the high TTBR1 mapping.
-	 * Keep it non-cacheable during bring-up for the same BCM2711 stale-line
-	 * avoidance reason as _hal_syspageCopied. */
-	ldr x2, =PMAP_COMMON_STACK
-	ldr x3, =VADDR_KERNEL
-	sub x4, x2, x3
-	lsr x5, x4, #12
-	lsl x5, x5, #3
-	add x6, x1, x4
-	mov x7, #(NC_ATTRS)
-	orr x6, x6, x7
-	str x6, [x0, x5]
-	add x5, x5, #8
-	add x6, x6, #SIZE_PAGE
-	str x6, [x0, x5]
-
-	/* Ensure changes to translation tables are visible */
-	dsb ish
-	isb
-
-	/* Activate translation through ttbr1_el1 */
-	mrs x0, tcr_el1
-	bic x0, x0, #(1 << 23)
-	msr tcr_el1, x0
-	dsb ish
-	isb
-	tlbi vmalle1is
-	dsb ish
-	isb
-
+	/* C-1 (2026-05-15): all kernel TTBR1 PT setup happens pre-MMU at the
+	 * top of el1_entry. The post-MMU duplicate that lived here is
+	 * removed; only the high-VA UART smoke-test print remains. */
 	uart_putc_virt 78
 
 	/* Switch the primary core to the linked higher-half instruction stream.
