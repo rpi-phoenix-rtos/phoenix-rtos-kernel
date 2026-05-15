@@ -612,11 +612,7 @@ void *_vm_mmap(vm_map_t *map, void *vaddr, page_t *p, size_t size, vm_prot_t pro
 		attr = vm_protToAttr(prot) | vm_flagsToAttr(flags);
 
 		for (w = vaddr; w < (vaddr + size); w += SIZE_PAGE) {
-			if (page_map(&map->pmap, w, (p++)->addr, attr) < 0) {
-				(void)pmap_remove(&map->pmap, vaddr, w);
-				_entry_put(map, e);
-				return NULL;
-			}
+			(void)page_map(&map->pmap, w, (p++)->addr, attr);
 		}
 
 		return vaddr;
@@ -1007,8 +1003,13 @@ int vm_mapCreate(vm_map_t *map, void *start, void *stop)
 		return -ENOMEM;
 	}
 
-	map->pmap.pmapv = NULL;
-	(void)pmap_create(&map->pmap, &map_common.kmap->pmap, map->pmap.pmapp, NULL);
+	map->pmap.pmapv = vm_mmap(map_common.kmap, NULL, map->pmap.pmapp, 1UL << map->pmap.pmapp->idx, PROT_READ | PROT_WRITE, map_common.kernel, -1, MAP_NONE);
+	if (map->pmap.pmapv == NULL) {
+		vm_pageFree(map->pmap.pmapp);
+		return -ENOMEM;
+	}
+
+	(void)pmap_create(&map->pmap, &map_common.kmap->pmap, map->pmap.pmapp, map->pmap.pmapv);
 #else
 	(void)pmap_create(&map->pmap, &map_common.kmap->pmap, NULL, NULL);
 #endif
@@ -1052,9 +1053,7 @@ void vm_mapDestroy(process_t *p, vm_map_t *map)
 		vm_pageFree(_page_get(a));
 	}
 
-	if (map->pmap.pmapv != NULL) {
-		(void)vm_munmap(map_common.kmap, map->pmap.pmapv, SIZE_PDIR);
-	}
+	(void)vm_munmap(map_common.kmap, map->pmap.pmapv, SIZE_PDIR);
 	vm_pageFree(map->pmap.pmapp);
 
 	for (n = map->tree.root; n != NULL; n = map->tree.root) {

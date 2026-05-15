@@ -38,29 +38,6 @@ static struct {
 } pages_info;
 
 
-static int _page_knownNode(page_t *p)
-{
-	size_t np = (pages_info.freesz + pages_info.allocsz) / SIZE_PAGE;
-
-	return ((p >= pages_info.pages) && (p < (pages_info.pages + np))) ? 1 : 0;
-}
-
-
-static void _page_assertNode(page_t *p, unsigned int idx, const char *where)
-{
-	if ((p == NULL) || (_page_knownNode(p) == 0) || (p->next == NULL) || (p->prev == NULL) ||
-			(_page_knownNode(p->next) == 0) || (_page_knownNode(p->prev) == 0)) {
-		lib_printf("page: bad list node where=%s idx=%u p=%p addr=%p flags=%02x next=%p prev=%p np=%u free=%u alloc=%u\n",
-				where, idx, p, (p != NULL) ? (void *)p->addr : NULL, (p != NULL) ? p->flags : 0U,
-				(p != NULL) ? p->next : NULL, (p != NULL) ? p->prev : NULL,
-				(unsigned int)((pages_info.freesz + pages_info.allocsz) / SIZE_PAGE),
-				(unsigned int)pages_info.freesz, (unsigned int)pages_info.allocsz);
-		for (;;) {
-		}
-	}
-}
-
-
 static page_t *_page_alloc(size_t size, vm_flags_t flags)
 {
 	unsigned int start, stop, i;
@@ -86,11 +63,9 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
 	}
 
 	lh = pages_info.sizes[stop];
-	_page_assertNode(lh, stop, "alloc-head");
 
 	/* Split segment */
 	while (stop > start) {
-		_page_assertNode(lh, stop, "alloc-split");
 		LIST_REMOVE(&pages_info.sizes[stop], lh);
 
 		stop--;
@@ -102,7 +77,6 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
 		LIST_ADD(&pages_info.sizes[stop], rh);
 	}
 
-	_page_assertNode(lh, stop, "alloc-final");
 	LIST_REMOVE(&pages_info.sizes[stop], lh);
 
 	/* Mark allocated pages */
@@ -355,17 +329,8 @@ void _page_showPages(void)
 static int _page_map(pmap_t *pmap, void *vaddr, addr_t pa, vm_attr_t attr)
 {
 	page_t *ap = NULL;
-	int err;
 
-	for (;;) {
-		err = pmap_enter(pmap, pa, vaddr, attr, ap);
-		if (err == EOK) {
-			break;
-		}
-		else if (err != -EFAULT) {
-			return err;
-		}
-
+	while (pmap_enter(pmap, pa, vaddr, attr, ap) < 0) {
 		ap = _page_alloc(SIZE_PAGE, PAGE_OWNER_KERNEL | PAGE_KERNEL_PTABLE);
 		if (/*vaddr > (void *)VADDR_KERNEL ||*/ ap == NULL) {
 			return -ENOMEM;
@@ -390,22 +355,12 @@ int page_map(pmap_t *pmap, void *vaddr, addr_t pa, vm_attr_t attr)
 int _page_sbrk(pmap_t *pmap, void **start, void **end)
 {
 	page_t *np, *ap = NULL;
-	int err;
-
 	np = _page_alloc(SIZE_PAGE, PAGE_OWNER_KERNEL | PAGE_KERNEL_HEAP);
 	if (np == NULL) {
 		return -ENOMEM;
 	}
 
-	for (;;) {
-		err = pmap_enter(pmap, np->addr, (*end), PGHD_READ | PGHD_WRITE | PGHD_PRESENT | PGHD_NOT_CACHED, ap);
-		if (err == EOK) {
-			break;
-		}
-		else if (err != -EFAULT) {
-			return err;
-		}
-
+	while (pmap_enter(pmap, np->addr, (*end), PGHD_READ | PGHD_WRITE | PGHD_PRESENT, ap) < 0) {
 		ap = _page_alloc(SIZE_PAGE, PAGE_OWNER_KERNEL | PAGE_KERNEL_PTABLE);
 		if (ap == NULL) {
 			return -ENOMEM;
@@ -473,9 +428,6 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	page_t *page, *p;
 	int err;
 	void *vaddr;
-	size_t scanCnt = 0;
-
-	hal_consolePrint(ATTR_USER, "page: init enter\n");
 
 	(void)proc_lockInit(&pages_info.lock, &proc_lockAttrDefault, "page");
 
@@ -492,17 +444,10 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	pages_info.pages = (page_t *)*bss;
 	page = (page_t *)*bss;
 
-	hal_consolePrint(ATTR_USER, "page: mem scan enter\n");
 	for (;;) {
-		if ((scanCnt & 0xffffU) == 0U) {
-			hal_consolePrint(ATTR_USER, "page: scan tick\n");
-		}
-		scanCnt++;
-
 		if ((void *)page + sizeof(page_t) >= (*top)) {
-			err = _page_sbrk(pmap, bss, top);
-			if (err < 0) {
-				lib_printf("vm: Kernel heap extension error %p %p err=%d!\n", page, *top, err);
+			if (_page_sbrk(pmap, bss, top) < 0) {
+				lib_printf("vm: Kernel heap extension error %p %p!\n", page, *top);
 				return;
 			}
 		}
@@ -536,29 +481,23 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	}
 
 	(*bss) = page;
-	hal_consolePrint(ATTR_USER, "page: mem scan done\n");
 
 	/* Prepare allocation hash */
-	hal_consolePrint(ATTR_USER, "page: init sizes enter\n");
 	_page_initSizes();
-	hal_consolePrint(ATTR_USER, "page: init sizes done\n");
 
 	/* Initialize kernel space for user processes */
 	p = NULL;
 	vaddr = (*top);
 
-	hal_consolePrint(ATTR_USER, "page: kernel expand enter\n");
 	for (;;) {
 		if (_pmap_kernelSpaceExpand(pmap, &vaddr, (*top) + max((pages_info.freesz + pages_info.allocsz) / 4U, (1UL << 23)), p) == 0) {
 			break;
 		}
-		hal_consolePrint(ATTR_USER, "page: kernel expand needs ptable\n");
 		p = _page_alloc(SIZE_PAGE, PAGE_OWNER_KERNEL | PAGE_KERNEL_PTABLE);
 		if (p == NULL) {
 			return;
 		}
 	}
-	hal_consolePrint(ATTR_USER, "page: kernel expand done\n");
 
 	/* Show statistics on the console */
 	lib_printf("vm: Initializing page allocator (%d+%d)/%dKB, page_t=%d\n", (pages_info.allocsz - pages_info.bootsz) / 1024U,
@@ -567,9 +506,7 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	_page_showPages();
 
 	/* Create NULL pointer entry */
-	hal_consolePrint(ATTR_USER, "page: null map enter\n");
 	(void)_page_map(pmap, NULL, 0, PGHD_USER | ~PGHD_PRESENT);
-	hal_consolePrint(ATTR_USER, "page: init done\n");
 
 	return;
 }

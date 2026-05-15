@@ -106,39 +106,32 @@
 /* 16-bit ASID
  * Params for TTBR1:
  * * 4 KB granule
- * * Non-shareable table walks
- * * Outer non-cacheable table walks
- * * Inner non-cacheable table walks
+ * * Inner shareable
+ * * Outer cacheable
+ * * Inner cacheable
  * * Disable translation through TTBR1
  * * ASID determined by TTBR0
  * * 1 GB virtual address range
  * Params for TTBR0:
  * * 4 KB granule
- * * Non-shareable table walks
- * * Outer non-cacheable table walks
- * * Inner non-cacheable table walks
+ * * Inner shareable
+ * * Outer cacheable
+ * * Inner cacheable
  * * Enable translation through TTBR0
- * * 512 GB virtual address range
- *
- * TD-16 experiment: keep data mappings cacheable through MAIR/descriptor attrs,
- * but force the hardware table walker to bypass cacheable views of the page
- * tables. Real Pi 4 iter-12-diag proved ordinary LDRs can see valid TTL3
- * entries while the walker faults them as invalid after SCTLR.C=1; this TCR
- * shape tests whether walker cacheability/shareability is the missing boundary.
- */
+ * * 512 GB virtual address range */
 #define TCR_EL1_VALUE ( \
         (1 << 36) | \
         (2 << 30) | \
-        (0 << 28) | \
-        (0 << 26) | \
-        (0 << 24) | \
+        (3 << 28) | \
+        (1 << 26) | \
+        (1 << 24) | \
         (1 << 23) | \
         (0 << 22) | \
         (34 << 16) | \
         (0 << 14) | \
-        (0 << 12) | \
-        (0 << 10) | \
-        (0 << 8) | \
+        (3 << 12) | \
+        (1 << 10) | \
+        (1 << 8) | \
         (0 << 7) | \
         (25 << 0) \
 )
@@ -317,20 +310,26 @@ el1_entry:
 
 	/* Invalidate caches and TLB.
 	 *
-	 * Do NOT run the old set/way "invalidate all" helper here: despite its
-	 * name it uses `dc cisw` (clean+invalidate), so on a firmware/loader
-	 * handoff with dirty stale lines it can write those lines back over the
-	 * freshly loaded kernel. Invalidate only the kernel image PA range; the
-	 * syspage source is handled later by the explicit clean+invalidate path.
+	 * Step 1 of the round-3 canonical-idiom alignment (see
+	 * docs/research/round3-cache-enable-synthesis.md §5):
+	 * the kernel must run a full set/way D-cache invalidate at _start
+	 * to match the canonical Phoenix A-class idiom (imx6ull, zynq7000,
+	 * zynqmp). A72 r0p3 hardware-invalidates L1 at cold reset so this
+	 * is a no-op functionally on a clean boot, but it makes the
+	 * handoff contract explicit and matches what every other A-class
+	 * Phoenix port does. The function walks CLIDR_EL1 levels and
+	 * issues `dc isw` per set/way.
 	 */
 	ic ialluis        /* I-cache invalidate, broadcast IS  */
 	tlbi vmalle1is    /* TLB invalidate, broadcast IS      */
 	dsb ish
 	isb
+	/* hal_cpuInvalDataCacheAll uses x0-x10 (including x9). Phoenix's
+	 * x9 here holds the syspage PA from plo and is load-bearing
+	 * later. Stash it in x28 (caller-saved, not used by the bl
+	 * target) across the call. */
 	mov x28, x9
-	ldr x0, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
-	add x1, x0, #(2 * 1024 * 1024)
-	bl _inval_dcache_range
+	bl hal_cpuInvalDataCacheAll  /* D-cache set/way invalidate-all */
 	mov x9, x28
 	dsb ish
 	isb
@@ -492,18 +491,13 @@ el1_entry:
 	dsb  ish
 	isb
 
-	/* TD-16 walker-NC experiment: enable MMU + D-cache after
-	 * programming TCR table-walk attributes as non-cacheable. Previous Pi 4
-	 * iterations using cacheable table walks faulted with valid descriptors
-	 * visible to ordinary LDRs but invisible to the walker.
-	 *
-	 * Enable I-cache after the writable-user-data workaround moved real Pi 4
-	 * past the former D-cache corruption in early process startup. */
-	uart_tag2 67, 49
+	/* MMU only (M=1, C=0, I=0). Matches plo's stable config.
+	 * D-cache enable broke exec-kernel inside plo (TD-plo-dcache);
+	 * I-cache enable triggers I-fetch garbage (TD-plo-icache). Both
+	 * open. Keeping MMU on (essential for any kernel work) and
+	 * caches off (slow but correct). */
 	mrs  x0, sctlr_el1
 	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
-	orr  x0, x0, #(1 << 2)    /* SCTLR_EL1.C  — D-cache enable */
-	orr  x0, x0, #(1 << 12)   /* SCTLR_EL1.I  — I-cache enable */
 	msr  sctlr_el1, x0
 	isb
 
@@ -511,7 +505,6 @@ el1_entry:
 	ic   iallu
 	dsb  nsh
 	isb
-	uart_tag2 67, 50
 	uart_tag2 88, 52
 
 	/* TODO(TD-16-cache-enable): cache enable is parked for now.
@@ -592,14 +585,10 @@ el1_entry:
 	str x1, [x0, #8]
 #endif
 
-	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA.
-	 * TD-16: keep the initial higher-half kernel image/data window
-	 * non-cacheable while D-cache is enabled globally. Dynamic pages mapped
-	 * later can still be cacheable; this isolates stale cacheable aliases of
-	 * the firmware-loaded kernel image. */
+	/* Map TTL3 VADDR_KERNEL ~ (VADDR_KERNEL + 2 MB) => syspage->pkernel ~ (syspage->pkernel + 2 MB) PA */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
-	mov x2, #(NC_ATTRS)
+	mov x2, #(DEFAULT_ATTRS)
 	orr x1, x1, x2
 	bl _fill_page_descr
 
@@ -626,14 +615,11 @@ el1_entry:
 	orr x6, x6, x7                        /* full TTL3 entry value */
 	str x6, [x0, x5]                      /* override the one entry */
 
-	/* TD-16: pmap_common is written partly through low TTBR0 aliases while
-	 * the high TTBR1 mapping is also live. Keep its bootstrap page tables,
-	 * scratch pages, initial heap and metadata non-cacheable to avoid
-	 * cacheable/NC aliasing. The early C stack is deliberately skipped and
-	 * remains cacheable. */
-	adrp x2, PMAP_COMMON_KERNEL_TTL2
-	mov x8, #5                            /* ttl2, ttl3, devices, scratch_tt, scratch_page */
-1:
+	/* The early C stack is also touched through the high TTBR1 mapping.
+	 * Keep it non-cacheable during bring-up for the same BCM2711 stale-line
+	 * avoidance reason as _hal_syspageCopied. */
+	ldr x2, =PMAP_COMMON_STACK
+	ldr x3, =VADDR_KERNEL
 	sub x4, x2, x3
 	lsr x5, x4, #12
 	lsl x5, x5, #3
@@ -641,30 +627,9 @@ el1_entry:
 	mov x7, #(NC_ATTRS)
 	orr x6, x6, x7
 	str x6, [x0, x5]
-	add x2, x2, #SIZE_PAGE
-	subs x8, x8, #1
-	b.ne 1b
-
-	adrp x2, PMAP_COMMON_STACK
-	add x2, x2, #(NUM_CPUS * SIZE_INITIAL_KSTACK)
-	mov x8, #24                           /* heap, kernel_ttl1 and pmap_common metadata */
-2:
-	sub x4, x2, x3
-	lsr x5, x4, #12
-	lsl x5, x5, #3
-	add x6, x1, x4
-	mov x7, #(NC_ATTRS)
-	orr x6, x6, x7
+	add x5, x5, #8
+	add x6, x6, #SIZE_PAGE
 	str x6, [x0, x5]
-	add x2, x2, #SIZE_PAGE
-	subs x8, x8, #1
-	b.ne 2b
-
-	/* Keep the early C stack cacheable. Earlier M-only bring-up marked it
-	 * Normal Non-Cacheable to sidestep stale-line effects, but with
-	 * SCTLR.C=1 the first C prologue stores in _hal_init_c stop before the
-	 * function's entry marker. The stack is private kernel RAM and should
-	 * use the same cacheable Normal mapping as the rest of the image. */
 
 	/* Ensure changes to translation tables are visible */
 	dsb ish
@@ -1228,34 +1193,10 @@ _early_exception_common:
         early_putc_inline 'R'
         early_putc_inline '='
         mrs x26, far_el1
-	        early_puthex64_inline x26
+        early_puthex64_inline x26
 
-	        early_putc_inline 10
-	        early_putc_inline 'X'
-	        early_putc_inline '7'
-	        early_putc_inline '='
-	        early_puthex64_inline x7
-
-	        early_putc_inline 10
-	        early_putc_inline 'X'
-	        early_putc_inline '9'
-	        early_putc_inline '='
-	        early_puthex64_inline x9
-
-	        early_putc_inline 10
-	        early_putc_inline 'Y'
-	        early_putc_inline '7'
-	        early_putc_inline '='
-	        early_puthex64_inline x27
-
-	        early_putc_inline 10
-	        early_putc_inline 'Y'
-	        early_putc_inline '8'
-	        early_putc_inline '='
-	        early_puthex64_inline x28
-
-	        early_putc_inline 10
-	        b .
+        early_putc_inline 10
+        b .
 
 
 .align 11
@@ -1382,9 +1323,39 @@ _hal_init:
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
 	uart_putc_virt 82   /* 'R' - early stack reset before C prologue */
-	adr x0, _vector_table
-	msr vbar_el1, x0
-	isb
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	ldr x0, =_hal_syspageCopied
+	add x0, x0, #SIZE_PAGE
+	sub x0, x0, #32
+	mov x4, #0x51
+	str x4, [x0]
+	mov w4, #113
+	str w4, [x3]        /* 'q' - direct store to known syspage page worked */
+	ldr x0, =PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add x0, x0, x1
+	sub x0, x0, #32
+	mov x4, #0x52
+	str x4, [x0]
+	mov w4, #119
+	str w4, [x3]        /* 'w' - direct store to stack page worked */
+	ldr x0, =PMAP_COMMON_STACK
+	mov x1, SIZE_INITIAL_KSTACK
+	add sp, x0, x1
+	mov x4, #0x53
+	str x4, [sp, #-16]!
+	mov w4, #117
+	str w4, [x3]        /* 'u' - SP pre-index single store worked */
+	add sp, sp, #16
+	stp x30, x19, [sp, #-32]!
+	stp x20, x21, [sp, #16]
+	mov w4, #87
+	str w4, [x3]        /* 'W' - manual C-style prologue stores worked */
+	ldp x20, x21, [sp, #16]
+	ldp x30, x19, [sp], #32
+	ldr x3, =PL011_TTY_EARLY_VADDR
+	mov w4, #88
+	str w4, [x3]        /* 'X' - manual prologue restore worked */
 	b _hal_init_c
 .size _hal_init, .-_hal_init
 

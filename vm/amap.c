@@ -21,16 +21,6 @@
 #include "amap.h"
 #include "map.h"
 
-#if defined(__aarch64__)
-#include "hal/aarch64/aarch64.h"
-#define amap_invalPage(v) hal_cpuInvalDataCache((ptr_t)(v), (ptr_t)(v) + SIZE_PAGE)
-#else
-#define amap_invalPage(v) \
-	do { \
-		(void)(v); \
-	} while (0)
-#endif
-
 
 static struct {
 	vm_object_t *kernel;
@@ -284,11 +274,6 @@ page_t *amap_page(vm_map_t *map, amap_t *amap, vm_object_t *o, void *vaddr, size
 
 	if (a != NULL || o != NULL) {
 		/* Copy from object or shared anon */
-		if (o != NULL) {
-			/* Firmware-loaded object pages can have stale cacheable aliases. */
-			amap_invalPage(v);
-		}
-
 		p = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
 		if (p == NULL) {
 			(void)amap_unmap(map, v);
@@ -308,14 +293,10 @@ page_t *amap_page(vm_map_t *map, amap_t *amap, vm_object_t *o, void *vaddr, size
 			(void)proc_lockClear(&amap->lock);
 			return NULL;
 		}
-		/* Discard stale lines from a page's previous owner before reuse. */
-		amap_invalPage(w);
 		hal_memcpy(w, v, SIZE_PAGE);
 		(void)amap_unmap(map, w);
 	}
 	else {
-		/* Discard stale lines from a page's previous owner before reuse. */
-		amap_invalPage(v);
 		hal_memset(v, 0, SIZE_PAGE);
 	}
 

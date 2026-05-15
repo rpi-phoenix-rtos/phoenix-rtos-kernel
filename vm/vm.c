@@ -44,7 +44,6 @@ void _vm_init(vm_map_t *kmap, vm_object_t *kernel)
 
 	/* parasoft-suppress-next-line MISRAC2012-RULE_18_1 "&vm.top is passed as a reference to vm.top not as an array object" */
 	_pmap_init(&kmap->pmap, &vm.bss, &vm.top);
-	hal_consolePrint(ATTR_USER, "vm: pmap init done\n");
 	_page_init(&kmap->pmap, &vm.bss, &vm.top);
 	hal_consolePrint(ATTR_USER, "vm: page init done\n");
 

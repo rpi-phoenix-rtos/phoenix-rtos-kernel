@@ -16,7 +16,6 @@
 #include "aarch64.h"
 #include "hal/pmap.h"
 #include "hal/cpu.h"
-#include "hal/console.h"
 #include "hal/string.h"
 #include "hal/spinlock.h"
 
@@ -27,8 +26,6 @@
 
 #include "halsyspage.h"
 #include "dtb.h"
-
-#include <board_config.h>
 
 /* parasoft-begin-suppress MISRAC2012-RULE_8_6 "Provided by toolchain" */
 extern unsigned int _start;
@@ -111,7 +108,7 @@ struct {
 	descr_t scratch_tt[SIZE_PAGE / sizeof(descr_t)]; /* Translation tables will be temporarily mapped here when needed */
 	u8 scratch_page[SIZE_PAGE];                      /* Page for other temporary uses */
 	u8 stack[NUM_CPUS][SIZE_INITIAL_KSTACK];
-	u8 heap[16U * SIZE_PAGE];
+	u8 heap[SIZE_PAGE];
 	/* The fields below may be reordered */
 
 	descr_t kernel_ttl1[SIZE_PAGE / sizeof(descr_t)]; /* Not used by hardware */
@@ -151,21 +148,6 @@ struct {
 static const char *const marksets[4] = { "BBBBBBBBBBBBBBBB", "KYCPMSHKKKKKKKKK", "AAAAAAAAAAAAAAAA", "UUUUUUUUUUUUUUUU" };
 
 
-static void _pmap_dbgChar(char c)
-{
-#if defined(PL011_TTY_EARLY_VADDR)
-	volatile unsigned int *dr = (volatile unsigned int *)PL011_TTY_EARLY_VADDR;
-	volatile unsigned int *fr = (volatile unsigned int *)(PL011_TTY_EARLY_VADDR + 0x18U);
-
-	while ((*fr & (1U << 5)) != 0U) {
-	}
-	*dr = (unsigned int)c;
-#else
-	(void)c;
-#endif
-}
-
-
 static void pmap_tlbInval(ptr_t vaddr, asid_t asid)
 {
 	hal_cpuDataSyncBarrier();
@@ -192,44 +174,17 @@ static addr_t _pmap_hwTranslate(ptr_t va)
 }
 
 
-static void _pmap_cleanDescr(volatile descr_t *descr)
-{
-	hal_cpuCleanDataCache((ptr_t)descr, (ptr_t)descr + sizeof(*descr));
-	hal_cpuDataSyncBarrier();
-}
-
-
-static void _pmap_cleanTable(void *table)
-{
-	hal_cpuCleanDataCache((ptr_t)table, (ptr_t)table + SIZE_PAGE);
-	hal_cpuDataSyncBarrier();
-}
-
-
 /* Function maps `va` to `pa` as normal memory for temporary use. `va` is intended to be one of pmap_common.scratch* */
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 static void _pmap_mapScratch(void *va, addr_t pa)
 {
-	hal_tlbInvalVA_IS((ptr_t)va);
-	pmap_common.kernel_ttl3[TTL_IDX(3U, va)] = 0;
-	_pmap_cleanDescr(&pmap_common.kernel_ttl3[TTL_IDX(3U, va)]);
-	hal_tlbInvalVA_IS((ptr_t)va);
+	u64 tlbiArg = ((ptr_t)va >> 12) & ((1UL << 44) - 1U);
 	pmap_common.kernel_ttl3[TTL_IDX(3U, va)] =
-			DESCR_PA(pa) | DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ATTR(MAIR_IDX_NONCACHED) | DESCR_PXN | DESCR_UXN | DESCR_ISH;
-	_pmap_cleanDescr(&pmap_common.kernel_ttl3[TTL_IDX(3U, va)]);
+			DESCR_PA(pa) | DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ATTR(MAIR_IDX_CACHED) | DESCR_PXN | DESCR_UXN | DESCR_ISH;
+	/* Invalidate last level only for a bit more performance */
 	hal_cpuDataSyncBarrier();
-	hal_cpuInstrBarrier();
-}
-
-
-static descr_t *_pmap_rootTable(pmap_t *pmap)
-{
-	if (pmap->ttl1 == pmap_common.kernel_ttl1) {
-		return pmap_common.kernel_ttl1;
-	}
-
-	_pmap_mapScratch(pmap_common.scratch_tt, pmap->addr);
-	return pmap_common.scratch_tt;
+	__asm__ volatile("tlbi vaale1, %0" : : "r"(tlbiArg));
+	hal_cpuDataSyncBarrier();
 }
 
 
@@ -340,16 +295,7 @@ int pmap_create(pmap_t *pmap, pmap_t *kpmap, page_t *p, void *vaddr)
 	pmap->addr = p->addr;
 	pmap->asid = ASID_NONE;
 
-	if (kpmap != NULL) {
-		_pmap_mapScratch(pmap_common.scratch_tt, pmap->addr);
-		hal_memset(pmap_common.scratch_tt, 0, SIZE_PDIR);
-		_pmap_cleanTable(pmap_common.scratch_tt);
-		pmap->ttl1 = NULL;
-	}
-	else {
-		hal_memset(pmap->ttl1, 0, SIZE_PDIR);
-		_pmap_cleanTable(pmap->ttl1);
-	}
+	hal_memset(pmap->ttl1, 0, SIZE_PDIR);
 
 	hal_cpuDataSyncBarrier();
 	return EOK;
@@ -391,7 +337,7 @@ static addr_t _pmap_destroy(pmap_t *pmap, unsigned int *i)
 	}
 
 	while ((idx1 <= idx1Max) && (ret == 0U)) {
-		entry = _pmap_rootTable(pmap)[idx1];
+		entry = pmap->ttl1[idx1];
 		if ((entry & (DESCR_TABLE | DESCR_VALID)) == (DESCR_TABLE | DESCR_VALID)) {
 			ret = _pmap_mapTtl2AndSearch(DESCR_PA(entry), &idx2);
 			if (ret == 0U) {
@@ -469,13 +415,14 @@ void pmap_switch(pmap_t *pmap)
 }
 
 
-/* Writes the translation descriptor into the selected level 3 translation table. */
-static void _pmap_writeTtl3(descr_t *tt, void *va, addr_t pa, vm_attr_t attr, asid_t asid)
+/* Writes the translation descriptor into the level 3 translation table.
+ * Assumes that the table is already mapped mapped into pmap_common.scratch_tt */
+static void _pmap_writeTtl3(void *va, addr_t pa, vm_attr_t attr, asid_t asid)
 {
 	unsigned int idx = (unsigned int)TTL_IDX(3U, va);
 	descr_t descr, oldDescr;
 
-	oldDescr = tt[idx];
+	oldDescr = pmap_common.scratch_tt[idx];
 
 	if ((attr & PGHD_PRESENT) == 0U) {
 		descr = 0;
@@ -522,26 +469,14 @@ static void _pmap_writeTtl3(descr_t *tt, void *va, addr_t pa, vm_attr_t attr, as
 	hal_cpuDataSyncBarrier();
 	if ((oldDescr & DESCR_VALID) != 0U) {
 		/* D8.16.1 Using break-before-make when updating translation table entries */
-		tt[idx] = 0;
-		_pmap_cleanDescr(&tt[idx]);
+		pmap_common.scratch_tt[idx] = 0;
 		pmap_tlbInval((ptr_t)va, asid);
 	}
 
-	tt[idx] = descr;
-	_pmap_cleanDescr(&tt[idx]);
+	pmap_common.scratch_tt[idx] = descr;
 	hal_cpuDataSyncBarrier();
-	if (((oldDescr & DESCR_VALID) == 0U) && ((descr & DESCR_VALID) != 0U)) {
-		pmap_tlbInval((ptr_t)va, asid);
-	}
 	_pmap_cacheOpAfterChange(descr, (ptr_t)va, 3);
 }
-
-
-static descr_t *_pmap_staticKernelTable(pmap_t *pmap, unsigned int lvl, void *vaddr, addr_t pa);
-
-static addr_t _pmap_kernelVAtoPA(void *va);
-
-static int _pmap_isKernelVARange(addr_t pa, const void *vstart, size_t sz);
 
 
 /* Function maps page at specified address */
@@ -554,7 +489,7 @@ static int _pmap_enter(pmap_t *pmap, addr_t pa, void *vaddr, vm_attr_t attr, pag
 	asid_t asid = pmap->asid;
 
 	/* If no page table is allocated add new one */
-	tt = _pmap_rootTable(pmap);
+	tt = pmap->ttl1;
 	for (lvl = 1; lvl <= 2U; lvl++) {
 		entry = tt[TTL_IDX(lvl, vaddr)];
 		if ((entry & DESCR_VALID) == 0U) {
@@ -565,10 +500,8 @@ static int _pmap_enter(pmap_t *pmap, addr_t pa, void *vaddr, vm_attr_t attr, pag
 			addr = alloc->addr;
 			_pmap_mapScratch(pmap_common.scratch_page, addr);
 			hal_memset(pmap_common.scratch_page, 0, SIZE_PAGE);
-			_pmap_cleanTable(pmap_common.scratch_page);
 			hal_cpuDataSyncBarrier();
 			tt[TTL_IDX(lvl, vaddr)] = DESCR_PA(addr) | DESCR_VALID | DESCR_TABLE;
-			_pmap_cleanDescr(&tt[TTL_IDX(lvl, vaddr)]);
 			hal_cpuDataSyncBarrier();
 			alloc = NULL;
 		}
@@ -580,14 +513,11 @@ static int _pmap_enter(pmap_t *pmap, addr_t pa, void *vaddr, vm_attr_t attr, pag
 			addr = DESCR_PA(entry);
 		}
 
-		tt = _pmap_staticKernelTable(pmap, lvl, vaddr, addr);
-		if (tt == NULL) {
-			_pmap_mapScratch(pmap_common.scratch_tt, addr);
-			tt = pmap_common.scratch_tt;
-		}
+		_pmap_mapScratch(pmap_common.scratch_tt, addr);
+		tt = pmap_common.scratch_tt;
 	}
 
-	_pmap_writeTtl3(tt, vaddr, pa, attr, asid);
+	_pmap_writeTtl3(vaddr, pa, attr, asid);
 
 	return EOK;
 }
@@ -618,7 +548,7 @@ static void _pmap_remove(pmap_t *pmap, void *vstart, void *vend)
 		if ((foundttl3 == 0) || (TTL_IDX(3U, vaddr) == 0U)) {
 			foundttl3 = 0; /* Set when IDX = 0 */
 
-			tt = _pmap_rootTable(pmap);
+			tt = pmap->ttl1;
 
 			for (lvl = 1; (lvl <= 3U); lvl++) {
 				entry = tt[TTL_IDX(lvl, vaddr)];
@@ -645,7 +575,6 @@ static void _pmap_remove(pmap_t *pmap, void *vstart, void *vend)
 			_pmap_cacheOpBeforeChange(entry, 0, vaddr, lvl);
 			hal_cpuDataSyncBarrier();
 			tt[TTL_IDX(lvl, vaddr)] = 0;
-			_pmap_cleanDescr(&tt[TTL_IDX(lvl, vaddr)]);
 			pmap_tlbInval(vaddr, pmap->asid);
 			_pmap_cacheOpAfterChange(0, vaddr, lvl);
 		}
@@ -679,7 +608,7 @@ addr_t pmap_resolve(pmap_t *pmap, void *vaddr)
 
 	hal_spinlockSet(&pmap_common.lock, &sc);
 	if (((ptr_t)vaddr < VADDR_USR_MAX) && (hal_cpuGetTranslationBase() != pmap->addr)) {
-		tt = _pmap_rootTable(pmap);
+		tt = pmap->ttl1;
 		for (lvl = 1; lvl <= 3U; lvl++) {
 			entry = tt[TTL_IDX(lvl, vaddr)];
 			if ((entry & DESCR_VALID) == 0U) {
@@ -716,48 +645,24 @@ addr_t pmap_resolve(pmap_t *pmap, void *vaddr)
 int pmap_getPage(page_t *page, addr_t *addr)
 {
 	int found;
-	static unsigned int dbgCnt;
 	size_t i;
-	unsigned int progCnt;
-	unsigned int dbg;
-	addr_t a, next_a, hole_end;
+	addr_t a, next_a;
 	const syspage_prog_t *prog;
 	const pmap_memEntry_t *entry;
 
-	dbg = dbgCnt++;
-	if (dbg < 4U) {
-		_pmap_dbgChar('a');
-	}
-
 	a = *addr & ~(SIZE_PAGE - 1U);
-	if (dbg < 4U) {
-		_pmap_dbgChar('b');
-	}
-
 	page->flags = 0;
-	if (dbg < 4U) {
-		_pmap_dbgChar('c');
-	}
 
 	/* Test address ranges */
 	if (a < pmap_common.mem.min) {
 		a = pmap_common.mem.min;
 	}
-	if (dbg < 4U) {
-		_pmap_dbgChar('d');
-	}
 
 	if (a > pmap_common.mem.max) {
 		return -ENOMEM;
 	}
-	if (dbg < 4U) {
-		_pmap_dbgChar('e');
-	}
 
 	page->addr = a;
-	if (dbg < 4U) {
-		_pmap_dbgChar('f');
-	}
 	found = 0;
 	for (i = 0; i < pmap_common.mem.count; i++) {
 		entry = &pmap_common.mem.entries[i];
@@ -783,20 +688,7 @@ int pmap_getPage(page_t *page, addr_t *addr)
 	}
 
 	if (found == 0) {
-		hole_end = 0;
-		for (i = 0; i < pmap_common.mem.count; i++) {
-			entry = &pmap_common.mem.entries[i];
-			if ((entry->start > a) && ((hole_end == 0U) || (entry->start < hole_end))) {
-				hole_end = entry->start;
-			}
-		}
-
-		if (hole_end != 0U) {
-			*addr = hole_end;
-			return -EINVAL;
-		}
-
-		return -ENOMEM;
+		return -EINVAL;
 	}
 	else if (found == 1) {
 		*addr = 0;
@@ -805,53 +697,26 @@ int pmap_getPage(page_t *page, addr_t *addr)
 		/* No action required */
 	}
 
-	if (dbg < 4U) {
-		_pmap_dbgChar('g');
-	}
-
 	if (hal_syspage->progs != NULL) {
-		progCnt = 0;
 		prog = hal_syspage->progs;
-		if (dbg < 4U) {
-			_pmap_dbgChar('h');
-		}
 		do {
 			if (page->addr >= prog->start && page->addr < prog->end) {
 				page->flags |= PAGE_OWNER_APP;
-				if (dbg < 4U) {
-					_pmap_dbgChar('i');
-				}
 				return EOK;
 			}
 
 			prog = prog->next;
-			if (progCnt++ >= 64U) {
-				if (dbg < 4U) {
-					_pmap_dbgChar('j');
-				}
-				break;
-			}
-		} while ((prog != NULL) && (prog != hal_syspage->progs));
+		} while (prog != hal_syspage->progs);
 	}
 
-	if (dbg < 4U) {
-		_pmap_dbgChar('k');
-	}
-
-	if (page->addr < pmap_common.mem.pkernel) {
-		page->flags |= PAGE_OWNER_BOOT;
-	}
-	else if ((page->addr >= pmap_common.mem.pkernel) && (page->addr < (pmap_common.mem.pkernel + pmap_common.mem.kernelsz))) {
+	if ((page->addr >= pmap_common.mem.pkernel) && (page->addr < (pmap_common.mem.pkernel + pmap_common.mem.kernelsz))) {
 		page->flags |= PAGE_OWNER_KERNEL;
 
-		if ((_pmap_isKernelVARange(page->addr, pmap_common.kernel_ttl2, sizeof(pmap_common.kernel_ttl2)) != 0) ||
-				(_pmap_isKernelVARange(page->addr, pmap_common.kernel_ttl3, sizeof(pmap_common.kernel_ttl3)) != 0) ||
-				(_pmap_isKernelVARange(page->addr, pmap_common.devices_ttl3, sizeof(pmap_common.devices_ttl3)) != 0) ||
-				(_pmap_isKernelVARange(page->addr, pmap_common.kernel_ttl1, sizeof(pmap_common.kernel_ttl1)) != 0)) {
+		if ((page->addr >= (ptr_t)pmap_common.kernel_ttl2) && (page->addr < ((ptr_t)pmap_common.devices_ttl3 + sizeof(pmap_common.devices_ttl3)))) {
 			page->flags |= PAGE_KERNEL_PTABLE;
 		}
 
-		if (_pmap_isKernelVARange(page->addr, pmap_common.stack, sizeof(pmap_common.stack)) != 0) {
+		if ((page->addr >= (ptr_t)pmap_common.stack) && (page->addr < ((ptr_t)pmap_common.stack + sizeof(pmap_common.stack)))) {
 			page->flags |= PAGE_KERNEL_STACK;
 		}
 	}
@@ -951,103 +816,37 @@ static addr_t _pmap_kernelVAtoPA(void *va)
 }
 
 
-static int _pmap_isKernelVARange(addr_t pa, const void *vstart, size_t sz)
-{
-	addr_t start = _pmap_kernelVAtoPA((void *)vstart);
-
-	return ((pa >= start) && (pa < (start + sz))) ? 1 : 0;
-}
-
-
-static descr_t *_pmap_staticKernelTable(pmap_t *pmap, unsigned int lvl, void *vaddr, addr_t pa)
-{
-	ptr_t va = (ptr_t)vaddr;
-
-	if (pmap->ttl1 == pmap_common.kernel_ttl1) {
-		if (lvl == 1U) {
-			return pmap_common.kernel_ttl2;
-		}
-
-		if (lvl == 2U) {
-			if (TTL_IDX(2U, va) == TTL_IDX(2U, VADDR_KERNEL)) {
-				return pmap_common.kernel_ttl3;
-			}
-
-			if (TTL_IDX(2U, va) == TTL_IDX(2U, ((VADDR_MAX - (SIZE_PAGE << 9)) + 1U))) {
-				return pmap_common.devices_ttl3;
-			}
-		}
-	}
-
-	if (lvl == 1U) {
-		if ((pa == _pmap_kernelVAtoPA(pmap_common.kernel_ttl2)) ||
-				((va >= VADDR_KERNEL) && (va < (VADDR_KERNEL + (SIZE_PAGE << 9))))) {
-			return pmap_common.kernel_ttl2;
-		}
-	}
-
-	if (lvl == 2U) {
-		if ((pa == _pmap_kernelVAtoPA(pmap_common.kernel_ttl3)) ||
-				((va >= VADDR_KERNEL) && (va < (VADDR_KERNEL + (SIZE_PAGE << 9))))) {
-			return pmap_common.kernel_ttl3;
-		}
-
-		if ((pa == _pmap_kernelVAtoPA(pmap_common.devices_ttl3)) ||
-				(va >= (VADDR_MAX - (SIZE_PAGE << 9)) + 1U)) {
-			return pmap_common.devices_ttl3;
-		}
-	}
-
-	return NULL;
-}
-
-
 /* Function initializes low-level page mapping interface */
 void _pmap_init(pmap_t *pmap, void **vstart, void **vend)
 {
-	size_t i;
-
-	hal_consolePrint(ATTR_USER, "pmap: init enter\n");
 	pmap_common.firstFreeAsid = ASID_SHARED + 1U;
 	hal_memset(pmap_common.asidInUse, 0, sizeof(pmap_common.asidInUse));
 	pmap_common.asidInUse[(ASID_SHARED / 64U)] |= 1UL << (ASID_SHARED % 64U);
 	pmap_common.asidInUse[(ASID_NONE / 64U)] |= 1UL << (ASID_NONE % 64U);
-	_pmap_dbgChar('A');
 
 	pmap->asid = ASID_NONE;
 	hal_spinlockCreate(&pmap_common.lock, "pmap_common.lock");
-	_pmap_dbgChar('B');
 
 	/* Initialize kernel page table */
 	pmap->ttl1 = pmap_common.kernel_ttl1;
 	pmap->addr = _pmap_kernelVAtoPA(pmap_common.kernel_ttl1);
-	_pmap_dbgChar('C');
 
 	/* Create kernel TTL1 - it is only used by software, but still needs to be initialized */
 	hal_memset(pmap_common.kernel_ttl1, 0, sizeof(pmap_common.kernel_ttl1));
-	_pmap_dbgChar('D');
 	pmap_common.kernel_ttl1[TTL_IDX(1U, VADDR_KERNEL)] = DESCR_PA(_pmap_kernelVAtoPA(pmap_common.kernel_ttl2)) | DESCR_TABLE | DESCR_VALID;
-	_pmap_dbgChar('E');
 
 	pmap->start = (void *)VADDR_KERNEL;
 	pmap->end = (void *)VADDR_MAX;
-	_pmap_dbgChar('F');
 
 	/* Initialize kernel heap start address */
 	(*vstart) = (void *)pmap_common.mem.vkernelEnd;
-	(*vend) = (*vstart) + sizeof(pmap_common.heap);
-	_pmap_dbgChar('G');
+	(*vend) = (*vstart) + SIZE_PAGE;
 
 	pmap_common.start = _pmap_kernelVAtoPA(pmap_common.heap);
-	pmap_common.end = pmap_common.start + sizeof(pmap_common.heap);
-	_pmap_dbgChar('H');
+	pmap_common.end = pmap_common.start + SIZE_PAGE;
 
 	/* Create initial heap */
-	hal_consolePrint(ATTR_USER, "pmap: initial heap enter\n");
-	for (i = 0U; i < sizeof(pmap_common.heap); i += SIZE_PAGE) {
-		LIB_ASSERT_ALWAYS(pmap_enter(pmap, pmap_common.start + i, (*vstart) + i, PGHD_WRITE | PGHD_READ | PGHD_PRESENT | PGHD_NOT_CACHED, NULL) == EOK, "failed to create initial heap");
-	}
-	hal_consolePrint(ATTR_USER, "pmap: init done\n");
+	LIB_ASSERT_ALWAYS(pmap_enter(pmap, pmap_common.start, (*vstart), PGHD_WRITE | PGHD_READ | PGHD_PRESENT, NULL) == EOK, "failed to create initial heap");
 }
 
 
@@ -1056,7 +855,7 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 	dtb_memBank_t *banks;
 	size_t nBanks;
 	addr_t end;
-	descr_t attrs = DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ISH | DESCR_PXN | DESCR_UXN | DESCR_ATTR(MAIR_IDX_NONCACHED) | DESCR_AP2;
+	descr_t attrs = DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ISH | DESCR_PXN | DESCR_UXN | DESCR_ATTR(MAIR_IDX_CACHED) | DESCR_AP2;
 	u64 i;
 
 	pmap_common.dev_i = 0;
@@ -1067,11 +866,7 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 		pmap_common.devices_ttl3[TTL_IDX(3U, VADDR_DTB + i)] = DESCR_PA(dtbStart + i) | attrs;
 	}
 
-	/* TD-16: Pi 4 D-cache bring-up currently uses non-cacheable TCR table
-	 * walks to avoid stale walker-cache state. Once SCTLR.C is enabled,
-	 * writes to page tables through the normal cacheable kernel mapping must
-	 * be pushed to PoC before the walker can see them. */
-	_pmap_cleanTable(pmap_common.devices_ttl3);
+	hal_cpuDataSyncBarrier();
 
 	pmap_common.mem.pkernel = hal_syspage->pkernel;
 	pmap_common.mem.kernelsz = CEIL_PAGE(&_end) - (addr_t)VADDR_KERNEL;
@@ -1146,7 +941,6 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 		pmap_common.kernel_ttl3[i] = 0;
 	}
 
-	_pmap_cleanTable(pmap_common.kernel_ttl3);
 	hal_cpuDataSyncBarrier();
 	hal_tlbInvalAll_IS();
 }
@@ -1168,10 +962,7 @@ void *_pmap_halMapDevice(addr_t paddr, size_t pageOffs, size_t size)
 		pmap_common.dev_i++;
 	}
 
-	/* TD-16: device aliases are created after SCTLR.C is enabled. With the
-	 * temporary non-cacheable TCR table-walk experiment, push descriptor
-	 * writes to PoC before the walker resolves the new VA. */
-	_pmap_cleanTable(pmap_common.devices_ttl3);
+	hal_cpuDataSyncBarrier();
 	return (void *)va_start + pageOffs;
 }
 
