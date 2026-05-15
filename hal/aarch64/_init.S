@@ -141,11 +141,12 @@
  * Index 1: Normal memory, inner and outer non-cacheable
  * Index 2: Device memory, Gathering, re-ordering disabled, early write acknowledge enabled (equiv. to AArch32 "Device" memory)
  * Index 3: Device memory, Gathering, re-ordering, early write acknowledge all disabled (equiv. to AArch32 "Strongly ordered" memory)
+ * Index 4: Normal memory, inner cacheable WBWA, outer non-cacheable (C-3z SLC-bypass diagnostic)
 */
-#define MAIR_EL1_VALUE 0x444FF
+#define MAIR_EL1_VALUE 0x4f000444ff
 
-/* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, global */
-#define DEFAULT_ATTRS 0x703
+/* Privileged RWX, unprivileged no-access, normal Inner-WB/Outer-NC, inner shareable, access flag, global */
+#define DEFAULT_ATTRS 0x713
 
 /* Same as DEFAULT_ATTRS but with AttrIndx=1 (MAIR slot 1 = 0x44 = Normal
  * Non-Cacheable, inner+outer). Used for the single TTL3 entry that maps
@@ -166,14 +167,14 @@
  * memory type (per ARM ARM B2.8.1 "Mismatched memory attributes" —
  * any mismatch is UNPREDICTABLE).
  *
- * AttrIdx=0 → MAIR slot 0 = Normal WBWA cacheable. SH=Inner Shareable.
+ * AttrIdx=4 → MAIR slot 4 = Normal Inner-WB/Outer-NC. SH=Inner Shareable.
  * AF set, nG (matches earlier NC value of 0xf05 except AttrIdx).
  *
  * The TD-04 NC override on the single _hal_syspageCopied TTL3 entry is
  * deliberately preserved — plo writes that page Non-Cacheable and the
  * kernel reads it via the high-VA NC alias, never via the low-PA
  * cacheable alias, so the kernel's view is consistent. */
-#define NC_BLOCK_ATTRS 0xf01
+#define NC_BLOCK_ATTRS 0xf11
 
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)

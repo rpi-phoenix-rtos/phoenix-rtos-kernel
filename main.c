@@ -326,14 +326,14 @@ int main(void)
 	while (*uartfr & 0x20) {}
 	*uart = 'g'; /* g marker - after hal_init */
 
-	/* C-3 split-enable (2026-05-15): try I-cache only first.
-	 * D-cache enable hit the post-enable stale-read hang (c3l-c3r);
-	 * I-cache enable is read-only and should be safer on this SoC. */
+	/* C-3v/w (2026-05-15): after the armstub applies conservative A72
+	 * prefetch disables, retry the deferred D-cache enable path that
+	 * previously hung on the first post-enable cacheable read. */
 	while (*uartfr & 0x20) {}
-	*uart = 'I'; /* I marker - about to enable I-cache */
-	hal_cpuEnableICache();
+	*uart = 'C'; /* C marker - about to enable D-cache */
+	hal_cpuEnableDCache();
 	while (*uartfr & 0x20) {}
-	*uart = 'i'; /* i marker - I-cache enable returned */
+	*uart = 'c'; /* c marker - D-cache enable returned */
 
 	/* TD-16-1b: SECOND nop-loop measurement, AFTER _hal_init's
 	 * cache-enable sequence. Compare to the first td16 result
