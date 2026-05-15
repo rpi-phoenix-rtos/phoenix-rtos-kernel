@@ -119,6 +119,13 @@
  * * Inner cacheable
  * * Enable translation through TTBR0
  * * 512 GB virtual address range */
+/* Linux-standard TCR: walker uses Inner+Outer WB cacheable +
+ * Inner-Shareable attributes for BOTH TTBR0 and TTBR1. The C-3
+ * diagnostic that forced NC + Non-shareable walks is reverted now
+ * that `hal_cpuInvalDataCacheAll` correctly uses `dc isw` (discard
+ * dirty firmware-era lines instead of writing them back). With the
+ * cache truly clean at MMU enable, cacheable walks should read
+ * correct PT data from DDR. */
 #define TCR_EL1_VALUE ( \
         (1 << 36) | \
         (2 << 30) | \
@@ -594,13 +601,29 @@ el1_entry:
 	dsb  ish
 	isb
 
-	/* MMU only (M=1, C=0, I=0). Matches plo's stable config.
-	 * D-cache enable broke exec-kernel inside plo (TD-plo-dcache);
-	 * I-cache enable triggers I-fetch garbage (TD-plo-icache). Both
-	 * open. Keeping MMU on (essential for any kernel work) and
-	 * caches off (slow but correct). */
+	/* MMU only (M=1, C=0, I=0). Matches plo's stable config on this
+	 * SoC — slow but boot-correct on Pi 4.
+	 *
+	 * C-3 experiment (2026-05-15): tried enabling SCTLR.M|C with the
+	 * Linux __enable_mmu ritual (single MSR, pre/post canonical fences,
+	 * pre-MMU PT setup per C-1, cacheable low-PA aliases per C-2, plo
+	 * teardown using `dc ivac` for firmware-stale lines, kernel
+	 * `dc isw` for cold-start cleanup). All variants faulted at the
+	 * first post-MMU low-VA PL011 access (FAR=0xfe201018, ELR=line
+	 * 635/X4 marker, ESR=0x96000005 = level-1 translation fault). The
+	 * walker reads SCRATCH_TT[3] as invalid even though `_inval_dcache_range`
+	 * covers the PT memory and `hal_cpuInvalDataCacheAll` is the
+	 * Linux-pattern `dc isw` invalidate-all. Switching TCR walks to
+	 * NC + Non-Shareable avoided the fault but the boot then hung
+	 * inside _hal_init_c (first stack store).
+	 *
+	 * Root cause not yet identified — likely a Pi 4-specific cache /
+	 * walker interaction not seen on other A72 platforms. The dc isw
+	 * fix below and the _hal_init asm cleanup are kept as independent
+	 * improvements. Cache enable is parked here pending hardware
+	 * gdbstub or a JTAG-level investigation. */
 	mrs  x0, sctlr_el1
-	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
+	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M — MMU enable */
 	msr  sctlr_el1, x0
 	isb
 
@@ -1269,10 +1292,28 @@ _initNCpusFlag:
 .type hal_cpuInvalDataCacheAll, %function
 hal_cpuInvalDataCacheAll:
 .cfi_startproc
-	/* Clean+invalidate all data/unified caches by set/way. The previous
-	 * implementation selected L1 only and read CCSIDR_EL1 immediately after
-	 * CSSelR_EL1 without the architecturally required ISB, which can make
-	 * later D-cache enable experiments hang on real cores or QEMU. */
+	/* Invalidate (DISCARD, do NOT clean) all data/unified caches by
+	 * set/way. Matches Linux arm64 `__asm_invalidate_dcache_all` (uses
+	 * `dc isw`, not `dc cisw`).
+	 *
+	 * Rationale: this function is called from kernel _start with
+	 * SCTLR.C=0 (no kernel cache fills yet). Any dirty cache lines
+	 * present at this point must be stale firmware-era lines left over
+	 * from the BCM2711 VC4 boot chain — NOT data the kernel wrote. Using
+	 * `dc cisw` (clean+invalidate) would WRITE THOSE STALE LINES BACK to
+	 * DDR over plo's just-loaded kernel image / syspage / PT memory,
+	 * corrupting everything. `dc isw` discards them, which is the
+	 * correct behavior for a cold-start cache cleanup.
+	 *
+	 * Symptom of the cisw bug pre-fix: with M|C enabled, the kernel
+	 * reached _hal_init_c entry but the first stack store (stp x30,
+	 * x19, [sp, #-32]!) hung silently, no fault. Theory: cisw wrote
+	 * stale lines back over the kernel image, corrupting the
+	 * instruction stream that the I-fetch then read uncached from DDR.
+	 *
+	 * Previous "clean+invalidate" implementation correctly selected
+	 * every cache level (LoC * 2 walk, ISB after CSSelR_EL1) — only the
+	 * single instruction below is wrong. */
 	dsb sy
 	mrs x0, clidr_el1
 	and x3, x0, #0x07000000
@@ -1303,7 +1344,7 @@ hal_cpuInvalDataCacheAll:
 	orr x8, x10, x8
 	lsl x9, x6, x2
 	orr x8, x8, x9
-	dc cisw, x8
+	dc isw, x8
 	subs x7, x7, #1
 	b.ge .Ldcache_way_loop
 	subs x6, x6, #1
@@ -1332,39 +1373,14 @@ _hal_init:
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
 	uart_putc_virt 82   /* 'R' - early stack reset before C prologue */
-	ldr x3, =PL011_TTY_EARLY_VADDR
-	ldr x0, =_hal_syspageCopied
-	add x0, x0, #SIZE_PAGE
-	sub x0, x0, #32
-	mov x4, #0x51
-	str x4, [x0]
-	mov w4, #113
-	str w4, [x3]        /* 'q' - direct store to known syspage page worked */
-	ldr x0, =PMAP_COMMON_STACK
-	mov x1, SIZE_INITIAL_KSTACK
-	add x0, x0, x1
-	sub x0, x0, #32
-	mov x4, #0x52
-	str x4, [x0]
-	mov w4, #119
-	str w4, [x3]        /* 'w' - direct store to stack page worked */
-	ldr x0, =PMAP_COMMON_STACK
-	mov x1, SIZE_INITIAL_KSTACK
-	add sp, x0, x1
-	mov x4, #0x53
-	str x4, [sp, #-16]!
-	mov w4, #117
-	str w4, [x3]        /* 'u' - SP pre-index single store worked */
-	add sp, sp, #16
-	stp x30, x19, [sp, #-32]!
-	stp x20, x21, [sp, #16]
-	mov w4, #87
-	str w4, [x3]        /* 'W' - manual C-style prologue stores worked */
-	ldp x20, x21, [sp, #16]
-	ldp x30, x19, [sp], #32
-	ldr x3, =PL011_TTY_EARLY_VADDR
-	mov w4, #88
-	str w4, [x3]        /* 'X' - manual prologue restore worked */
+	/* C-3 cleanup 2026-05-15: removed TD-04-hack-2 probe stores
+	 * (markers q/w/u/W/X) that were ad-hoc diagnostic writes to NC
+	 * pages. Under M|C they appear to hang on the first probe store —
+	 * likely a cache-coherency hazard against the _hal_syspageCopied
+	 * NC page that ran fine M-only but breaks with M|C. Removing them
+	 * also matches every other arch's _hal_init shape: msr spsel,
+	 * set sp, branch to C. */
+	uart_putc_virt 73   /* 'I' - sp set, about to branch into _hal_init_c */
 	b _hal_init_c
 .size _hal_init, .-_hal_init
 
