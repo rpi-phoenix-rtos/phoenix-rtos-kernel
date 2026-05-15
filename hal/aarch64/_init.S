@@ -156,10 +156,22 @@
  * docs/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md TD-04. */
 #define NC_ATTRS 0x707
 
-/* Temporary TTBR0 level-1 RAM block descriptor, Normal Non-Cacheable.
- * Keep the low identity aliases cache-consistent with the TD-04 NC pages
- * while the live boot path still runs with SCTLR.C disabled. */
-#define NC_BLOCK_ATTRS 0xf05
+/* C-2 (2026-05-15): Normal Cacheable WBWA, Inner-Shareable TTBR0
+ * level-1 RAM block descriptor. Used for the temporary low-PA identity
+ * aliases of pkernel/PC/syspage 1 GB blocks set up at the top of
+ * el1_entry. Cacheable here so that, once SCTLR.C=1 lands in C-3, the
+ * low-PA aliases and the high-VA TTBR1 kernel mappings share the same
+ * memory type (per ARM ARM B2.8.1 "Mismatched memory attributes" —
+ * any mismatch is UNPREDICTABLE).
+ *
+ * AttrIdx=0 → MAIR slot 0 = Normal WBWA cacheable. SH=Inner Shareable.
+ * AF set, nG (matches earlier NC value of 0xf05 except AttrIdx).
+ *
+ * The TD-04 NC override on the single _hal_syspageCopied TTL3 entry is
+ * deliberately preserved — plo writes that page Non-Cacheable and the
+ * kernel reads it via the high-VA NC alias, never via the low-PA
+ * cacheable alias, so the kernel's view is consistent. */
+#define NC_BLOCK_ATTRS 0xf01
 
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
