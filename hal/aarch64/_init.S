@@ -1456,15 +1456,17 @@ hal_cpuEnableICache:
 	dsb sy
 	isb
 
-	/* Pre-flip text coherency: clean/invalidate the high kernel text
-	 * mapping to PoU. The low handoff alias is handled earlier in _init.S,
-	 * while that alias is still valid.
+	/* Pre-flip text coherency: clean+invalidate the high kernel text
+	 * mapping to PoC, then invalidate the I-cache to PoU. Using PoC here
+	 * is stronger than the usual PoU text sequence and is intentional on
+	 * BCM2711 while the source of stale post-I-enable instruction fetches
+	 * is still being isolated.
 	 */
-	uart_putc_virt 114  /* 'r' - before dc cvau text clean */
+	uart_putc_virt 114  /* 'r' - before dc civac text clean+invalidate */
 	ldr x0, =VADDR_KERNEL
 	ldr x1, =_etext
-	bl _clean_dcache_pou_range
-	uart_putc_virt 115  /* 's' - after dc cvau text clean */
+	bl _clean_inval_dcache_range
+	uart_putc_virt 115  /* 's' - after dc civac text clean+invalidate */
 	ldr x0, =VADDR_KERNEL
 	ldr x1, =_etext
 	bl _inval_icache_range
