@@ -69,6 +69,12 @@ void hal_consolePrint(int attr, const char *s)
 
 	_hal_consoleEarlyPrint(s);
 	_hal_consoleEarlyPrint(CONSOLE_NORMAL);
+
+	if ((s[0] == 'm') && (s[1] == 'a') && (s[2] == 'i') && (s[3] == 'n') && (s[4] == '_') && (s[5] == 'i') &&
+			(s[6] == 'n') && (s[7] == 'i') && (s[8] == 't') && (s[9] == 't') && (s[10] == 'h') && (s[11] == 'r') &&
+			(s[12] == ':')) {
+		_hal_consoleEarlyPutch('~');
+	}
 }
 
 
