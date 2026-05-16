@@ -78,6 +78,8 @@ typedef u64 descr_t;
 
 #define PMAP_MEM_ENTRIES        64U
 #define PMAP_RESV_MEM_REGIONS   16U
+#define PMAP_KERNEL_TTL3_TABLES 2U
+#define PMAP_TTL_ENTRIES        (SIZE_PAGE / sizeof(descr_t))
 
 #define CEIL_PAGE(x) ((((ptr_t)(x)) + SIZE_PAGE - 1U) & (~(SIZE_PAGE - 1U)))
 
@@ -103,7 +105,7 @@ typedef struct {
 struct {
 	/* The order of fields below must be preserved */
 	descr_t kernel_ttl2[SIZE_PAGE / sizeof(descr_t)];
-	descr_t kernel_ttl3[SIZE_PAGE / sizeof(descr_t)];
+	descr_t kernel_ttl3[PMAP_KERNEL_TTL3_TABLES][SIZE_PAGE / sizeof(descr_t)];
 	descr_t devices_ttl3[SIZE_PAGE / sizeof(descr_t)];
 	descr_t scratch_tt[SIZE_PAGE / sizeof(descr_t)]; /* Translation tables will be temporarily mapped here when needed */
 	u8 scratch_page[SIZE_PAGE];                      /* Page for other temporary uses */
@@ -174,12 +176,24 @@ static addr_t _pmap_hwTranslate(ptr_t va)
 }
 
 
+static descr_t *_pmap_kernelTtl3(ptr_t va)
+{
+	unsigned int table = (unsigned int)(TTL_IDX(2U, va) - TTL_IDX(2U, VADDR_KERNEL));
+
+	LIB_ASSERT(table < PMAP_KERNEL_TTL3_TABLES, "kernel VA outside early TTL3 window");
+
+	return pmap_common.kernel_ttl3[table];
+}
+
+
 /* Function maps `va` to `pa` as normal memory for temporary use. `va` is intended to be one of pmap_common.scratch* */
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 static void _pmap_mapScratch(void *va, addr_t pa)
 {
 	u64 tlbiArg = ((ptr_t)va >> 12) & ((1UL << 44) - 1U);
-	pmap_common.kernel_ttl3[TTL_IDX(3U, va)] =
+	descr_t *ttl3 = _pmap_kernelTtl3((ptr_t)va);
+
+	ttl3[TTL_IDX(3U, va)] =
 			DESCR_PA(pa) | DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ATTR(MAIR_IDX_CACHED) | DESCR_PXN | DESCR_UXN | DESCR_ISH;
 	/* Invalidate last level only for a bit more performance */
 	hal_cpuDataSyncBarrier();
@@ -857,6 +871,7 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 	addr_t end;
 	descr_t attrs = DESCR_VALID | DESCR_TABLE | DESCR_AF | DESCR_ISH | DESCR_PXN | DESCR_UXN | DESCR_ATTR(MAIR_IDX_CACHED) | DESCR_AP2;
 	u64 i;
+	ptr_t va;
 
 	pmap_common.dev_i = 0;
 
@@ -928,17 +943,23 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 		}
 	}
 
-	/* Set code to read-only, everything else XN and remove mappings past the end */
-	for (i = 0; i < TTL_IDX(3U, CEIL_PAGE(&_etext)); i++) {
-		pmap_common.kernel_ttl3[i] |= DESCR_AP2;
-	}
+	/* Set code to read-only, everything else XN and remove mappings past
+	 * the kernel end. Pi 4 bootstrap maps two TTL3 pages because the kernel
+	 * image now extends past the first 2 MiB window.
+	 */
+	for (va = VADDR_KERNEL; va < (VADDR_KERNEL + (PMAP_KERNEL_TTL3_TABLES * PMAP_TTL_ENTRIES * SIZE_PAGE)); va += SIZE_PAGE) {
+		descr_t *ttl3 = _pmap_kernelTtl3(va);
+		unsigned int idx = (unsigned int)TTL_IDX(3U, va);
 
-	for (; i < TTL_IDX(3U, pmap_common.mem.vkernelEnd); i++) {
-		pmap_common.kernel_ttl3[i] |= DESCR_PXN | DESCR_UXN;
-	}
-
-	for (; i < (SIZE_PAGE / sizeof(descr_t)); i++) {
-		pmap_common.kernel_ttl3[i] = 0;
+		if (va < CEIL_PAGE(&_etext)) {
+			ttl3[idx] |= DESCR_AP2;
+		}
+		else if (va < pmap_common.mem.vkernelEnd) {
+			ttl3[idx] |= DESCR_PXN | DESCR_UXN;
+		}
+		else {
+			ttl3[idx] = 0;
+		}
 	}
 
 	hal_cpuDataSyncBarrier();

@@ -141,12 +141,11 @@
  * Index 1: Normal memory, inner and outer non-cacheable
  * Index 2: Device memory, Gathering, re-ordering disabled, early write acknowledge enabled (equiv. to AArch32 "Device" memory)
  * Index 3: Device memory, Gathering, re-ordering, early write acknowledge all disabled (equiv. to AArch32 "Strongly ordered" memory)
- * Index 4: Normal memory, inner cacheable WBWA, outer non-cacheable (C-3z SLC-bypass diagnostic)
 */
-#define MAIR_EL1_VALUE 0x4f000444ff
+#define MAIR_EL1_VALUE 0x444FF
 
-/* Privileged RWX, unprivileged no-access, normal Inner-WB/Outer-NC, inner shareable, access flag, global */
-#define DEFAULT_ATTRS 0x713
+/* Privileged RWX, unprivileged no-access, normal cacheable, inner shareable, access flag, global */
+#define DEFAULT_ATTRS 0x703
 
 /* Same as DEFAULT_ATTRS but with AttrIndx=1 (MAIR slot 1 = 0x44 = Normal
  * Non-Cacheable, inner+outer). Used for the single TTL3 entry that maps
@@ -167,14 +166,14 @@
  * memory type (per ARM ARM B2.8.1 "Mismatched memory attributes" —
  * any mismatch is UNPREDICTABLE).
  *
- * AttrIdx=4 → MAIR slot 4 = Normal Inner-WB/Outer-NC. SH=Inner Shareable.
+ * AttrIdx=0 → MAIR slot 0 = Normal WBWA cacheable. SH=Inner Shareable.
  * AF set, nG (matches earlier NC value of 0xf05 except AttrIdx).
  *
  * The TD-04 NC override on the single _hal_syspageCopied TTL3 entry is
  * deliberately preserved — plo writes that page Non-Cacheable and the
  * kernel reads it via the high-VA NC alias, never via the low-PA
  * cacheable alias, so the kernel's view is consistent. */
-#define NC_BLOCK_ATTRS 0xf11
+#define NC_BLOCK_ATTRS 0xf01
 
 /* Needs to be updated if hal_syspage_t is changed */
 #if defined(HAS_GRAPHICS) && (HAS_GRAPHICS != 0)
@@ -187,10 +186,11 @@
 
 #define PMAP_COMMON_KERNEL_TTL2 (pmap_common)
 #define PMAP_COMMON_KERNEL_TTL3 (pmap_common + SIZE_PAGE)
-#define PMAP_COMMON_DEVICES_TTL3 (pmap_common + (2 * SIZE_PAGE))
-#define PMAP_COMMON_SCRATCH_TT (pmap_common + (3 * SIZE_PAGE))
-#define PMAP_COMMON_SCRATCH_PAGE (pmap_common + (4 * SIZE_PAGE))
-#define PMAP_COMMON_STACK (pmap_common + (5 * SIZE_PAGE))
+#define PMAP_COMMON_KERNEL_TTL3_1 (pmap_common + (2 * SIZE_PAGE))
+#define PMAP_COMMON_DEVICES_TTL3 (pmap_common + (3 * SIZE_PAGE))
+#define PMAP_COMMON_SCRATCH_TT (pmap_common + (4 * SIZE_PAGE))
+#define PMAP_COMMON_SCRATCH_PAGE (pmap_common + (5 * SIZE_PAGE))
+#define PMAP_COMMON_STACK (pmap_common + (6 * SIZE_PAGE))
 #define VADDR_SYSPAGE (_hal_syspageCopied)
 
 .section .init, "ax"
@@ -302,13 +302,11 @@ el1_entry:
 	 * Updated per docs/research/boot-mmu-bringup-non-linux.md §4 R1
 	 * (cross-OS convergent recommendation: use full RES1 baseline).
 	 */
-	/* TEMP REVERT 2026-05-08: 0x30d4d938 (RES1 baseline) regressed even
-	 * the M-only baseline boot. Reverting to the previously-working
-	 * 0x30c0c938. The RES1-baseline change is likely correct in
-	 * principle (per docs/research/round3-netbsd-aarch64-rpi4-deep.md
-	 * and round3-freebsd-arm64-rpi4-deep.md) but interacts badly with
-	 * something else in our boot path; investigate after research wave
-	 * synthesis. */
+	/* TEMP REVERT 2026-05-16: 0x30d4d938 (full A57/A72 RES1 baseline)
+	 * still regressed on real Pi 4 even after the 4 MiB early-kernel map
+	 * fix, dying after X4 with ESR=0x02000000. Keep the previously-working
+	 * M-only baseline while cache enable is isolated.
+	 */
 	ldr x0, =0x30c0c938
 	msr sctlr_el1, x0
 	
@@ -469,6 +467,11 @@ el1_entry:
 	orr x1, x1, #0x3
 	str x1, [x0]
 
+	/* TTL2[1] = KERNEL_TTL3_1 | table-descriptor */
+	adrp x1, PMAP_COMMON_KERNEL_TTL3_1
+	orr x1, x1, #0x3
+	str x1, [x0, #8]
+
 	/* TTL2[last] = DEVICES_TTL3 | table-descriptor */
 	add x2, x0, #(SIZE_PAGE - 8)
 	adrp x0, PMAP_COMMON_DEVICES_TTL3
@@ -490,10 +493,21 @@ el1_entry:
 	str x1, [x0, #8]
 #endif
 
-	/* Fill KERNEL_TTL3 with 512 page descriptors covering
-	 * VADDR_KERNEL..VADDR_KERNEL+2MB → pkernel..pkernel+2MB */
+	/* Fill KERNEL_TTL3 with descriptors covering
+	 * VADDR_KERNEL..VADDR_KERNEL+4MB -> pkernel..pkernel+4MB.
+	 * The current Pi 4 kernel image extends beyond the first 2 MB,
+	 * so the early high mapping must cover at least two TTL3 pages
+	 * before D-cache is enabled and normal C calls resume.
+	 */
 	adrp x0, PMAP_COMMON_KERNEL_TTL3
 	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
+	mov x2, #(DEFAULT_ATTRS)
+	orr x1, x1, x2
+	bl _fill_page_descr
+
+	adrp x0, PMAP_COMMON_KERNEL_TTL3_1
+	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
+	add x1, x1, #0x200000
 	mov x2, #(DEFAULT_ATTRS)
 	orr x1, x1, x2
 	bl _fill_page_descr
@@ -509,20 +523,6 @@ el1_entry:
 	add x6, x1, x4
 	mov x7, #(NC_ATTRS)
 	orr x6, x6, x7
-	str x6, [x0, x5]
-
-	/* TD-04 sibling: keep the early C stack NC (2 pages) */
-	ldr x2, =PMAP_COMMON_STACK
-	ldr x3, =VADDR_KERNEL
-	sub x4, x2, x3
-	lsr x5, x4, #12
-	lsl x5, x5, #3
-	add x6, x1, x4
-	mov x7, #(NC_ATTRS)
-	orr x6, x6, x7
-	str x6, [x0, x5]
-	add x5, x5, #8
-	add x6, x6, #SIZE_PAGE
 	str x6, [x0, x5]
 
 	/* Activate TTBR1 walks (clear EPD1) — still pre-MMU. */
@@ -542,6 +542,7 @@ el1_entry:
 	 * early kernel MMU region:
 	 *   PMAP_COMMON_KERNEL_TTL2
 	 *   PMAP_COMMON_KERNEL_TTL3
+	 *   PMAP_COMMON_KERNEL_TTL3_1
 	 *   PMAP_COMMON_DEVICES_TTL3
 	 *   PMAP_COMMON_SCRATCH_TT
 	 *   PMAP_COMMON_SCRATCH_PAGE
@@ -626,6 +627,24 @@ el1_entry:
 	dsb  nsh
 	isb
 	uart_tag2 88, 52
+
+	/* C-3 I-cache coherency preparation: while the low handoff alias is
+	 * still valid, clean its text range to PoU and invalidate the matching
+	 * I-cache range. The late C helper cannot touch VA 0x400000 after the
+	 * low bootstrap mapping is gone.
+	 */
+	ldr x0, =0x400000
+	ldr x1, =0x640000
+	bl _clean_dcache_pou_range
+	ldr x0, =0x400000
+	ldr x1, =0x640000
+	bl _inval_icache_range
+
+	/* C-3 early-I result (2026-05-16): enabling SCTLR.I here with explicit
+	 * low-PC + pkernel + high-VA maintenance works and speeds up execution, but
+	 * syspage_init() later stalls at the program-relocation `P` boundary. Keep
+	 * I-cache deferred until after syspage_init() for now.
+	 */
 
 	uart_tag2 88, 53
 	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
@@ -1056,6 +1075,27 @@ _clean_inval_dcache_range:
         ret
 
 
+_clean_dcache_pou_range:
+        /* Clean dcache over a range to Point of Unification. This is the
+         * data-side half of the standard text coherency sequence before
+         * enabling SCTLR.I when the image was loaded by earlier firmware/plo
+         * stages through potentially different aliases.
+         * x0 => start address (clobbered), x1 => end address; clobbers x2,x3 */
+        mrs x2, ctr_el0
+        lsr x2, x2, #16
+        and x2, x2, #0xf
+        mov x3, #4
+        lsl x2, x3, x2
+1:
+        dc cvau, x0
+        add x0, x0, x2
+        cmp x0, x1
+        b.lo 1b
+        dsb ish
+        isb
+        ret
+
+
 /* TODO(TD-16-cache-enable): VA-range I-cache invalidation, matching
  * Linux arm64's __inval_icache_area. Uses ic ivau (Invalidate I-cache
  * line by VA to Point of Unification) per IminLine, which is the
@@ -1386,8 +1426,6 @@ hal_cpuEnableDCache:
 	dsb  ish
 	isb
 
-	bl hal_cpuInvalDataCacheAll
-
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 2)
 	msr sctlr_el1, x0
@@ -1396,8 +1434,6 @@ hal_cpuEnableDCache:
 	ic   iallu
 	dsb  nsh
 	isb
-
-	bl hal_cpuInvalDataCacheAll
 
 	dsb sy
 	isb
@@ -1416,39 +1452,82 @@ hal_cpuEnableICache:
 	stp x29, x30, [sp, #-16]!
 	mov x29, sp
 
+	uart_putc_virt 117  /* 'u' - I-cache enable entered */
 	dsb sy
 	isb
 
-	/* Pre-flip: invalidate I-cache + TLB. */
-	ic   ialluis
-	dsb  ish
-	tlbi vmalle1is
-	dsb  ish
+	/* Pre-flip text coherency: clean/invalidate the high kernel text
+	 * mapping to PoU. The low handoff alias is handled earlier in _init.S,
+	 * while that alias is still valid.
+	 */
+	uart_putc_virt 114  /* 'r' - before dc cvau text clean */
+	ldr x0, =VADDR_KERNEL
+	ldr x1, =_etext
+	bl _clean_dcache_pou_range
+	uart_putc_virt 115  /* 's' - after dc cvau text clean */
+	ldr x0, =VADDR_KERNEL
+	ldr x1, =_etext
+	bl _inval_icache_range
+	uart_putc_virt 116  /* 't' - after ic ivau text invalidate */
+	dsb  sy
+	uart_putc_virt 120  /* 'x' - after pre-flip dsb */
 	isb
-
-	/* Set/way invalidate the L2 unified cache too — A72's L2 caches
-	 * both data and instructions, so any stale firmware-era I-fetches
-	 * resident there would be re-served to the I-cache as soon as
-	 * SCTLR.I=1 enables instruction caching. hal_cpuInvalDataCacheAll
-	 * walks all CLIDR levels including L2 unified, so this discards
-	 * both old D and old I lines from L2. */
-	bl hal_cpuInvalDataCacheAll
+	uart_putc_virt 121  /* 'y' - after pre-flip isb */
 
 	/* Flip SCTLR.I=1. */
 	mrs x0, sctlr_el1
 	orr x0, x0, #(1 << 12)
 	msr sctlr_el1, x0
+	uart_putc_virt 122  /* 'z' - after SCTLR.I write */
 	isb
-
-	/* Post-flip canonical fence. */
-	ic   iallu
-	dsb  nsh
-	isb
+	uart_putc_virt 48   /* '0' - after SCTLR.I isb */
 
 	ldp x29, x30, [sp], #16
 	ret
 .cfi_endproc
 .size hal_cpuEnableICache, .-hal_cpuEnableICache
+
+
+.align 4
+.globl hal_cpuEnableCaches
+.type hal_cpuEnableCaches, %function
+hal_cpuEnableCaches:
+.cfi_startproc
+	stp x29, x30, [sp, #-16]!
+	mov x29, sp
+
+	uart_putc_virt 65   /* 'A' - combined cache enable entered */
+	dsb sy
+	isb
+
+	uart_putc_virt 66   /* 'B' - before low-alias VA-range I-cache invalidate */
+	ldr x0, =0x400000
+	ldr x1, =0x640000
+	bl _inval_icache_range
+	uart_putc_virt 67   /* 'C' - after low-alias VA-range I-cache invalidate */
+
+	uart_putc_virt 72   /* 'H' - before high-VA I-cache invalidate */
+	ldr x0, =VADDR_KERNEL
+	ldr x1, =_etext
+	bl _inval_icache_range
+	uart_putc_virt 73   /* 'I' - after high-VA I-cache invalidate */
+
+	uart_putc_virt 68   /* 'D' - before combined D-cache invalidate */
+	bl hal_cpuInvalDataCacheAll
+	uart_putc_virt 69   /* 'E' - after combined D-cache invalidate */
+
+	mrs x0, sctlr_el1
+	orr x0, x0, #(1 << 2)
+	orr x0, x0, #(1 << 12)
+	msr sctlr_el1, x0
+	uart_putc_virt 70   /* 'F' - after combined SCTLR.C/I write */
+	isb
+	uart_putc_virt 71   /* 'G' - after combined SCTLR.C/I isb */
+
+	ldp x29, x30, [sp], #16
+	ret
+.cfi_endproc
+.size hal_cpuEnableCaches, .-hal_cpuEnableCaches
 .ltorg
 
 

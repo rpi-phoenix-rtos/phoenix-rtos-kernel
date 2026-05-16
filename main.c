@@ -43,6 +43,8 @@ static void main_initthr(void *unused)
 {
 	int res;
 	unsigned int argc;
+	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
 
 	syspage_prog_t *prog;
 	char *argv[32], *cmdline;
@@ -56,6 +58,18 @@ static void main_initthr(void *unused)
 
 	_usrv_start();
 	hal_consolePrint(ATTR_USER, "main_initthr: usrv started\n");
+
+	/* C-3 I-cache enable: enabling after the first scheduled context and
+	 * _hal_start() reaches _usrv_start() but does not return. Move the
+	 * boundary past user-server startup and test syspage/posix/spawn under
+	 * I-cache.
+	 */
+	while (*uartfr & 0x20) {}
+	*uart = 'i';
+	hal_cpuEnableICache();
+	while (*uartfr & 0x20) {}
+	*uart = 'I';
+	hal_consolePrint(ATTR_USER, "main_initthr: icache enabled\n");
 
 	lib_printf("main: Starting syspage programs:");
 	syspage_progShow();
@@ -331,9 +345,8 @@ int main(void)
 	 * previously hung on the first post-enable cacheable read. */
 	while (*uartfr & 0x20) {}
 	*uart = 'C'; /* C marker - about to enable D-cache */
-	hal_cpuEnableDCache();
 	while (*uartfr & 0x20) {}
-	*uart = 'c'; /* c marker - D-cache enable returned */
+	*uart = 'd'; /* d marker - D-cache enable deferred */
 
 	/* TD-16-1b: SECOND nop-loop measurement, AFTER _hal_init's
 	 * cache-enable sequence. Compare to the first td16 result
@@ -390,38 +403,99 @@ int main(void)
 	/* C-3 markers around the cache-enable transition. */
 	while (*uartfr & 0x20) {}
 	*uart = '1'; /* 1 marker - post-td16b */
-	hal_consolePrint(ATTR_USER, "main: hal init done\n");
+	/* C-3x: direct UART marker here avoids the first post-D-cache
+	 * hal_consolePrint path, which currently hangs before producing output
+	 * on real Pi 4. Keep this narrow until the literal/function-entry hazard
+	 * is localized. */
+	while (*uartfr & 0x20) {}
+	*uart = 'M';
 	while (*uartfr & 0x20) {}
 	*uart = '2'; /* 2 marker - post hal_consolePrint */
 
 	/* Marker before usrv_init */
 	while (*uartfr & 0x20) {}
 	*uart = 'h'; /* h marker - before usrv_init */
+	__asm__ volatile(
+		"str xzr, [sp, #-16]!\n"
+		"ldr xzr, [sp], #16\n"
+		:
+		:
+		: "memory");
+	while (*uartfr & 0x20) {}
+	*uart = 'H'; /* H marker - post inline stack store */
 
 	_usrv_init();
 
+	while (*uartfr & 0x20) {}
+	*uart = 'C'; /* C marker - cache enable still deferred */
+	while (*uartfr & 0x20) {}
+	*uart = 'c'; /* c marker - deferred-cache marker returned */
+
 	/* Marker before version print */
 	while (*uartfr & 0x20) {}
-	*uart = 'i'; /* i marker - before version print */
+	*uart = 'v'; /* v marker - before version print */
 
 	hal_consolePrint(ATTR_BOLD, "Phoenix-RTOS microkernel v. " RELEASE " rev. " VERSION "\n");
+	hal_consolePrint(ATTR_USER, "J-after-banner\n");
 
-	/* Marker after version print */
+	/* Marker after version print. Wait for FIFO space here: the previous
+	 * no-wait marker could be dropped by PL011 when the banner filled FIFO,
+	 * making the next boundary ambiguous under I-cache-on diagnostics.
+	 */
 	while (*uartfr & 0x20) {}
 	*uart = 'j'; /* j marker - after version print */
 
+	while (*uartfr & 0x20) {}
+	*uart = 'k'; /* k marker - before cpu info print */
 	lib_printf("hal: %s\n", hal_cpuInfo(s));
-	lib_printf("hal: %s\n", hal_cpuFeatures(s, sizeof(s)));
-	lib_printf("hal: %s\n", hal_interruptsFeatures(s, sizeof(s)));
-	lib_printf("hal: %s\n", hal_timerFeatures(s, sizeof(s)));
+	while (*uartfr & 0x20) {}
+	*uart = 'K'; /* K marker - after cpu info print */
 
+	while (*uartfr & 0x20) {}
+	*uart = 'l'; /* l marker - before cpu features print */
+	lib_printf("hal: %s\n", hal_cpuFeatures(s, sizeof(s)));
+	while (*uartfr & 0x20) {}
+	*uart = 'L'; /* L marker - after cpu features print */
+
+	while (*uartfr & 0x20) {}
+	*uart = 'm'; /* m marker - before interrupts features print */
+	lib_printf("hal: %s\n", hal_interruptsFeatures(s, sizeof(s)));
+	while (*uartfr & 0x20) {}
+	*uart = 'M'; /* M marker - after interrupts features print */
+
+	while (*uartfr & 0x20) {}
+	*uart = 'n'; /* n marker - before timer features print */
+	lib_printf("hal: %s\n", hal_timerFeatures(s, sizeof(s)));
+	while (*uartfr & 0x20) {}
+	*uart = 'N'; /* N marker - after timer features print */
+
+	while (*uartfr & 0x20) {}
+	*uart = 'o'; /* o marker - before vm init */
 	_vm_init(&main_common.kmap, &main_common.kernel);
+	while (*uartfr & 0x20) {}
+	*uart = 'O'; /* O marker - after vm init */
+
 	hal_consolePrint(ATTR_USER, "main: vm init done\n");
+	while (*uartfr & 0x20) {}
+	*uart = 'p'; /* p marker - before perf init */
 	(void)_perf_init(&main_common.kmap);
+	while (*uartfr & 0x20) {}
+	*uart = 'P'; /* P marker - after perf init */
+
 	hal_consolePrint(ATTR_USER, "main: perf init done\n");
+	while (*uartfr & 0x20) {}
+	*uart = 'q'; /* q marker - before proc init */
 	(void)_proc_init(&main_common.kmap, &main_common.kernel);
+	while (*uartfr & 0x20) {}
+	*uart = 'Q'; /* Q marker - after proc init */
+
 	hal_consolePrint(ATTR_USER, "main: proc init done\n");
+	while (*uartfr & 0x20) {}
+	*uart = 'r'; /* r marker - before syscalls init */
 	_syscalls_init();
+	while (*uartfr & 0x20) {}
+	*uart = 'R'; /* R marker - after syscalls init */
+
 	hal_consolePrint(ATTR_USER, "main: syscalls init done\n");
 
 #if 0 /* Basic kernel tests */
@@ -434,7 +508,12 @@ int main(void)
 	test_proc_exit();
 #endif
 
+	while (*uartfr & 0x20) {}
+	*uart = 's'; /* s marker - before init thread start */
 	(void)proc_start(main_initthr, NULL, (const char *)"init");
+	while (*uartfr & 0x20) {}
+	*uart = 'S'; /* S marker - after init thread start */
+
 	hal_consolePrint(ATTR_USER, "main: init thread started\n");
 
 	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */

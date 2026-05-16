@@ -177,6 +177,11 @@ void hal_cpuEnableDCache(void);
 void hal_cpuEnableICache(void);
 
 
+/* Enable I-cache and D-cache in one SCTLR_EL1 transition. */
+/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly" */
+void hal_cpuEnableCaches(void);
+
+
 /* parasoft-begin-suppress MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 
 /* Invalidate TLB entries by ASID Match */

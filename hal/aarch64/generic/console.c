@@ -13,6 +13,7 @@
  */
 
 #include "hal/console.h"
+#include "hal/hal.h"
 #include "hal/spinlock.h"
 
 #include "hal/aarch64/dtb.h"
@@ -26,6 +27,26 @@ static struct {
 } console_common;
 
 
+static void _hal_consoleEarlyPutch(char c)
+{
+	volatile u32 *uart = (volatile u32 *)0xffffffffffe00000ull;
+	volatile u32 *uartfr = (volatile u32 *)0xffffffffffe00018ull;
+
+	while ((*uartfr & (1U << 5)) != 0U) {
+	}
+
+	*uart = (u32)(u8)c;
+}
+
+
+static void _hal_consoleEarlyPrint(const char *s)
+{
+	for (; *s != '\0'; ++s) {
+		_hal_consoleEarlyPutch(*s);
+	}
+}
+
+
 static void _hal_consoleProbe(hal_pl011_t *uart, const char *s)
 {
 	for (; *s != '\0'; ++s) {
@@ -34,28 +55,20 @@ static void _hal_consoleProbe(hal_pl011_t *uart, const char *s)
 }
 
 
-static void _hal_consolePrint(const char *s)
-{
-	for (; *s != '\0'; ++s) {
-		hal_consolePutch(*s);
-	}
-}
-
-
 void hal_consolePrint(int attr, const char *s)
 {
 	if (attr == ATTR_BOLD) {
-		_hal_consolePrint(CONSOLE_BOLD);
+		_hal_consoleEarlyPrint(CONSOLE_BOLD);
 	}
 	else if (attr != ATTR_USER) {
-		_hal_consolePrint(CONSOLE_CYAN);
+		_hal_consoleEarlyPrint(CONSOLE_CYAN);
 	}
 	else {
 		/* No action required */
 	}
 
-	_hal_consolePrint(s);
-	_hal_consolePrint(CONSOLE_NORMAL);
+	_hal_consoleEarlyPrint(s);
+	_hal_consoleEarlyPrint(CONSOLE_NORMAL);
 }
 
 
@@ -64,6 +77,11 @@ void hal_consolePutch(char c)
 	spinlock_ctx_t sc;
 
 	if (console_common.enabled == 0) {
+		return;
+	}
+
+	if (hal_started() == 0) {
+		hal_pl011Putch(&console_common.uart, c);
 		return;
 	}
 
