@@ -20,6 +20,8 @@
 #include "include/ioctl.h"
 #include "include/limits.h"
 #include "include/posix-fcntl.h"
+#include "include/posix-wait.h"
+#include "include/signal.h"
 #include "include/sockdefs.h"
 
 #include "proc/proc.h"
@@ -325,7 +327,6 @@ int posix_clone(int ppid)
 		(void)proc_lockSet(&pp->lock);
 		p->maxfd = pp->maxfd;
 		p->fdsz = pp->fdsz;
-		LIST_ADD(&pp->children, p);
 		p->parent = ppid;
 	}
 	else {
@@ -359,7 +360,11 @@ int posix_clone(int ppid)
 			}
 		}
 
+		p->pgid = pp->pgid;
+		LIST_ADD(&pp->children, p);
 		(void)proc_lockClear(&pp->lock);
+
+		pinfo_put(pp);
 	}
 	else {
 		hal_memset(p->fds, 0, (size_t)p->fdsz * sizeof(fildes_t));
@@ -388,13 +393,7 @@ int posix_clone(int ppid)
 		p->fds[0].file->status = O_RDONLY;
 		p->fds[1].file->status = O_WRONLY;
 		p->fds[2].file->status = O_WRONLY;
-	}
 
-	if (pp != NULL) {
-		p->pgid = pp->pgid;
-		pinfo_put(pp);
-	}
-	else {
 		p->pgid = p->process;
 	}
 
@@ -561,7 +560,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 {
 	TRACE("open(%s, %d, %d)", filename, oflag);
 	oid_t ln, oid, dev, pipesrv;
-	int fd = 0, err = 0;
+	int fd = 0, err = 0, created = 0;
 	process_info_t *p;
 	open_file_t *f;
 	mode_t mode;
@@ -606,6 +605,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 				if (err < 0) {
 					break;
 				}
+				created = 1;
 				hal_memcpy(&ln, &oid, sizeof(oid_t));
 			}
 			else if (err < 0) {
@@ -666,6 +666,12 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			pinfo_put(p);
 			return fd;
 		} while (0);
+
+		if (created != 0) {
+			/* file was created in the filesystem - we should unlink it now */
+			(void)posix_unlink(filename);
+			(void)proc_destroy(oid.port, oid);
+		}
 
 		(void)proc_lockSet(&p->lock);
 		p->fds[fd].file = NULL;
@@ -987,16 +993,16 @@ int posix_pipe(int fildes[2])
 
 	fo = vm_kmalloc(sizeof(open_file_t));
 	if (fo == NULL) {
+		(void)proc_destroy(oid.port, oid);
 		pinfo_put(p);
-		/* FIXME: destroy pipe */
 		return -ENOMEM;
 	}
 
 	fi = vm_kmalloc(sizeof(open_file_t));
 	if (fi == NULL) {
 		vm_kfree(fo);
+		(void)proc_destroy(oid.port, oid);
 		pinfo_put(p);
-		/* FIXME: destroy pipe */
 		return -ENOMEM;
 	}
 
@@ -1011,6 +1017,8 @@ int posix_pipe(int fildes[2])
 
 		vm_kfree(fo);
 		vm_kfree(fi);
+
+		(void)proc_destroy(oid.port, oid);
 
 		pinfo_put(p);
 		return -EMFILE;
@@ -1062,12 +1070,15 @@ int posix_mkfifo(const char *pathname, mode_t mode)
 	/* link pipe in posix server */
 	ret = proc_link(oid, oid, pathname);
 	if (ret < 0) {
+		(void)proc_destroy(oid.port, oid);
 		return ret;
 	}
 
 	/* create pipe in filesystem */
 	ret = posix_create(pathname, 2 /* otDev */, mode | S_IFIFO, oid, &file);
 	if (ret < 0) {
+		(void)proc_unlink(oid, oid, pathname);
+		(void)proc_destroy(oid.port, oid);
 		return ret;
 	}
 
@@ -2635,11 +2646,36 @@ pid_t posix_setsid(void)
 }
 
 
+static int waitpid_isWaitValid(pid_t pid, process_info_t *parent, process_info_t *child)
+{
+	if (pid == -1) {
+		return 1;
+	}
+	if ((pid == 0) && (child->pgid == parent->pgid)) {
+		return 1;
+	}
+	if ((pid < 0) && (child->pgid == -pid)) {
+		return 1;
+	}
+	return (pid == child->process) ? 1 : 0;
+}
+
+
 int posix_waitpid(pid_t child, int *status, unsigned int options)
 {
 	process_info_t *pinfo, *c;
 	pid_t pid;
-	int err = EOK;
+	int err = EOK, wnohang = 0;
+
+	if (options != 0U) {
+		if ((options & ~((unsigned int)(WNOHANG | WUNTRACED | WCONTINUED))) != 0U) {
+			return -EINVAL;
+		}
+
+		/* TODO: handle WUNTRACED and WCONTINUED once SIGCONT/SIGSTOP gets implemented */
+
+		wnohang = (options & WNOHANG) != 0U ? 1 : 0;
+	}
 
 	pid = process_getPid(proc_current()->process);
 
@@ -2649,16 +2685,12 @@ int posix_waitpid(pid_t child, int *status, unsigned int options)
 	(void)proc_lockSet(&pinfo->lock);
 	for (;;) {
 		/* Do this in the loop in case someone has a bad idea of doing multithreaded waitpid */
-		if ((pinfo->children == NULL) && (pinfo->zombies == NULL)) {
-			err = -ECHILD;
-			break;
-		}
+		err = -ECHILD;
 
 		if (pinfo->zombies != NULL) {
 			c = pinfo->zombies;
 			do {
-				if ((child == -1) || ((child == 0) && (c->pgid == pinfo->pgid)) ||
-						((child < 0) && (c->pgid == -child)) || (child == c->process)) {
+				if (waitpid_isWaitValid(child, pinfo, c) != 0) {
 					LIST_REMOVE(&pinfo->zombies, c);
 					err = c->process;
 					if (status != NULL) {
@@ -2675,8 +2707,18 @@ int posix_waitpid(pid_t child, int *status, unsigned int options)
 			} while (c != pinfo->zombies);
 		}
 
-		if ((options & 1U) != 0U) { /* WNOHANG */
-			err = EOK;
+		if (pinfo->children != NULL) {
+			c = pinfo->children;
+			do {
+				if (waitpid_isWaitValid(child, pinfo, c) != 0) {
+					err = EOK;
+					break;
+				}
+				c = c->next;
+			} while (c != pinfo->children);
+		}
+
+		if ((err < 0) || (wnohang != 0)) {
 			break;
 		}
 
@@ -2710,10 +2752,7 @@ void posix_died(pid_t pid, int exit)
 	int waited, adopted = 1;
 
 	pinfo = pinfo_find(pid);
-	if (pinfo == NULL) {
-		lib_printf("kernel (%s:%d): pinfo not found, pid: %d\n", __func__, __LINE__, pid);
-		return;
-	}
+	LIB_ASSERT_ALWAYS(pinfo != NULL, "pinfo not found, pid: %d", pid);
 
 	init = pinfo_find(1);
 	LIB_ASSERT_ALWAYS(init != NULL, "init not found");

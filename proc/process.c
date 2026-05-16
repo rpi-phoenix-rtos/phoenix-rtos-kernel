@@ -88,7 +88,9 @@ static void process_destroy(process_t *p)
 
 	trace_eventProcessKill(p);
 
-	posix_died(process_getPid(p), p->exit);
+	if (p->posix != 0U) {
+		posix_died(process_getPid(p), p->exit);
+	}
 
 	/* Destroy resources (especially rtInth) before changing map to prevent race */
 	proc_resourcesDestroy(p);
@@ -209,7 +211,6 @@ int proc_start(startFn_t start, void *arg, const char *path)
 	process->ports = NULL;
 
 	process->sigpend = 0;
-	process->sigmask = 0;
 	process->sighandler = NULL;
 	process->tls.tls_base = 0;
 	process->tls.tbss_sz = 0;
@@ -223,13 +224,15 @@ int proc_start(startFn_t start, void *arg, const char *path)
 	process->lazy = 1;
 #endif
 
+	process->posix = 0;
+
 	proc_changeMap(process, NULL, NULL, NULL);
 
 	/* Initialize resources tree for mutex and cond handles */
 	_resource_init(process);
 	(void)process_alloc(process);
 
-	err = proc_threadCreate(process, start, NULL, 4, SIZE_KSTACK, NULL, 0, (void *)arg);
+	err = proc_threadCreate(process, start, NULL, 4, SIZE_KSTACK, NULL, 0, 0, (void *)arg);
 	if (err < 0) {
 		(void)proc_put(process);
 		return err;
@@ -1174,14 +1177,32 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 }
 
 
+__attribute__((noreturn)) static void proc_spawnThreadEnd(process_spawn_t *spawn, int state)
+{
+	spinlock_ctx_t sc;
+
+	hal_spinlockSet(&spawn->sl, &sc);
+	spawn->state = state;
+	(void)proc_threadWakeup(&spawn->wq);
+	hal_spinlockClear(&spawn->sl, &sc);
+
+	proc_threadEnd();
+}
+
+
 static void proc_spawnThread(void *arg)
 {
 	thread_t *current = proc_current();
 	process_spawn_t *spawn = arg;
+	int ret;
 
 	/* temporary: create new posix process */
 	if (spawn->parent != NULL) {
-		(void)posix_clone(process_getPid(spawn->parent->process));
+		ret = posix_clone(process_getPid(spawn->parent->process));
+		if (ret < 0) {
+			proc_spawnThreadEnd(spawn, ret);
+		}
+		current->process->posix = 1U;
 	}
 
 	process_exec(current, spawn);
@@ -1266,37 +1287,40 @@ int proc_syspageSpawnName(const char *imap, const char *dmap, const char *name, 
 {
 	const syspage_map_t *sysMap, *codeMap;
 	const syspage_prog_t *prog = syspage_progNameResolve(name);
-	vm_map_t *imapp = NULL;
+	const unsigned int readExecAttr = (unsigned int)mAttrRead | (unsigned int)mAttrExec;
+	const unsigned int readWriteAttr = (unsigned int)mAttrRead | (unsigned int)mAttrWrite;
+	vm_map_t *imapp = NULL, *dmapp;
 
 	if (prog == NULL) {
 		return -ENOENT;
 	}
 
-	sysMap = (dmap == NULL) ? syspage_mapIdResolve(prog->dmaps[0]) : syspage_mapNameResolve(dmap);
-
-	if (imap != NULL) {
+	if (imap == NULL) {
+		codeMap = syspage_mapIdResolve(prog->imaps[0]);
+	}
+	else {
 		codeMap = syspage_mapNameResolve(imap);
 		if (codeMap == NULL) {
 			return -EINVAL;
 		}
 	}
-	else {
-		codeMap = syspage_mapIdResolve(prog->imaps[0]);
-	}
 
 	if (codeMap != NULL) {
-		if ((codeMap->attr & ((unsigned int)mAttrRead | (unsigned int)mAttrExec)) != ((unsigned int)mAttrRead | (unsigned int)mAttrExec)) {
+		if ((codeMap->attr & readExecAttr) != readExecAttr) {
 			return -EINVAL;
 		}
 
+		/* NOTE: imapp can be NULL */
 		imapp = vm_getSharedMap((int)codeMap->id);
 	}
 
-	if (sysMap != NULL && (sysMap->attr & ((unsigned int)mAttrRead | (unsigned int)mAttrWrite)) == ((unsigned int)mAttrRead | (unsigned int)mAttrWrite)) {
-		return proc_syspageSpawn((const syspage_prog_t *)prog, imapp, vm_getSharedMap((int)sysMap->id), name, argv);
+	sysMap = (dmap == NULL) ? syspage_mapIdResolve(prog->dmaps[0]) : syspage_mapNameResolve(dmap);
+	if (sysMap == NULL || (sysMap->attr & readWriteAttr) != readWriteAttr) {
+		return -EINVAL;
 	}
+	dmapp = vm_getSharedMap((int)sysMap->id);
 
-	return -EINVAL;
+	return proc_syspageSpawn(prog, imapp, dmapp, name, argv);
 }
 
 
@@ -1322,29 +1346,25 @@ static void process_restoreParentKstack(thread_t *current, thread_t *parent)
 }
 
 
-static void proc_vforkedExit(thread_t *current, process_spawn_t *spawn, int state)
+__attribute__((noreturn)) static void proc_vforkedExit(thread_t *current, process_spawn_t *spawn, int state)
 {
-	spinlock_ctx_t sc;
-
 	current->ustack = NULL;
 	proc_changeMap(current->process, NULL, NULL, NULL);
+
+	proc_kill(current->process);
 
 	/* Only possible in the case of `initthread` exit or failure to fork. */
 	if (spawn->parent == NULL) {
 		hal_spinlockDestroy(&spawn->sl);
 		(void)vm_objectPut(spawn->object);
+
+		proc_threadEnd();
 	}
 	else {
 		process_restoreParentKstack(current, spawn->parent);
 
-		hal_spinlockSet(&spawn->sl, &sc);
-		spawn->state = state;
-		(void)proc_threadWakeup(&spawn->wq);
-		hal_spinlockClear(&spawn->sl, &sc);
+		proc_spawnThreadEnd(spawn, state);
 	}
-
-	proc_kill(current->process);
-	proc_threadEnd();
 }
 
 
@@ -1383,13 +1403,15 @@ static void process_vforkThread(void *arg)
 
 	current = proc_current();
 	parent = spawn->parent;
-	(void)posix_clone(process_getPid(parent->process));
+	ret = posix_clone(process_getPid(spawn->parent->process));
+	if (ret < 0) {
+		proc_spawnThreadEnd(spawn, ret);
+	}
+	current->process->posix = 1U;
 
-	proc_changeMap(current->process, parent->process->mapp, parent->process->imapp, parent->process->pmapp);
-
-	current->process->sigmask = parent->process->sigmask;
+	/* POSIX: A child created via fork inherits a copy of its parent's signal mask */
+	current->sigmask = parent->sigmask;
 	current->process->sighandler = parent->process->sighandler;
-	pmap_switch(current->process->pmapp);
 
 	hal_spinlockSet(&spawn->sl, &sc);
 	while (spawn->state < FORKING) {
@@ -1400,12 +1422,7 @@ static void process_vforkThread(void *arg)
 	/* Copy parent kernel stack */
 	current->parentkstack = vm_kmalloc(process_parentKstacksz(parent));
 	if (current->parentkstack == NULL) {
-		hal_spinlockSet(&spawn->sl, &sc);
-		spawn->state = -ENOMEM;
-		(void)proc_threadWakeup(&spawn->wq);
-		hal_spinlockClear(&spawn->sl, &sc);
-
-		proc_threadEnd();
+		proc_spawnThreadEnd(spawn, -ENOMEM);
 	}
 
 	hal_memcpy(current->parentkstack, hal_cpuGetSP(parent->context), process_parentKstacksz(parent));
@@ -1420,13 +1437,11 @@ static void process_vforkThread(void *arg)
 	if (ret < 0) {
 		vm_kfree(current->parentkstack);
 
-		hal_spinlockSet(&spawn->sl, &sc);
-		spawn->state = ret;
-		(void)proc_threadWakeup(&spawn->wq);
-		hal_spinlockClear(&spawn->sl, &sc);
-
-		proc_threadEnd();
+		proc_spawnThreadEnd(spawn, ret);
 	}
+
+	proc_changeMap(current->process, parent->process->mapp, parent->process->imapp, parent->process->pmapp);
+	pmap_switch(current->process->pmapp);
 
 	current->ustack = parent->ustack;
 
@@ -1503,6 +1518,13 @@ int proc_vfork(void)
 		(void)vm_objectPut(spawn->object);
 		ret = spawn->state;
 		vm_kfree(spawn);
+		if ((ret < 0) && (posix_getppid(pid) == process_getPid(current->process))) {
+			/*
+			 * if the child managed to register itself within posix subsystem before
+			 * failure, wait for its complete death and cleanup its posix metadata.
+			 */
+			(void)posix_waitpid(pid, NULL, 0);
+		}
 		return (ret < 0) ? ret : pid;
 	}
 
@@ -1518,9 +1540,26 @@ static int process_copy(void)
 	process_t *process = current->process;
 	parent = spawn->parent;
 
-	process->path = lib_strdup(parent->process->path);
-	if (process->path == NULL) {
-		return -ENOMEM;
+	/* these resources should get cleaned up by process_destroy */
+	if (parent->process->path != NULL) {
+		process->path = lib_strdup(parent->process->path);
+		if (process->path == NULL) {
+			return -ENOMEM;
+		}
+	}
+
+	if (parent->process->argv != NULL) {
+		process->argv = proc_copyargs(parent->process->argv);
+		if (process->argv == NULL) {
+			return -ENOMEM;
+		}
+	}
+
+	if (parent->process->envp != NULL) {
+		process->envp = proc_copyargs(parent->process->envp);
+		if (process->envp == NULL) {
+			return -ENOMEM;
+		}
 	}
 
 	/* Avoid ustack access while map is invalid */
@@ -1530,7 +1569,7 @@ static int process_copy(void)
 		return -ENOMEM;
 	}
 
-	if (vm_mapCopy(process, &process->map, &parent->process->map) < 0) {
+	if (vm_mapCopy(process, &process->map, parent->process->mapp) < 0) {
 		return -ENOMEM;
 	}
 

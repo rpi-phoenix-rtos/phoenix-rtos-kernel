@@ -101,7 +101,7 @@ static void name_traceDevfs(const char *msg)
 }
 
 
-int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
+int proc_portRegister(u32 port, const char *name, oid_t *oid)
 {
 	dcache_entry_t *entry;
 	unsigned int hash = dcache_strHash(name);
@@ -150,7 +150,7 @@ int proc_portRegister(unsigned int port, const char *name, oid_t *oid)
 }
 
 
-void proc_portUnregister(const char *name)
+int proc_portUnregister(const char *name)
 {
 	dcache_entry_t *entry, *prev = NULL;
 	unsigned int hash = dcache_strHash(name);
@@ -167,18 +167,24 @@ void proc_portUnregister(const char *name)
 	if (entry == NULL) {
 		/* There is no such entry, nothing to do */
 		(void)proc_lockClear(&name_common.dcache_lock);
-		return;
+		return -ENOENT;
+	}
+
+	if (name_traceIs(name, "devfs") != 0) {
+		name_common.devfs_registered = 0;
 	}
 
 	if (prev != NULL) {
 		prev->next = entry->next;
 	}
 	else {
-		name_common.dcache[hash] = NULL;
+		name_common.dcache[hash] = entry->next;
 	}
 	(void)proc_lockClear(&name_common.dcache_lock);
 
 	vm_kfree(entry);
+
+	return EOK;
 }
 
 
@@ -454,6 +460,31 @@ int proc_create(u32 port, int type, unsigned int mode, oid_t dev, oid_t dir, cha
 }
 
 
+int proc_destroy(u32 port, oid_t dev)
+{
+	int err;
+	msg_t *msg = vm_kmalloc(sizeof(msg_t));
+
+	if (msg == NULL) {
+		return -ENOMEM;
+	}
+
+	hal_memset(msg, 0, sizeof(msg_t));
+
+	msg->type = mtDestroy;
+	hal_memcpy(&msg->oid, &dev, sizeof(dev));
+
+	err = proc_send(port, msg);
+
+	if (err == 0) {
+		err = msg->o.err;
+	}
+
+	vm_kfree(msg);
+	return err;
+}
+
+
 int proc_link(oid_t dir, oid_t oid, const char *name)
 {
 	int err;
@@ -607,4 +638,5 @@ void _name_init(void)
 
 	hal_memset(name_common.dcache, 0, sizeof(name_common.dcache));
 	name_common.root_registered = 0;
+	name_common.devfs_registered = 0;
 }

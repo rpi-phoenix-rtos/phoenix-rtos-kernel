@@ -22,7 +22,7 @@
 int proc_portRegister(u32 port, const char *name, oid_t *oid);
 
 
-void proc_portUnregister(const char *name);
+int proc_portUnregister(const char *name);
 
 
 int proc_portLookup(const char *name, oid_t *file, oid_t *dev);
@@ -41,6 +41,9 @@ int proc_unlink(oid_t dir, oid_t oid, const char *name);
 
 
 int proc_create(u32 port, int type, unsigned int mode, oid_t dev, oid_t dir, char *name, oid_t *oid);
+
+
+int proc_destroy(u32 port, oid_t dev);
 
 
 int proc_close(oid_t oid, unsigned int mode);

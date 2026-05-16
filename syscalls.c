@@ -338,7 +338,7 @@ int syscalls_beginthreadex(u8 *ustack)
 
 	proc_get(proc);
 
-	err = proc_threadCreate(proc, start, id, (u8)priority, (size_t)SIZE_KSTACK, stack, (size_t)stacksz, arg);
+	err = proc_threadCreate(proc, start, id, (u8)priority, (size_t)SIZE_KSTACK, stack, (size_t)stacksz, proc_current()->sigmask, arg);
 
 	if (err < 0) {
 		(void)proc_put(proc);
@@ -770,24 +770,71 @@ void syscalls_portDestroy(u8 *ustack)
 }
 
 
-int syscalls_portRegister(u8 *ustack)
+int syscalls_sys_portRegister(u8 *ustack)
 {
 	process_t *proc = proc_current()->process;
-	unsigned int port;
-	char *name;
+	u32 port;
+	const char *name;
+	size_t len;
 	oid_t *oid;
 
-	GETFROMSTACK(ustack, unsigned int, port, 0U);
-	GETFROMSTACK(ustack, char *, name, 1U);
-	GETFROMSTACK(ustack, oid_t *, oid, 2U);
+	GETFROMSTACK(ustack, u32, port, 0U);
+	GETFROMSTACK(ustack, const char *, name, 1U);
+	GETFROMSTACK(ustack, size_t, len, 2U);
+	GETFROMSTACK(ustack, oid_t *, oid, 3U);
 
-	/* FIXME: Pass strlen(name) from userspace */
+	if (name == NULL || len == 0U) {
+		return -EINVAL;
+	}
 
 	if (vm_mapBelongs(proc, oid, sizeof(*oid)) < 0) {
 		return -EFAULT;
 	}
 
+	if (vm_mapBelongs(proc, name, len) < 0) {
+		return -EFAULT;
+	}
+
+	/* FIXME: when we pass len down the call stack, we won't need to check for last NULL-byte */
+	if (name[len - 1U] != '\0') {
+		return -EINVAL;
+	}
+
+	/* FIXME: a user thread may change the pointed-to buffer after this check.
+	   This can happen with any pointer to user memory.
+	   We should find a way to fail gracefully in syscalls when this happens. */
+
+	/* FIXME: pass len down the call stack to avoid re-calculating it */
+
 	return proc_portRegister(port, name, oid);
+}
+
+
+int syscalls_sys_portUnregister(u8 *ustack)
+{
+	process_t *proc = proc_current()->process;
+	const char *name;
+	size_t len;
+
+	GETFROMSTACK(ustack, const char *, name, 0U);
+	GETFROMSTACK(ustack, size_t, len, 1U);
+
+	if (name == NULL || len == 0U) {
+		return -EINVAL;
+	}
+
+	if (vm_mapBelongs(proc, name, len) < 0) {
+		return -EFAULT;
+	}
+
+	/* FIXME: when we pass len down the call stack, we won't need to check for last NULL-byte */
+	if (name[len - 1U] != '\0') {
+		return -EINVAL;
+	}
+
+	/* FIXME: pass len down the call stack to avoid re-calculating it */
+
+	return proc_portUnregister(name);
 }
 
 
@@ -990,15 +1037,11 @@ addr_t syscalls_va2pa(u8 *ustack)
 int syscalls_signalHandle(u8 *ustack)
 {
 	sighandlerFn_t handler;
-	unsigned int mask, mmask;
 	thread_t *thread;
 
 	GETFROMSTACK(ustack, sighandlerFn_t, handler, 0U);
-	GETFROMSTACK(ustack, unsigned int, mask, 1U);
-	GETFROMSTACK(ustack, unsigned int, mmask, 2U);
 
 	thread = proc_current();
-	thread->process->sigmask = (mask & mmask) | (thread->process->sigmask & ~mmask);
 	thread->process->sighandler = handler;
 
 	return EOK;
@@ -1926,22 +1969,25 @@ const void *const syscalls[] = { SYSCALLS(SYSCALLS_NAME) };
 void *syscalls_dispatch(int n, u8 *ustack, cpu_context_t *ctx)
 {
 	void *retval;
-	int tid;
+	thread_t *thread;
 
 	if (n >= (int)(sizeof(syscalls) / sizeof(syscalls[0]))) {
 		return (void *)-EINVAL;
 	}
 
-	tid = proc_getTid(proc_current());
+	thread = proc_current();
 
-	trace_eventSyscallEnter(n, tid);
+	trace_eventSyscallEnter(n, proc_getTid(thread));
 
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 MISRAC2012-RULE_11_8 "Related to previous suppression" */
 	retval = ((void *(*)(u8 *arg))syscalls[n])(ustack);
 
-	trace_eventSyscallExit(n, tid);
+	/* after forking child returns with same stack but in different thread */
+	thread = proc_current();
 
-	if (proc_current()->exit != 0U) {
+	trace_eventSyscallExit(n, proc_getTid(thread));
+
+	if (thread->exit != 0U) {
 		proc_threadEnd();
 	}
 
