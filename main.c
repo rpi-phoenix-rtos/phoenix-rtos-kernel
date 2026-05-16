@@ -72,6 +72,8 @@ static void main_initthr(void *unused)
 	 * boundary past user-server startup and test syspage/posix/spawn under
 	 * I-cache.
 	 */
+	main_uartMark('D');
+	hal_cpuDisableInterrupts();
 	main_uartMark('i');
 	hal_cpuEnableICache();
 	main_uartMark('I');
@@ -92,6 +94,8 @@ static void main_initthr(void *unused)
 	hal_consolePrint(ATTR_USER, "main_initthr: posix init done\n");
 	main_uartMark('h');
 
+	main_uartMark('E');
+	hal_cpuEnableInterrupts();
 	main_uartMark('j');
 	(void)posix_clone(-1);
 	main_uartMark('k');
