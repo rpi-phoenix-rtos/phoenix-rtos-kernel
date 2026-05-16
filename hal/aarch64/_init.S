@@ -1481,6 +1481,10 @@ hal_cpuEnableICache:
 	uart_putc_virt 122  /* 'z' - after SCTLR.I write */
 	isb
 	uart_putc_virt 48   /* '0' - after SCTLR.I isb */
+	ic   iallu
+	dsb  ish
+	isb
+	uart_putc_virt 49   /* '1' - after post-enable I-cache invalidate */
 
 	ldp x29, x30, [sp], #16
 	ret

@@ -63,17 +63,6 @@ static struct {
 } log_common;
 
 
-static inline void log_uartMark(char mark)
-{
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
-
-	while ((*uartfr & 0x20u) != 0u) {
-	}
-	*uart = (unsigned int)mark;
-}
-
-
 static int _log_empty(void)
 {
 	return (log_common.tail == log_common.head) ? 1 : 0;
@@ -404,10 +393,7 @@ size_t log_write(const char *data, size_t len)
 	char c;
 
 	if (log_common.enabled != 0) {
-		log_uartMark('L');
-		log_uartMark('M');
 		(void)proc_lockSet(&log_common.lock);
-		log_uartMark('N');
 
 		/* No need to check log_common.enabled again,
 		 * it's used only on kernel panic */
@@ -425,9 +411,7 @@ size_t log_write(const char *data, size_t len)
 		if (i > 0U) {
 			log_common.updated = 1;
 		}
-		log_uartMark('O');
 		(void)proc_lockClear(&log_common.lock);
-		log_uartMark('P');
 	}
 	else {
 		for (i = 0; i < len; ++i) {
