@@ -1461,16 +1461,24 @@ hal_cpuEnableICache:
 	 * is stronger than the usual PoU text sequence and is intentional on
 	 * BCM2711 while the source of stale post-I-enable instruction fetches
 	 * is still being isolated.
+	 *
+	 * Tail-range maintenance (post-_etext .rodata/.bss) was attempted but
+	 * faults: _pmap_preinit() has already mapped .rodata as RO (DESCR_AP2),
+	 * which makes dc ivac permission-fault at level 3. dc cvac would not
+	 * fault but also doesn't help — the cache state of .rodata at this
+	 * point is empty (M-only NC reads) and cleaning has no effect. Leaving
+	 * tail maintenance off; the boundary remains layout-sensitive on
+	 * rebuilds (function/PA shifts → different stale-SLC range hits).
 	 */
-	uart_putc_virt 114  /* 'r' - before dc civac text clean+invalidate */
+	uart_putc_virt 114  /* 'r' - before dc civac text */
 	ldr x0, =VADDR_KERNEL
 	ldr x1, =_etext
 	bl _clean_inval_dcache_range
-	uart_putc_virt 115  /* 's' - after dc civac text clean+invalidate */
+	uart_putc_virt 115  /* 's' - after dc civac text */
 	ldr x0, =VADDR_KERNEL
 	ldr x1, =_etext
 	bl _inval_icache_range
-	uart_putc_virt 116  /* 't' - after ic ivau text invalidate */
+	uart_putc_virt 116  /* 't' - after ic ivau text */
 	dsb  sy
 	uart_putc_virt 120  /* 'x' - after pre-flip dsb */
 	isb
