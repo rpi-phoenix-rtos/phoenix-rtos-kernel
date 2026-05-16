@@ -1473,7 +1473,7 @@ hal_cpuEnableICache:
 	uart_putc_virt 120  /* 'x' - after pre-flip dsb */
 	isb
 	uart_putc_virt 121  /* 'y' - after pre-flip isb */
-	ic   iallu
+	ic   ialluis
 	dsb  ish
 	isb
 	uart_putc_virt 50   /* '2' - after pre-enable I-cache invalidate-all */
