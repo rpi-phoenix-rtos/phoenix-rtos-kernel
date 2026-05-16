@@ -2838,24 +2838,9 @@ pid_t posix_getppid(pid_t pid)
 
 void posix_init(void)
 {
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
-
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '0';
 	(void)proc_lockInit(&posix_common.lock, &proc_lockAttrDefault, "posix.common");
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '1';
 	lib_rbInit(&posix_common.pid, pinfo_cmp, NULL);
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '2';
 	unix_sockets_init();
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '3';
 	posix_common.fresh = 0;
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '4';
 	hal_memset(posix_common.hostname, 0, sizeof(posix_common.hostname));
-	while ((*uartfr & 0x20U) != 0U) {}
-	*uart = '5';
 }
