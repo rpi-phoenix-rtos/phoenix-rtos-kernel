@@ -39,12 +39,20 @@ static struct {
 } main_common;
 
 
+static inline void main_uartMark(char mark)
+{
+	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
+	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
+
+	while (*uartfr & 0x20) {}
+	*uart = (unsigned int)mark;
+}
+
+
 static void main_initthr(void *unused)
 {
 	int res;
 	unsigned int argc;
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
 
 	syspage_prog_t *prog;
 	char *argv[32], *cmdline;
@@ -64,25 +72,36 @@ static void main_initthr(void *unused)
 	 * boundary past user-server startup and test syspage/posix/spawn under
 	 * I-cache.
 	 */
-	while (*uartfr & 0x20) {}
-	*uart = 'i';
+	main_uartMark('i');
 	hal_cpuEnableICache();
-	while (*uartfr & 0x20) {}
-	*uart = 'I';
+	main_uartMark('I');
 	hal_consolePrint(ATTR_USER, "main_initthr: icache enabled\n");
+	main_uartMark('a');
 
+	main_uartMark('b');
 	lib_printf("main: Starting syspage programs:");
+	main_uartMark('c');
 	syspage_progShow();
+	main_uartMark('d');
 	hal_consolePrint(ATTR_USER, "main_initthr: syspage listed\n");
+	main_uartMark('e');
 
+	main_uartMark('f');
 	posix_init();
+	main_uartMark('g');
 	hal_consolePrint(ATTR_USER, "main_initthr: posix init done\n");
+	main_uartMark('h');
 
+	main_uartMark('j');
 	(void)posix_clone(-1);
+	main_uartMark('k');
 	hal_consolePrint(ATTR_USER, "main_initthr: posix clone done\n");
+	main_uartMark('l');
 
 	/* Start programs from syspage */
+	main_uartMark('m');
 	prog = syspage_progList();
+	main_uartMark('n');
 	if (prog != NULL) {
 		/* TODO(TD-13-spawn-cap): hard cap on spawn-loop iterations on
 		 * real Pi 4. Empirically the loop iterates correctly through
