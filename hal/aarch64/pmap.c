@@ -14,6 +14,7 @@
  */
 
 #include "aarch64.h"
+#include "hal/console.h"
 #include "hal/pmap.h"
 #include "hal/cpu.h"
 #include "hal/string.h"
@@ -941,6 +942,46 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 			pmap_common.mem.entries[pmap_common.mem.count].flags = 0;
 			pmap_common.mem.count++;
 		}
+	}
+
+	/* TD-06 (Goal 3, 4 GB RAM) diagnostic 2026-05-17: report bank
+	 * count and total memory range so a UART trace tells us whether
+	 * both Pi 4 4GB banks (memory@0 + memory@40000000) made it into
+	 * the page allocator. */
+	{
+		char buf[96];
+		size_t k;
+		unsigned long len;
+
+		len = hal_i2s("pmap: nBanks=", buf, (unsigned long)nBanks, 10, 1);
+		buf[len] = '\n';
+		buf[len + 1U] = '\0';
+		hal_consolePrint(ATTR_USER, buf);
+
+		len = hal_i2s("pmap: mem.count=", buf, (unsigned long)pmap_common.mem.count, 10, 1);
+		buf[len] = '\n';
+		buf[len + 1U] = '\0';
+		hal_consolePrint(ATTR_USER, buf);
+
+		for (k = 0U; k < pmap_common.mem.count; k++) {
+			len = hal_i2s("pmap: bank start=0x", buf, (unsigned long)pmap_common.mem.entries[k].start, 16, 1);
+			buf[len] = '\0';
+			hal_consolePrint(ATTR_USER, buf);
+			len = hal_i2s(" end=0x", buf, (unsigned long)pmap_common.mem.entries[k].end, 16, 1);
+			buf[len] = '\n';
+			buf[len + 1U] = '\0';
+			hal_consolePrint(ATTR_USER, buf);
+		}
+
+		len = hal_i2s("pmap: mem.min=0x", buf, (unsigned long)pmap_common.mem.min, 16, 1);
+		buf[len] = '\n';
+		buf[len + 1U] = '\0';
+		hal_consolePrint(ATTR_USER, buf);
+
+		len = hal_i2s("pmap: mem.max=0x", buf, (unsigned long)pmap_common.mem.max, 16, 1);
+		buf[len] = '\n';
+		buf[len + 1U] = '\0';
+		hal_consolePrint(ATTR_USER, buf);
 	}
 
 	/* Set code to read-only, everything else XN and remove mappings past
