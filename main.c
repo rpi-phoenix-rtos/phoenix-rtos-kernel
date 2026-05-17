@@ -39,16 +39,6 @@ static struct {
 } main_common;
 
 
-static inline void main_uartMark(char mark)
-{
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
-
-	while (*uartfr & 0x20) {}
-	*uart = (unsigned int)mark;
-}
-
-
 static void main_initthr(void *unused)
 {
 	int res;
@@ -67,55 +57,24 @@ static void main_initthr(void *unused)
 	_usrv_start();
 	hal_consolePrint(ATTR_USER, "main_initthr: usrv started\n");
 
-	/* C-3 I-cache enable: enabling after the first scheduled context and
-	 * _hal_start() reaches _usrv_start() but does not return. Move the
-	 * boundary past user-server startup and test syspage/posix/spawn under
-	 * I-cache.
-	 *
-	 * DISABLED 2026-05-16 22:00 after reproducibility test proved the
-	 * deferred-I-cache boundary is non-deterministic across power-on
-	 * cycles (same image, different stop points). Root cause is the
-	 * BCM2711 SLC retaining firmware-era cache residue that ARM cache
-	 * maintenance ops cannot reach. Fixing this requires a
-	 * BCM2711-specific SLC invalidate path (datasheet study).
-	 *
-	 * Until that lands, leave the asm helper in `_init.S` for the
-	 * future fix but skip the call here so the kernel boots
-	 * deterministically. Pivoting to USB+keyboard / HDMI / SMP work
-	 * which doesn't depend on caches.
-	 */
-	main_uartMark('i');
-#if 0
-	hal_cpuEnableICache();
-#endif
-	main_uartMark('I');
-	hal_consolePrint(ATTR_USER, "main_initthr: icache enabled (SKIPPED - SLC non-det)\n");
-	main_uartMark('a');
+	/* I-cache is already enabled at MMU bring-up time in
+	 * hal/aarch64/_init.S via the single-shot SCTLR_EL1.{M,C,I} write,
+	 * so the historical `hal_cpuEnableICache()` deferred-enable call
+	 * here is redundant. Removed 2026-05-17 with the cache-era debug
+	 * cleanup. */
 
-	main_uartMark('b');
 	lib_printf("main: Starting syspage programs:");
-	main_uartMark('c');
 	syspage_progShow();
-	main_uartMark('d');
 	hal_consolePrint(ATTR_USER, "main_initthr: syspage listed\n");
-	main_uartMark('e');
 
-	main_uartMark('f');
 	posix_init();
-	main_uartMark('g');
 	hal_consolePrint(ATTR_USER, "main_initthr: posix init done\n");
-	main_uartMark('h');
 
-	main_uartMark('j');
 	(void)posix_clone(-1);
-	main_uartMark('k');
 	hal_consolePrint(ATTR_USER, "main_initthr: posix clone done\n");
-	main_uartMark('l');
 
 	/* Start programs from syspage */
-	main_uartMark('m');
 	prog = syspage_progList();
-	main_uartMark('n');
 	if (prog != NULL) {
 		/* TODO(TD-13-spawn-cap): hard cap on spawn-loop iterations on
 		 * real Pi 4. Empirically the loop iterates correctly through

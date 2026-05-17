@@ -261,13 +261,9 @@ _start:
         eret
 
 el1_entry:
-        /* DEBUG: Check current exception level (expect 0x4 == EL1). */
-        mrs x0, CurrentEL
-        uart_putc 90 /* DEBUG: CurrentEL value */
-
         /* Assumptions:
          * x9 => PA of syspage from PLO */
-        uart_putc 75
+
 	/* Mask all interrupts */
 	msr daifSet, #0xf
 
@@ -309,10 +305,6 @@ el1_entry:
 	 */
 	ldr x0, =0x30c0c938
 	msr sctlr_el1, x0
-	
-	/* DEBUG: Read back SCTLR_EL1 to verify */
-	mrs x1, sctlr_el1
-	uart_putc 91 /* DEBUG: SCTLR_EL1 after write */
 
 	/* Enable FPU/SIMD access (like Circle OS and bare metal examples) */
 	/* BIT(20) + BIT(21) = FPEN (don't trap FP/SIMD) */
@@ -356,35 +348,13 @@ el1_entry:
 	orr x0, x0, #(1 << 31)
 	msr pmcntenset_el0, x0
 
-	uart_putc 76
-
-#if defined(__TARGET_AARCH64A53) || defined(__TARGET_AARCH64A72)
-        /* SMPEN bit (CPUECTLR_EL1[6]) — left commented because the
-         * register access traps from EL1 on A72 (system-register S3_1_*
-         * implementation-defined; A72 traps reads/writes from EL1
-         * unless explicitly granted). The Phoenix armstub
-         * (phoenix-armstub8-rpi4.S) sets this at EL3 before the eret
-         * to EL2/EL1. If we ever need to re-assert it, the right place
-         * is in the armstub itself, not here.
-         *
-         * Same applies to A72 erratum 859971 workaround
-         * (CPUACTLR_EL1[47] DIS_INSTR_PREFETCH): ARM Trusted Firmware
-         * applies this in cortex_a72_reset_func at EL3. Phoenix
-         * empirically observed an EL1 trap when attempting it from
-         * here (boot stalls at uart_putc 83 = 'S' marker). The
-         * workaround needs to migrate to the armstub for the cache
-         * enable Stage 1 path to progress past Phase A.
-         */
-        uart_putc 83 /* DEBUG: SMPEN site (no-op; relies on armstub) */
-        uart_putc 84 /* DEBUG: erratum 859971 site (no-op; relies on armstub) */
-#endif
-
-	uart_putc 85 /* DEBUG: Before M marker */
-	uart_putc 77
-	uart_putc 86 /* DEBUG: After M marker */
+	/* SMPEN bit (CPUECTLR_EL1[6]) and A72 erratum workarounds
+	 * (859971, 1319367) trap from EL1 on A72 r0p3. They are applied
+	 * at EL3 in the Pi 4 armstub (phoenix-armstub8-rpi4.S). Per
+	 * docs/rpi4-os-development-guide.md, those EL3 writes are the
+	 * single most important hardware-init step for this board. */
 
 	/* Set up MMU */
-	uart_tag2 88, 49
 	ldr x0, =(TCR_EL1_VALUE)
 	mrs x1, id_aa64mmfr0_el1
 	and x1, x1, #0x7
@@ -434,7 +404,6 @@ el1_entry:
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
-	uart_tag2 88, 50
 
 	adr x0, _early_vector_table
 	msr vbar_el1, x0
@@ -597,8 +566,6 @@ el1_entry:
 	 *   - all TLB/I-cache maintenance uses Inner-Shareable variants
 	 *     (vmalle1is, ialluis, dsb ish) — Step 4
 	 */
-	uart_tag2 88, 51
-
 	/* Pre-flip canonical fence (Linux set_sctlr ritual shape). */
 	ic   ialluis
 	dsb  ish
@@ -650,13 +617,11 @@ el1_entry:
 	ic   iallu
 	dsb  nsh
 	isb
-	uart_tag2 88, 52
 
-	/* C-3 I-cache coherency preparation: while the low handoff alias is
-	 * still valid, clean its text range to PoU and invalidate the matching
-	 * I-cache range. The late C helper cannot touch VA 0x400000 after the
-	 * low bootstrap mapping is gone.
-	 */
+	/* Post-flip coherency preparation: while the low handoff alias is
+	 * still valid, clean the kernel's low-PA text range to PoU and
+	 * invalidate the matching I-cache range. The late C helper cannot
+	 * touch VA 0x400000 after the low bootstrap mapping is gone. */
 	ldr x0, =0x400000
 	ldr x1, =0x640000
 	bl _clean_dcache_pou_range
@@ -664,15 +629,9 @@ el1_entry:
 	ldr x1, =0x640000
 	bl _inval_icache_range
 
-	/* C-3 early-I result (2026-05-16): enabling SCTLR.I here with explicit
-	 * low-PC + pkernel + high-VA maintenance works and speeds up execution, but
-	 * syspage_init() later stalls at the program-relocation `P` boundary. Keep
-	 * I-cache deferred until after syspage_init() for now.
-	 */
-
-	uart_tag2 88, 53
-	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT
-	 * Before we can jump to kernel in virtual memory we must set up PMAP_COMMON_KERNEL_TTL2 table */
+	/* Translation is now taking place through PMAP_COMMON_SCRATCH_TT.
+	 * Before we can jump to kernel in virtual memory we must set up
+	 * PMAP_COMMON_KERNEL_TTL2 table. */
 
 	/* Set up kernel stack NOW that MMU is enabled and virtual memory is working */
 	adrp x0, PMAP_COMMON_STACK
