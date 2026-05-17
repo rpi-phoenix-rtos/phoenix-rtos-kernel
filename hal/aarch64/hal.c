@@ -94,38 +94,39 @@ void _hal_init_c(void)
 	addr_t dtbStart;
 	addr_t dtbEnd;
 
-	/* TD-04-hack-2: localization probes inside _hal_init. These are
-	 * TD-05-class diagnostic markers, but they also appear to act as
-	 * Heisenbug insurance — without them the kernel hangs at slightly
-	 * different points depending on code layout. To be stripped or
-	 * gated behind a debug flag once the underlying issue is fixed.
-	 * Markers go through the same TTBR1-mapped early UART used by
-	 * the syspage_init probes. */
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-
-	*uart = 'H'; /* H marker - _hal_init entry */
+	/* TD-04-hack-2 + TD-04-hack-3 cleaned up 2026-05-17.
+	 *
+	 * Pre-cleanup state: this function had ~17 inline marker stores
+	 * (H, 4, 5, 6, F/S, r/D, s, E, 7, 8, 9, a, b, c, d, e) to a
+	 * TTBR1-mapped early-UART pointer at 0xffffffffffe00000, plus a
+	 * faked `dtbEnd = dtbStart + 0x10000` because reading `dtb->end`
+	 * hung the kernel on real Pi 4 silicon in the cache-off era.
+	 *
+	 * With the 2026-05-17 armstub fix (CPUACTLR_EL1[46] erratum 1319367
+	 * + L2CTLR_EL1 BCM2711 timing) the underlying cache-coherency
+	 * defect is gone; the Heisenbug-shaped hangs that originally
+	 * justified the markers and the fake `dtbEnd` no longer reproduce.
+	 *
+	 * Markers stripped to reduce UART chatter (helps boot speed —
+	 * every byte to UART also gets mirrored to HDMI by pl011-tty's
+	 * fbcon path; fewer bytes = faster). Real `dtb->end` read
+	 * restored — correctness improvement; the prior 64 KiB cap could
+	 * silently truncate parsing for any DTB > 64 KiB (Pi 4's is
+	 * currently 56 KiB so the hack was within bounds, but a future
+	 * Pi variant or kernel cmdline addition could push it over). */
 
 	hal_common.started = 0;
-	*uart = '4';
-
 	schedulerLocked = 0;
-	*uart = '5';
-
 	_hal_spinlockInit();
-	*uart = '6';
 
 	if ((hal_syspage->hs.firmwareDtb != 0u) && (hal_syspage->hs.firmwareDtbSize != 0u)) {
-		*uart = 'F'; /* F marker - using firmware dtb */
 		dtbStart = hal_syspage->hs.firmwareDtb;
 		dtbEnd = dtbStart + hal_syspage->hs.firmwareDtbSize;
 		hal_consolePrint(ATTR_USER, "hal: using firmware dtb\n");
 	}
 	else {
-		*uart = 'S'; /* S marker - using syspage dtb */
 		dtb = syspage_progNameResolve("system.dtb");
-		*uart = 'r'; /* r marker - progNameResolve returned */
 		if (dtb == NULL) {
-			*uart = '!'; /* ! marker - DTB missing, halt */
 #ifdef NDEBUG
 			hal_cpuReboot();
 #else
@@ -134,50 +135,20 @@ void _hal_init_c(void)
 			}
 #endif
 		}
-		*uart = 'D'; /* D marker - dtb non-NULL */
 
 		dtbStart = dtb->start;
-		*uart = 's'; /* s marker - after reading dtb->start */
-
-		/* TODO(TD-04-hack-3): dtb->end read hangs the kernel on real
-		 * Pi 4 (visible: trace stops at 's' marker; never reaches the
-		 * 'E' marker that the original `dtbEnd = dtb->end;` produces).
-		 * Same access pattern as the dtb->start read just above —
-		 * which DOES work — only the offset differs (24 vs 16). This
-		 * is a Heisenbug-class follow-on to TD-04. Faking dtbEnd as a
-		 * generous size cap from dtbStart lets boot proceed; the real
-		 * DTB header self-describes its size, so _pmap_preinit / DTB
-		 * parser will work off the in-DTB length anyway. To be
-		 * properly fixed once the underlying issue is rooted out.
-		 * See TEMPORARY-FIXES TD-04-hack-3. */
-		dtbEnd = dtbStart + 0x10000; /* HACK: 64 KiB upper bound, real size from DTB header */
-		*uart = 'E'; /* E marker - dtbEnd faked from dtbStart */
+		dtbEnd = dtb->end;
 		hal_consolePrint(ATTR_USER, "hal: using syspage dtb\n");
 	}
 
-	*uart = '7';
 	_pmap_preinit(dtbStart, dtbEnd);
-	*uart = '8';
-
 	_hal_platformInit();
-	*uart = '9';
-
 	_hal_consoleInit();
-	*uart = 'a';
-
 	hal_consolePrint(ATTR_USER, "hal: console init done\n");
-
 	_hal_exceptionsInit();
-	*uart = 'b';
-
 	_hal_interruptsInit();
-	*uart = 'c';
-
 	_hal_cpuInit();
-	*uart = 'd';
-
 	_hal_timerInit(SYSTICK_INTERVAL);
-	*uart = 'e';
 
 	return;
 }
