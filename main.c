@@ -71,11 +71,25 @@ static void main_initthr(void *unused)
 	 * _hal_start() reaches _usrv_start() but does not return. Move the
 	 * boundary past user-server startup and test syspage/posix/spawn under
 	 * I-cache.
+	 *
+	 * DISABLED 2026-05-16 22:00 after reproducibility test proved the
+	 * deferred-I-cache boundary is non-deterministic across power-on
+	 * cycles (same image, different stop points). Root cause is the
+	 * BCM2711 SLC retaining firmware-era cache residue that ARM cache
+	 * maintenance ops cannot reach. Fixing this requires a
+	 * BCM2711-specific SLC invalidate path (datasheet study).
+	 *
+	 * Until that lands, leave the asm helper in `_init.S` for the
+	 * future fix but skip the call here so the kernel boots
+	 * deterministically. Pivoting to USB+keyboard / HDMI / SMP work
+	 * which doesn't depend on caches.
 	 */
 	main_uartMark('i');
+#if 0
 	hal_cpuEnableICache();
+#endif
 	main_uartMark('I');
-	hal_consolePrint(ATTR_USER, "main_initthr: icache enabled\n");
+	hal_consolePrint(ATTR_USER, "main_initthr: icache enabled (SKIPPED - SLC non-det)\n");
 	main_uartMark('a');
 
 	main_uartMark('b');

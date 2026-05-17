@@ -512,18 +512,26 @@ el1_entry:
 	orr x1, x1, x2
 	bl _fill_page_descr
 
-	/* TD-04: override the one TTL3 entry covering _hal_syspageCopied as NC */
-	adrp x0, PMAP_COMMON_KERNEL_TTL3
-	ldr x1, [x9, #(SYSPAGE_PKERNEL_OFFSET)]
-	ldr x2, =_hal_syspageCopied
-	ldr x3, =VADDR_KERNEL
-	sub x4, x2, x3
-	lsr x5, x4, #12
-	lsl x5, x5, #3
-	add x6, x1, x4
-	mov x7, #(NC_ATTRS)
-	orr x6, x6, x7
-	str x6, [x0, x5]
+	/* Phase Z3 (2026-05-17): TD-04 NC override DELETED.
+	 *
+	 * Previously this overrode the one TTL3 entry covering
+	 * _hal_syspageCopied to Normal Non-Cacheable (NC_ATTRS) to work
+	 * around a BCM2711 cache-coherency anomaly: plo wrote the syspage
+	 * to that page with caches off, kernel read it back through a
+	 * cacheable mapping, and stale firmware-era cache lines for the
+	 * PA produced bit-level non-determinism in the read-back bytes.
+	 *
+	 * With Phase Z1 the contract is now canonical-zynqmp: plo runs
+	 * caches-on, writes to syspage go through the A72 D-cache, and
+	 * plo's teardown does dc civac over all DDR (clean+invalidate),
+	 * so the kernel reads the same bytes plo wrote. No NC override
+	 * needed.
+	 *
+	 * If real-Pi UART shows syspage-relocation failures or
+	 * _hal_syspageCopied reads coming back wrong under Phase Z, this
+	 * is the first hunk to revert — but the canonical pattern is
+	 * supposed to make it unnecessary.
+	 */
 
 	/* Activate TTBR1 walks (clear EPD1) — still pre-MMU. */
 	mrs x0, tcr_el1
@@ -598,27 +606,43 @@ el1_entry:
 	dsb  ish
 	isb
 
-	/* C-3 deferred-enable variant (2026-05-15 evening): SCTLR.M=1
-	 * only here. Boot reaches _hal_init_c with M-only (known-good
-	 * baseline). D-cache is enabled LATER from C code, after the
-	 * kernel has completed the most error-prone early-init paths
-	 * (syspage relocation, _hal_init platform setup). See
-	 * `hal_cpuEnableDCache` for the late-enable function and
-	 * `main.c` call site after `_hal_init()` returns.
+	/* Phase Z + research insight (2026-05-17): defensive set/way D-cache
+	 * invalidate IMMEDIATELY before the M|C|I flip. Recommended by all
+	 * three research subagents (Linux/ATF/U-Boot, FreeBSD/NetBSD,
+	 * A72-microarch) as the single most-likely-missing step. The
+	 * earlier hal_cpuInvalDataCacheAll at _start (line 351) ran long
+	 * before this point; the A72 L2 prefetcher and L1D hardware
+	 * prefetcher can have speculatively populated lines between then
+	 * and now (DEN0024 §5 notes prefetchers may activate even with
+	 * SCTLR.C=0 on out-of-order cores). Re-invalidate so the cache is
+	 * GUARANTEED empty at the moment M|C|I goes live. */
+	mov x28, x9                       /* preserve syspage PA */
+	bl  hal_cpuInvalDataCacheAll
+	mov x9, x28
+	dsb ish
+	isb
+
+	/* Phase Z2 (2026-05-17): single-shot M|C|I — canonical zynqmp
+	 * aarch64a53 pattern. Pairs with Phase Z1 (plo runs cache-on +
+	 * dc civac teardown), Phase Z3 (delete TD-04 NC overrides), and
+	 * Phase Z4 (delete post-copy clean_inval).
 	 *
-	 * Why deferred:
-	 *   - c3a (M|C|I single-shot): EX=4 handler-self-fault loop
-	 *   - c3b/c3h (M|C cache walks): L1 translation fault FAR=0xfe201018
-	 *   - c3d-g, c3k (M|C NC walks): hang at _hal_init_c first stack store
-	 *   - c3j (staged M-then-C, cache walks): L3 fault on first TTBR1
-	 *     data load after `br x0` to _core_0_virtual
-	 * The kernel reaches _hal_init_c entry reliably at M-only with
-	 * Linux-standard cacheable TCR walks (c3i verified). Enabling C
-	 * later, when the kernel state is known healthy and we can issue
-	 * an explicit `dc isw + ic iallu` ritual right before the SCTLR
-	 * write, isolates the cache-enable from the early-MMU complexity. */
+	 * The previous c3a-c3t experiments tested single-shot, staged,
+	 * NC walks, deferred enable, etc. — ALL failed. Subagent analysis
+	 * concluded those failures were rooted in plo handing off a
+	 * non-canonical state (caches off, dc ivac instead of dc civac);
+	 * the kernel had to work around that contract and the workarounds
+	 * cascaded. With Phase Z1 restoring the canonical plo teardown,
+	 * the kernel should now be able to enable M|C|I in one MSR like
+	 * every other working Phoenix-RTOS port.
+	 *
+	 * If this fails (translation fault on first walk, or EX=4 handler
+	 * self-fault), the Pi 4 / A72 silicon is genuinely incompatible
+	 * with the canonical pattern and we revert to M-only. */
 	mrs  x0, sctlr_el1
-	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M — MMU enable */
+	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
+	orr  x0, x0, #(1 << 2)    /* SCTLR_EL1.C  — D-cache enable */
+	orr  x0, x0, #(1 << 12)   /* SCTLR_EL1.I  — I-cache enable */
 	msr  sctlr_el1, x0
 	isb
 
@@ -863,24 +887,24 @@ _core_0_virtual:
 3:
 	uart_putc_virt 80  /* P marker - syspage copy complete */
 
-	/* Post-copy `_clean_inval_dcache_range` over the LOW-PA dest range.
-	 * Empirically required: with TD-04 NC-dest mapping in place, the
-	 * COPY's str instructions go via the high-VA NC TTL3 entry directly
-	 * to DDR and never touch the A72 D-cache. But the LOW PA still has a
-	 * cacheable mapping in SCRATCH_TT, and removing this post-copy flush
-	 * regressed the boot to "no kernel UART output at all after plo's
-	 * hal: jump exit el1". Probable mechanism: speculative prefetch via
-	 * the cacheable LOW-PA mapping populates cache lines from DDR before
-	 * the COPY completes; the flush invalidates those stale lines so
-	 * later cacheable reads of dest re-fetch from DDR (which has plo's
-	 * correct data). The flush is a no-op for the lines that were never
-	 * populated, and benign even where the LOW-PA mapping covers
-	 * neighbouring kernel data. */
-	adrp x0, VADDR_SYSPAGE
-	add x0, x0, :lo12:VADDR_SYSPAGE
-	ldr x1, [x14, #(SYSPAGE_SIZE_OFFSET)]
-	add x1, x0, x1
-	bl _clean_inval_dcache_range
+	/* Phase Z4 (2026-05-17): post-copy _clean_inval_dcache_range
+	 * DELETED.
+	 *
+	 * The previous flush was needed because:
+	 *   (a) TD-04 NC mapping wrote the dest bytes via uncached path,
+	 *       so DDR had the data but the LOW-PA cacheable alias might
+	 *       have speculatively prefetched stale lines.
+	 *   (b) The kernel ran M-only with caches off, so the LOW-PA
+	 *       cacheable mapping wasn't actually backed by cache —
+	 *       speculation aside.
+	 *
+	 * With Phase Z2 (M|C|I single-shot) and Phase Z3 (no TD-04 NC),
+	 * the syspage copy writes go through the A72 D-cache via the
+	 * cacheable HIGH-VA TTBR1 mapping. Subsequent kernel reads from
+	 * the same VA hit the same cache line (cache coherency holds
+	 * within the core). No flush needed.
+	 *
+	 * zynqmp doesn't do this post-copy flush either. */
 
 	/* TD-16: the syspage copy now only needs TTBR0 for the source reads
 	 * above. Drop the low identity map immediately after the copy and
