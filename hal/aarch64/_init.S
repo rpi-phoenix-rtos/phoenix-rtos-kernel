@@ -663,11 +663,6 @@ el1_entry:
 	and x8, x8, #0xff
 	cbnz x8, _other_core_trap
 
-	/* C-1 (2026-05-15): all kernel TTBR1 PT setup happens pre-MMU at the
-	 * top of el1_entry. The post-MMU duplicate that lived here is
-	 * removed; only the high-VA UART smoke-test print remains. */
-	uart_putc_virt 78
-
 	/* Switch the primary core to the linked higher-half instruction stream.
 	 *
 	 * The firmware/plo handoff loads the kernel at a low physical address, so
@@ -749,15 +744,7 @@ el1_entry:
 	br x0
 
 _core_0_virtual:
-	uart_putc_virt 33  /* '!' - primary core now fetches through TTBR1 */
 
-	/* DEBUG: Marker before former branch point */
-	mov w0, #89  /* ASCII 'Y' - about to enter virtual memory code */
-	bl uart_putc_reg
-
-	/* INLINE the critical _core_0_virtual code to avoid branch issues */
-	uart_putc_virt 79  /* O marker - entered virtual memory code */
-	
 	/* Compute relOffs and hal_syspage using the ABSOLUTE linked high VA
 	 * of _hal_syspageCopied (via literal pool), not the PC-relative form.
 	 *
@@ -844,72 +831,35 @@ _core_0_virtual:
 	sub x0, x0, #1
 	cbnz x0, 2b
 3:
-	uart_putc_virt 80  /* P marker - syspage copy complete */
 
-	/* Phase Z4 (2026-05-17): post-copy _clean_inval_dcache_range
-	 * DELETED.
-	 *
-	 * The previous flush was needed because:
-	 *   (a) TD-04 NC mapping wrote the dest bytes via uncached path,
-	 *       so DDR had the data but the LOW-PA cacheable alias might
-	 *       have speculatively prefetched stale lines.
-	 *   (b) The kernel ran M-only with caches off, so the LOW-PA
-	 *       cacheable mapping wasn't actually backed by cache —
-	 *       speculation aside.
-	 *
-	 * With Phase Z2 (M|C|I single-shot) and Phase Z3 (no TD-04 NC),
-	 * the syspage copy writes go through the A72 D-cache via the
-	 * cacheable HIGH-VA TTBR1 mapping. Subsequent kernel reads from
-	 * the same VA hit the same cache line (cache coherency holds
-	 * within the core). No flush needed.
-	 *
-	 * zynqmp doesn't do this post-copy flush either. */
-
-	/* TD-16: the syspage copy now only needs TTBR0 for the source reads
-	 * above. Drop the low identity map immediately after the copy and
-	 * post-copy maintenance so later bootstrap and C code cannot touch the
-	 * same PA through both TTBR0 and TTBR1 aliases. */
+	/* Syspage copy complete. The kernel now only needs TTBR0 for the
+	 * source reads above; drop the low identity map immediately so
+	 * later bootstrap and C code cannot touch the same PA through
+	 * both TTBR0 and TTBR1 aliases. */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
 	msr ttbr0_el1, x0
 	dsb sy
 	isb
 
-	/* INLINE the critical parts of _set_up_vbar_and_stacks to avoid function call issues */
 	/* Set vector table */
 	adrp x0, _vector_table
 	add x0, x0, :lo12:_vector_table
 	msr vbar_el1, x0
-	
-	/* Debug: After setting vector table (S marker) */
-	uart_putc_virt 83
 
-	/* Set TTBR0 translation table */
+	/* Set TTBR0 translation table (kernel scratch page).
+	 * Strong synchronization around the swap. */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
 	msr ttbr0_el1, x0
-	
-	/* Strong synchronization */
 	isb
 	dsb sy
-	
-	/* Debug: After TTBR0 setup (T marker) */
-	uart_putc_virt 84
 
-	/* Set up kernel stack - AFTER MMU is enabled */
+	/* Set up kernel stack now that MMU is fully active. */
 	msr spsel, #1
 	ldr x0, =PMAP_COMMON_STACK
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
-	
-	/* Debug: After stack setup (U marker) */
-	uart_putc_virt 85
-	
-	/* Final assembly debug marker before branching to C */
-	uart_putc_virt 90  /* ASCII 'Z' - about to enter main() */
-	
-	/* Final debug marker before branching to C */
-	uart_putc_virt 98  /* ASCII 'b' - about to branch to main() */
 
-	/* Branch to main - this is the actual kernel entry point */
+	/* Branch to C kernel entry. */
 	b main
 
 
@@ -1373,178 +1323,22 @@ hal_cpuInvalDataCacheAll:
 .size hal_cpuInvalDataCacheAll, .-hal_cpuInvalDataCacheAll
 
 
-/* hal_cpuEnableDCache — deferred D-cache enable (C-3).
- * hal_cpuEnableICache — deferred I-cache enable (C-3 split).
- *
- * Called from C code in main.c AFTER _hal_init() has succeeded.
- *
- * Both follow the Linux set_sctlr ritual shape:
- *   dsb sy + isb
- *   ic ialluis + dsb ish + tlbi vmalle1is + dsb ish + isb  (pre-flip)
- *   bl hal_cpuInvalDataCacheAll  (set/way invalidate — D-cache enable only)
- *   msr SCTLR with C or I bit set
- *   isb
- *   ic iallu + dsb nsh + isb  (post-flip)
- *
- * Split D and I so we can land them independently. I-cache enable is
- * the lower-risk of the two on Pi 4 (instruction fetch is read-only,
- * .text is loaded by plo without writes through cache, so the same
- * "first cacheable read after enable returns stale data" pattern that
- * keeps biting D-cache enable doesn't apply to I-fetch).
- */
-.align 4
-.globl hal_cpuEnableDCache
-.type hal_cpuEnableDCache, %function
-hal_cpuEnableDCache:
-.cfi_startproc
-	stp x29, x30, [sp, #-16]!
-	mov x29, sp
-
-	dsb sy
-	isb
-
-	ic   ialluis
-	dsb  ish
-	tlbi vmalle1is
-	dsb  ish
-	isb
-
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 2)
-	msr sctlr_el1, x0
-	isb
-
-	ic   iallu
-	dsb  nsh
-	isb
-
-	dsb sy
-	isb
-
-	ldp x29, x30, [sp], #16
-	ret
-.cfi_endproc
-.size hal_cpuEnableDCache, .-hal_cpuEnableDCache
-
-
-.align 4
-.globl hal_cpuEnableICache
-.type hal_cpuEnableICache, %function
-hal_cpuEnableICache:
-.cfi_startproc
-	stp x29, x30, [sp, #-16]!
-	mov x29, sp
-
-	uart_putc_virt 117  /* 'u' - I-cache enable entered */
-	dsb sy
-	isb
-
-	/* Pre-flip text coherency: clean+invalidate the high kernel text
-	 * mapping to PoC, then invalidate the I-cache to PoU. Using PoC here
-	 * is stronger than the usual PoU text sequence and is intentional on
-	 * BCM2711 while the source of stale post-I-enable instruction fetches
-	 * is still being isolated.
-	 *
-	 * Tail-range maintenance (post-_etext .rodata/.bss) was attempted but
-	 * faults: _pmap_preinit() has already mapped .rodata as RO (DESCR_AP2),
-	 * which makes dc ivac permission-fault at level 3. dc cvac would not
-	 * fault but also doesn't help — the cache state of .rodata at this
-	 * point is empty (M-only NC reads) and cleaning has no effect. Leaving
-	 * tail maintenance off; the boundary remains layout-sensitive on
-	 * rebuilds (function/PA shifts → different stale-SLC range hits).
-	 */
-	uart_putc_virt 114  /* 'r' - before dc civac text */
-	ldr x0, =VADDR_KERNEL
-	ldr x1, =_etext
-	bl _clean_inval_dcache_range
-	uart_putc_virt 115  /* 's' - after dc civac text */
-	ldr x0, =VADDR_KERNEL
-	ldr x1, =_etext
-	bl _inval_icache_range
-	uart_putc_virt 116  /* 't' - after ic ivau text */
-	dsb  sy
-	uart_putc_virt 120  /* 'x' - after pre-flip dsb */
-	isb
-	uart_putc_virt 121  /* 'y' - after pre-flip isb */
-	ic   ialluis
-	dsb  ish
-	isb
-	uart_putc_virt 50   /* '2' - after pre-enable I-cache invalidate-all */
-
-	/* Flip SCTLR.I=1. */
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 12)
-	msr sctlr_el1, x0
-	uart_putc_virt 122  /* 'z' - after SCTLR.I write */
-	isb
-	uart_putc_virt 48   /* '0' - after SCTLR.I isb */
-
-	ldp x29, x30, [sp], #16
-	ret
-.cfi_endproc
-.size hal_cpuEnableICache, .-hal_cpuEnableICache
-
-
-.align 4
-.globl hal_cpuEnableCaches
-.type hal_cpuEnableCaches, %function
-hal_cpuEnableCaches:
-.cfi_startproc
-	stp x29, x30, [sp, #-16]!
-	mov x29, sp
-
-	uart_putc_virt 65   /* 'A' - combined cache enable entered */
-	dsb sy
-	isb
-
-	uart_putc_virt 66   /* 'B' - before low-alias VA-range I-cache invalidate */
-	ldr x0, =0x400000
-	ldr x1, =0x640000
-	bl _inval_icache_range
-	uart_putc_virt 67   /* 'C' - after low-alias VA-range I-cache invalidate */
-
-	uart_putc_virt 72   /* 'H' - before high-VA I-cache invalidate */
-	ldr x0, =VADDR_KERNEL
-	ldr x1, =_etext
-	bl _inval_icache_range
-	uart_putc_virt 73   /* 'I' - after high-VA I-cache invalidate */
-
-	uart_putc_virt 68   /* 'D' - before combined D-cache invalidate */
-	bl hal_cpuInvalDataCacheAll
-	uart_putc_virt 69   /* 'E' - after combined D-cache invalidate */
-
-	mrs x0, sctlr_el1
-	orr x0, x0, #(1 << 2)
-	orr x0, x0, #(1 << 12)
-	msr sctlr_el1, x0
-	uart_putc_virt 70   /* 'F' - after combined SCTLR.C/I write */
-	isb
-	uart_putc_virt 71   /* 'G' - after combined SCTLR.C/I isb */
-
-	ldp x29, x30, [sp], #16
-	ret
-.cfi_endproc
-.size hal_cpuEnableCaches, .-hal_cpuEnableCaches
-.ltorg
+/* Deferred-cache-enable helpers (hal_cpuEnableDCache /
+ * hal_cpuEnableICache / hal_cpuEnableCaches) lived here during the
+ * cache-coherency investigation. With the 2026-05-17 armstub fix
+ * (CPUACTLR_EL1[46] erratum 1319367 + L2CTLR_EL1 BCM2711 timing)
+ * the kernel enables M|C|I in one SCTLR write inside el1_entry above;
+ * the deferred helpers were dead code (no callers) and have been
+ * removed. Restore from history if a future use case needs them. */
 
 
 .globl _hal_init
 .type _hal_init, %function
 _hal_init:
-	uart_putc_virt 104  /* 'h' - _hal_init reached before C prologue */
 	msr spsel, #1
 	ldr x0, =PMAP_COMMON_STACK
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
-	uart_putc_virt 82   /* 'R' - early stack reset before C prologue */
-	/* C-3 cleanup 2026-05-15: removed TD-04-hack-2 probe stores
-	 * (markers q/w/u/W/X) that were ad-hoc diagnostic writes to NC
-	 * pages. Under M|C they appear to hang on the first probe store —
-	 * likely a cache-coherency hazard against the _hal_syspageCopied
-	 * NC page that ran fine M-only but breaks with M|C. Removing them
-	 * also matches every other arch's _hal_init shape: msr spsel,
-	 * set sp, branch to C. */
-	uart_putc_virt 73   /* 'I' - sp set, about to branch into _hal_init_c */
 	b _hal_init_c
 .size _hal_init, .-_hal_init
 
