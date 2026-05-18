@@ -72,11 +72,6 @@ static struct {
 
 	/* Debug */
 	unsigned char stackCanary[16];
-	unsigned int sleepTraceActive;
-	unsigned int sleepTraceWakeup;
-	unsigned int sleepTraceIrq;
-	unsigned int pshTraceScheduled;
-	unsigned int scheduleTraceCount;
 	time_t prev;
 } threads_common;
 
@@ -89,45 +84,6 @@ _Static_assert(sizeof(threads_common.ready) / sizeof(threads_common.ready[0]) <=
 static thread_t *_proc_current(void);
 static void _proc_threadDequeue(thread_t *t);
 static int _proc_threadWait(thread_t **queue, time_t timeout, spinlock_ctx_t *scp);
-
-
-static int threads_traceSleepMatch(time_t us, int absolute)
-{
-	return (absolute == 0) && (us == 100000LL);
-}
-
-
-static void threads_traceSleepEnter(void)
-{
-	if (threads_common.sleepTraceActive != 0U) {
-		return;
-	}
-
-	threads_common.sleepTraceActive = 1U;
-	hal_consolePrint(ATTR_USER, "threads: nsleep enter\n");
-}
-
-
-static void threads_traceSleepWakeup(void)
-{
-	if ((threads_common.sleepTraceActive == 0U) || (threads_common.sleepTraceWakeup != 0U)) {
-		return;
-	}
-
-	threads_common.sleepTraceWakeup = 1U;
-	hal_consolePrint(ATTR_USER, "threads: wakeup programmed\n");
-}
-
-
-static void threads_traceSleepIrq(void)
-{
-	if ((threads_common.sleepTraceActive == 0U) || (threads_common.sleepTraceIrq != 0U)) {
-		return;
-	}
-
-	threads_common.sleepTraceIrq = 1U;
-	hal_consolePrint(ATTR_USER, "threads: timer irq\n");
-}
 
 
 static time_t _proc_gettimeRaw(void)
@@ -194,7 +150,6 @@ static void _threads_programWakeup(time_t now, thread_t *minimum)
 	}
 
 	hal_timerSetWakeup((unsigned int)wakeup);
-	threads_traceSleepWakeup();
 }
 
 
@@ -285,8 +240,6 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 		return 1;
 	}
 	/* parasoft-end-suppress MISRAC2012-RULE_14_3 */
-
-	threads_traceSleepIrq();
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 	now = _proc_gettimeRaw();
@@ -448,9 +401,6 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 
 	(void)arg;
 	(void)n;
-	if (threads_common.scheduleTraceCount < 8U) {
-		hal_consolePrint(ATTR_USER, "threads: schedule enter\n");
-	}
 
 	hal_lockScheduler();
 
@@ -497,10 +447,6 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 	LIB_ASSERT(selected != NULL, "no threads to schedule");
 
 	if (selected != NULL) {
-		if (threads_common.scheduleTraceCount < 8U) {
-			hal_consolePrint(ATTR_USER, "threads: selected\n");
-		}
-
 		threads_common.current[hal_cpuGetID()] = selected;
 		_hal_cpuSetKernelStack(selected->kstack + selected->kstacksz);
 		selCtx = selected->context;
@@ -533,17 +479,6 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 		}
 
 		_threads_scheduling(selected);
-		if (threads_common.scheduleTraceCount < 8U) {
-			hal_consolePrint(ATTR_USER, "threads: restoring\n");
-			threads_common.scheduleTraceCount++;
-		}
-
-		if ((threads_common.pshTraceScheduled == 0U) && (selected->process != NULL) && (selected->process->path != NULL) &&
-			(hal_strcmp(selected->process->path, "psh") == 0) && (hal_cpuSupervisorMode(selCtx) == 0)) {
-			threads_common.pshTraceScheduled = 1U;
-			hal_consolePrint(ATTR_USER, "threads: psh user scheduled\n");
-		}
-
 		hal_cpuRestore(context, selCtx);
 
 #if defined(STACK_CANARY) || !defined(NDEBUG)
@@ -722,11 +657,6 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 
 	/* Prepare initial stack */
 	(void)hal_cpuCreateContext(&t->context, start, t->kstack, t->kstacksz, (stack == NULL) ? NULL : (unsigned char *)stack + stacksz, arg, &t->tls);
-	hal_consolePrint(ATTR_USER, "threads: context created\n");
-	lib_printf("threads: create proc=%p path=%s start=%p kstack=%p top=%p pa=%p ctx=%p pc=%p psr=%llx sp=%p\n",
-			process, (process != NULL && process->path != NULL) ? process->path : "<kernel>", (void *)start,
-			t->kstack, t->kstack + t->kstacksz, (void *)pmap_resolve(&threads_common.kmap->pmap, t->kstack),
-			t->context, (void *)t->context->pc, (unsigned long long)t->context->psr, (void *)t->context->sp);
 	threads_canaryInit(t, stack);
 
 	if (process != NULL) {
@@ -745,7 +675,6 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 
 	_threads_waking(t);
 	LIST_ADD(&threads_common.ready[priority], t);
-	hal_consolePrint(ATTR_USER, "threads: ready queued\n");
 
 	hal_spinlockClear(&threads_common.spinlock, &sc);
 
@@ -1111,9 +1040,6 @@ int proc_threadNanoSleep(time_t *sec, long int *nsec, int absolute)
 	}
 
 	us = ((*sec) * 1000LL * 1000LL) + (((time_t)(*nsec) + 999LL) / 1000LL);
-	if (threads_traceSleepMatch(us, absolute) != 0) {
-		threads_traceSleepEnter();
-	}
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 

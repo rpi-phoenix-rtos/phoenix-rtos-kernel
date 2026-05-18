@@ -122,7 +122,6 @@ void _hal_init_c(void)
 	if ((hal_syspage->hs.firmwareDtb != 0u) && (hal_syspage->hs.firmwareDtbSize != 0u)) {
 		dtbStart = hal_syspage->hs.firmwareDtb;
 		dtbEnd = dtbStart + hal_syspage->hs.firmwareDtbSize;
-		hal_consolePrint(ATTR_USER, "hal: using firmware dtb\n");
 	}
 	else {
 		dtb = syspage_progNameResolve("system.dtb");
@@ -138,13 +137,11 @@ void _hal_init_c(void)
 
 		dtbStart = dtb->start;
 		dtbEnd = dtb->end;
-		hal_consolePrint(ATTR_USER, "hal: using syspage dtb\n");
 	}
 
 	_pmap_preinit(dtbStart, dtbEnd);
 	_hal_platformInit();
 	_hal_consoleInit();
-	hal_consolePrint(ATTR_USER, "hal: console init done\n");
 	_hal_exceptionsInit();
 	_hal_interruptsInit();
 	_hal_cpuInit();

@@ -80,24 +80,20 @@ static int name_traceIs(const char *name, const char *match)
 
 static void name_traceRegister(const char *name)
 {
-	if (name_traceIs(name, "/") != 0) {
-		hal_consolePrint(ATTR_USER, "name: register /\n");
-	}
-	else if (name_traceIs(name, "devfs") != 0) {
-		hal_consolePrint(ATTR_USER, "name: register devfs\n");
-	}
+	(void)name;
 }
 
 
 static int name_traceDevfsLookup(const char *name)
 {
-	return name_traceIs(name, "devfs");
+	(void)name;
+	return 0;
 }
 
 
 static void name_traceDevfs(const char *msg)
 {
-	hal_consolePrint(ATTR_USER, msg);
+	(void)msg;
 }
 
 
