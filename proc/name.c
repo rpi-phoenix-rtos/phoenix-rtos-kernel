@@ -84,10 +84,18 @@ static void name_traceRegister(const char *name)
 }
 
 
+/* Despite the historical name, this is also the devfs-fast-path
+ * predicate used at the top of proc_portLookup() — when it returns
+ * non-zero AND devfs has registered, the lookup short-circuits to
+ * the cached devfs_oid without going through proc_send to the root
+ * server. Returning a constant 0 here (as a previous cleanup pass
+ * did) silently breaks the fast path and makes every devfs lookup
+ * fall through to a dcache-then-root-server query — which races
+ * with devfs's own portRegister during cold boot and produces
+ * 20-second `td14: send` IPC hangs. */
 static int name_traceDevfsLookup(const char *name)
 {
-	(void)name;
-	return 0;
+	return name_traceIs(name, "devfs");
 }
 
 
