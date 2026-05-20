@@ -663,6 +663,80 @@ el1_entry:
 	and x8, x8, #0xff
 	cbnz x8, _other_core_trap
 
+	/* SMP Phase A (2026-05-20): release CPU 1 from the armstub
+	 * spin-table.
+	 *
+	 * Why here, in _init.S, instead of from main(): if we deferred
+	 * the release until after C-level _hal_init() ran, _hal_init's
+	 * device mappings (GIC, console) would have populated dynamic
+	 * entries in PMAP_COMMON_DEVICES_TTL3 that secondary cores —
+	 * which re-run all of el1_entry per the "race-free same-write
+	 * convergence" comment at line ~426 — would then wipe via the
+	 * `bl _fill_page_zero` on DEVICES_TTL3.
+	 *
+	 * By releasing now (still in low-PA, before primary continues to
+	 * main()), secondaries run their idempotent re-pass of static PT
+	 * setup BEFORE any dynamic mappings exist, then park in
+	 * _other_core_trap waiting for nCpusStarted. Primary's later
+	 * dynamic mappings then happen on a stable shared PT.
+	 *
+	 * The armstub at PA 0 holds:
+	 *   0xd8: spin_cpu0  0xe0: spin_cpu1  0xe8: spin_cpu2  0xf0: spin_cpu3
+	 * Each cell is 8 bytes. Armstub's secondary_spin polls spin_cpuN
+	 * (indexed by MPIDR & 3) and jumps to the value once non-zero.
+	 *
+	 * TTBR0's 1 GB Normal-NC identity block covers PA 0..0x40000000,
+	 * so a plain store at low VA 0xe0 hits PA 0xe0 directly. NC mapping
+	 * means no D-cache involvement; `dsb sy; sev` is the entire
+	 * synchronisation barrier.
+	 *
+	 * Phase A only wakes CPU 1; CPU 2 and CPU 3 stay parked in the
+	 * armstub. Phase D will lift the bound to all three secondaries
+	 * (and bump NUM_CPUS to 4 in config.h to wire them into the
+	 * scheduler). */
+	uart_putc 0x52                       /* 'R' — release start */
+	adrp x10, _start
+	add  x10, x10, #:lo12:_start
+	uart_putc 0x53                       /* 'S' — _start PA computed */
+	mov  x11, #0xe0                     /* spin_cpu1 absolute PA */
+	/* Read pre-write value at PA 0xe0 and emit it nibble-by-nibble
+	 * (16 hex digits + space) so we can confirm armstub is at PA 0.
+	 * If the read returns 0, armstub spin_cpu1 is intact. If it
+	 * returns code or garbage, the armstub is elsewhere/clobbered. */
+	ldr  x12, [x11]
+	mov  x13, #16                        /* 16 nibbles to print */
+	uart_putc 0x70                       /* 'p' — pre */
+	uart_putc 0x3d                       /* '=' */
+.LprintNibble:
+	sub  x13, x13, #1
+	lsl  x14, x13, #2                    /* x14 = nibble index * 4 */
+	lsr  x15, x12, x14
+	and  x15, x15, #0xf
+	cmp  x15, #10
+	b.lo 1f
+	add  x15, x15, #('a' - 10)
+	b    2f
+1:
+	add  x15, x15, #'0'
+2:
+	/* inline uart_putc using x15 as the char */
+	mov  x4, x15
+9992:
+	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
+	ldr w5, [x3]
+	tst w5, #UARTFR_TXFF
+	b.ne 9992b
+	ldr x3, =PL011_TTY_BASE
+	str w4, [x3]
+	cbnz x13, .LprintNibble
+	uart_putc 0x20                       /* ' ' separator */
+	str  x10, [x11]
+	uart_putc 0x57                       /* 'W' — wrote to spin_cpu1 */
+	dsb  sy
+	sev
+	uart_putc 0x65                       /* 'e' — event sent */
+	uart_putc 10                         /* newline */
+
 	/* Switch the primary core to the linked higher-half instruction stream.
 	 *
 	 * The firmware/plo handoff loads the kernel at a low physical address, so
@@ -864,10 +938,25 @@ _core_0_virtual:
 
 
 _other_core_trap:
+	/* SMP Phase A diagnostic: emit 't' on entry, then busy-poll on
+	 * nCpusStarted until it goes non-zero, then 'v'. Originally this
+	 * was a `wfe; cbz; b 1b` loop, but on the Pi 4 only one WFE wake
+	 * was observed and nCpusStarted still read as 0 — pointing at
+	 * either (a) primary's `nCpusStarted++` not actually generating
+	 * the WFE-wake event (plain stores don't, per ARM ARM A1.6.4)
+	 * or (b) some cache-visibility issue between primary and secondary.
+	 * The busy-poll sidesteps (a) and forces a fresh read every
+	 * iteration to also sidestep (b). yield is a hint to the CPU
+	 * scheduler that we're spinning. Remove these markers in Phase B. */
+	uart_putc 0x74                       /* 't' — trap entered */
 	dsb ish
-	wfe
+1:
 	ldr w0, [x1, #:lo12:nCpusStarted]
-	cbz w0, _other_core_trap
+	cbnz w0, 2f
+	yield
+	b 1b
+2:
+	uart_putc 0x76                       /* 'v' — proceed to virtual */
 
 	/* Ensure changes to translation tables are visible */
 	dsb ish
@@ -883,11 +972,12 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
-	bl _set_up_vbar_and_stacks
-	bl _hal_interruptsInitPerCPU
-	bl _hal_cpuInit
-
-	msr daifClr, #7
+	/* SMP Phase A: bare-minimum park. No UART print, no per-CPU
+	 * init — just mask all DAIF and WFI forever. This isolates the
+	 * Phase A wake-up path from any later crash that might loop the
+	 * secondary back through el1_entry. Phase B will re-add markers
+	 * and per-CPU init incrementally. */
+	msr daifSet, #0xf                   /* mask D, A, I, F */
 1:
 	wfi
 	b 1b

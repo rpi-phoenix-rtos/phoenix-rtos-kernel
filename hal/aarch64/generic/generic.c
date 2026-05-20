@@ -100,12 +100,25 @@ void _hal_platformInit(void)
 
 void _hal_cpuInit(void)
 {
+	/* SMP Phase A diagnostic: confirm primary reaches here. */
+	hal_consolePrint(ATTR_USER, "hal_cpuInit: entry\n");
+
 	if (hal_started() == 0) {
 		nCpusStarted++;
-		return;
+	}
+	else {
+		hal_cpuAtomicInc(&nCpusStarted);
 	}
 
-	hal_cpuAtomicInc(&nCpusStarted);
+	/* SMP Phase A (2026-05-21): broadcast SEV so secondary cores in
+	 * _other_core_trap (parked in WFE waiting for nCpusStarted != 0)
+	 * actually wake. Even with the WFE→busy-poll change in _init.S
+	 * (which removes the event-wake dependency), we keep the SEV here
+	 * — it's free, and it's the right thing for any future code path
+	 * that genuinely waits on this counter via WFE. */
+	__asm__ volatile ("dsb ish\n sev" ::: "memory");
+
+	hal_consolePrint(ATTR_USER, "hal_cpuInit: done\n");
 }
 
 
