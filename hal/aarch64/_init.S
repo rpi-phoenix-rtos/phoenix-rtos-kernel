@@ -663,79 +663,13 @@ el1_entry:
 	and x8, x8, #0xff
 	cbnz x8, _other_core_trap
 
-	/* SMP Phase A (2026-05-20): release CPU 1 from the armstub
-	 * spin-table.
-	 *
-	 * Why here, in _init.S, instead of from main(): if we deferred
-	 * the release until after C-level _hal_init() ran, _hal_init's
-	 * device mappings (GIC, console) would have populated dynamic
-	 * entries in PMAP_COMMON_DEVICES_TTL3 that secondary cores —
-	 * which re-run all of el1_entry per the "race-free same-write
-	 * convergence" comment at line ~426 — would then wipe via the
-	 * `bl _fill_page_zero` on DEVICES_TTL3.
-	 *
-	 * By releasing now (still in low-PA, before primary continues to
-	 * main()), secondaries run their idempotent re-pass of static PT
-	 * setup BEFORE any dynamic mappings exist, then park in
-	 * _other_core_trap waiting for nCpusStarted. Primary's later
-	 * dynamic mappings then happen on a stable shared PT.
-	 *
-	 * The armstub at PA 0 holds:
-	 *   0xd8: spin_cpu0  0xe0: spin_cpu1  0xe8: spin_cpu2  0xf0: spin_cpu3
-	 * Each cell is 8 bytes. Armstub's secondary_spin polls spin_cpuN
-	 * (indexed by MPIDR & 3) and jumps to the value once non-zero.
-	 *
-	 * TTBR0's 1 GB Normal-NC identity block covers PA 0..0x40000000,
-	 * so a plain store at low VA 0xe0 hits PA 0xe0 directly. NC mapping
-	 * means no D-cache involvement; `dsb sy; sev` is the entire
-	 * synchronisation barrier.
-	 *
-	 * Phase A only wakes CPU 1; CPU 2 and CPU 3 stay parked in the
-	 * armstub. Phase D will lift the bound to all three secondaries
-	 * (and bump NUM_CPUS to 4 in config.h to wire them into the
-	 * scheduler). */
-	uart_putc 0x52                       /* 'R' — release start */
-	adrp x10, _start
-	add  x10, x10, #:lo12:_start
-	uart_putc 0x53                       /* 'S' — _start PA computed */
-	mov  x11, #0xe0                     /* spin_cpu1 absolute PA */
-	/* Read pre-write value at PA 0xe0 and emit it nibble-by-nibble
-	 * (16 hex digits + space) so we can confirm armstub is at PA 0.
-	 * If the read returns 0, armstub spin_cpu1 is intact. If it
-	 * returns code or garbage, the armstub is elsewhere/clobbered. */
-	ldr  x12, [x11]
-	mov  x13, #16                        /* 16 nibbles to print */
-	uart_putc 0x70                       /* 'p' — pre */
-	uart_putc 0x3d                       /* '=' */
-.LprintNibble:
-	sub  x13, x13, #1
-	lsl  x14, x13, #2                    /* x14 = nibble index * 4 */
-	lsr  x15, x12, x14
-	and  x15, x15, #0xf
-	cmp  x15, #10
-	b.lo 1f
-	add  x15, x15, #('a' - 10)
-	b    2f
-1:
-	add  x15, x15, #'0'
-2:
-	/* inline uart_putc using x15 as the char */
-	mov  x4, x15
-9992:
-	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
-	ldr w5, [x3]
-	tst w5, #UARTFR_TXFF
-	b.ne 9992b
-	ldr x3, =PL011_TTY_BASE
-	str w4, [x3]
-	cbnz x13, .LprintNibble
-	uart_putc 0x20                       /* ' ' separator */
-	str  x10, [x11]
-	uart_putc 0x57                       /* 'W' — wrote to spin_cpu1 */
-	dsb  sy
-	sev
-	uart_putc 0x65                       /* 'e' — event sent */
-	uart_putc 10                         /* newline */
+	/* SMP Phase A: plo's hal_cpuJump handles the secondary release
+	 * (writes hal_common.entry into spin_cpu1/2/3 + SEV right before
+	 * mmu_disable). The kernel-side release code that lived here was
+	 * redundant and had a side effect of generating extra SEV events
+	 * that contributed to secondaries cycling through el1_entry
+	 * multiple times. Removed 2026-05-21; plo is the single source
+	 * of truth for the spin-table handoff. */
 
 	/* Switch the primary core to the linked higher-half instruction stream.
 	 *
