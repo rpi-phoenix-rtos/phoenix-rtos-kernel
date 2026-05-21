@@ -872,26 +872,17 @@ _core_0_virtual:
 
 
 _other_core_trap:
-	/* SMP Phase A diagnostic: emit 't' on entry, then busy-poll on
-	 * nCpusStarted until it goes non-zero, then 'v'. Originally this
-	 * was a `wfe; cbz; b 1b` loop, but on the Pi 4 only one WFE wake
-	 * was observed and nCpusStarted still read as 0 — pointing at
-	 * either (a) primary's `nCpusStarted++` not actually generating
-	 * the WFE-wake event (plain stores don't, per ARM ARM A1.6.4)
-	 * or (b) some cache-visibility issue between primary and secondary.
-	 * The busy-poll sidesteps (a) and forces a fresh read every
-	 * iteration to also sidestep (b). yield is a hint to the CPU
-	 * scheduler that we're spinning. Remove these markers in Phase B. */
-	uart_putc 0x74                       /* 't' — trap entered */
+	/* WFE-poll on nCpusStarted: now that _hal_cpuInit explicitly
+	 * SEVs after incrementing (see hal/aarch64/generic/generic.c),
+	 * a WFE-based wait is reliable and dramatically cheaper than the
+	 * busy-poll variant. The busy-poll loop saturated memory
+	 * bandwidth across 3 secondaries enough to delay primary's
+	 * pcie/xhci enumeration past the 360 s capture window. */
 	dsb ish
 1:
+	wfe
 	ldr w0, [x1, #:lo12:nCpusStarted]
-	cbnz w0, 2f
-	yield
-	b 1b
-2:
-	uart_putc 0x76                       /* 'v' — proceed to virtual */
-
+	cbz w0, 1b
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
@@ -906,17 +897,13 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
-	/* SMP Phase A: bare-minimum park. No UART print on entry, no
-	 * per-CPU init — just mask all DAIF and WFI forever. Phase A
-	 * goal is the wake-up path; per-CPU init is Phase B.
-	 *
-	 * If secondaries ever leave the WFI loop (spurious wake, async
-	 * abort, ...) emit a 'q' marker so we can detect that during
-	 * Phase B diagnosis. */
+	/* SMP Phase A: bare-minimum park. No UART markers (they were
+	 * slowing the boot through pl011-tty contention), no per-CPU
+	 * init — just mask all DAIF and WFI forever. Per-CPU init
+	 * (vbar/stacks, interrupts, cpuInit) is Phase B. */
 	msr daifSet, #0xf                   /* mask D, A, I, F */
 1:
 	wfi
-	uart_putc_virt 0x71                 /* 'q' — wfi unexpectedly returned */
 	b 1b
 
 
