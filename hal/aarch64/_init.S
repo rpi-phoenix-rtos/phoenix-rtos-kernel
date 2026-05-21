@@ -663,14 +663,6 @@ el1_entry:
 	and x8, x8, #0xff
 	cbnz x8, _other_core_trap
 
-	/* SMP Phase A: plo's hal_cpuJump handles the secondary release
-	 * (writes hal_common.entry into spin_cpu1/2/3 + SEV right before
-	 * mmu_disable). The kernel-side release code that lived here was
-	 * redundant and had a side effect of generating extra SEV events
-	 * that contributed to secondaries cycling through el1_entry
-	 * multiple times. Removed 2026-05-21; plo is the single source
-	 * of truth for the spin-table handoff. */
-
 	/* Switch the primary core to the linked higher-half instruction stream.
 	 *
 	 * The firmware/plo handoff loads the kernel at a low physical address, so
@@ -872,17 +864,11 @@ _core_0_virtual:
 
 
 _other_core_trap:
-	/* WFE-poll on nCpusStarted: now that _hal_cpuInit explicitly
-	 * SEVs after incrementing (see hal/aarch64/generic/generic.c),
-	 * a WFE-based wait is reliable and dramatically cheaper than the
-	 * busy-poll variant. The busy-poll loop saturated memory
-	 * bandwidth across 3 secondaries enough to delay primary's
-	 * pcie/xhci enumeration past the 360 s capture window. */
 	dsb ish
-1:
 	wfe
 	ldr w0, [x1, #:lo12:nCpusStarted]
-	cbz w0, 1b
+	cbz w0, _other_core_trap
+
 	/* Ensure changes to translation tables are visible */
 	dsb ish
 	isb
@@ -897,11 +883,11 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
-	/* SMP Phase A: bare-minimum park. No UART markers (they were
-	 * slowing the boot through pl011-tty contention), no per-CPU
-	 * init — just mask all DAIF and WFI forever. Per-CPU init
-	 * (vbar/stacks, interrupts, cpuInit) is Phase B. */
-	msr daifSet, #0xf                   /* mask D, A, I, F */
+	bl _set_up_vbar_and_stacks
+	bl _hal_interruptsInitPerCPU
+	bl _hal_cpuInit
+
+	msr daifClr, #7
 1:
 	wfi
 	b 1b
