@@ -972,14 +972,17 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
-	/* SMP Phase A: bare-minimum park. No UART print, no per-CPU
-	 * init — just mask all DAIF and WFI forever. This isolates the
-	 * Phase A wake-up path from any later crash that might loop the
-	 * secondary back through el1_entry. Phase B will re-add markers
-	 * and per-CPU init incrementally. */
+	/* SMP Phase A: bare-minimum park. No UART print on entry, no
+	 * per-CPU init — just mask all DAIF and WFI forever. Phase A
+	 * goal is the wake-up path; per-CPU init is Phase B.
+	 *
+	 * If secondaries ever leave the WFI loop (spurious wake, async
+	 * abort, ...) emit a 'q' marker so we can detect that during
+	 * Phase B diagnosis. */
 	msr daifSet, #0xf                   /* mask D, A, I, F */
 1:
 	wfi
+	uart_putc_virt 0x71                 /* 'q' — wfi unexpectedly returned */
 	b 1b
 
 
