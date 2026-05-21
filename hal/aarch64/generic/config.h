@@ -18,7 +18,15 @@
 #include <board_config.h>
 
 #define ASID_BITS       16U
-#define NUM_CPUS        1U
+/* Pi 4 / BCM2711 Cortex-A72 cluster has 4 cores. Secondaries reach
+ * the kernel's `_other_core_virtual` WFI loop via plo's SMP Phase A
+ * handoff (board_config PLO_SMP_ENABLE=1). With NUM_CPUS=4 the
+ * spinlock paths use real LDAXR/STXR, the GIC distributor mask is
+ * 4-bit, and the scheduler iterates over all 4 CPUs. Secondaries
+ * still park in WFI until Phase C teaches them to enter the
+ * scheduler — but bumping NUM_CPUS first surfaces any latent
+ * single-CPU assumptions in the primary boot path. */
+#define NUM_CPUS        4U
 #define SIZE_INTERRUPTS 256U
 
 #ifndef PL011_TTY_BASE
