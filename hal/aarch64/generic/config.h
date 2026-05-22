@@ -18,15 +18,25 @@
 #include <board_config.h>
 
 #define ASID_BITS       16U
-/* Pi 4 / BCM2711 Cortex-A72 cluster has 4 cores. Secondaries reach
- * the kernel's `_other_core_virtual` WFI loop via plo's SMP Phase A
- * handoff (board_config PLO_SMP_ENABLE=1). With NUM_CPUS=4 the
- * spinlock paths use real LDAXR/STXR, the GIC distributor mask is
- * 4-bit, and the scheduler iterates over all 4 CPUs. Secondaries
- * still park in WFI until Phase C teaches them to enter the
- * scheduler — but bumping NUM_CPUS first surfaces any latent
- * single-CPU assumptions in the primary boot path. */
-#define NUM_CPUS        4U
+/* Pi 4 / BCM2711 has 4 Cortex-A72 cores, but the Pi 4 firmware does
+ * NOT reliably bring them all up into the armstub on cold boot
+ * (multi-run UART marker capture, 2026-05-23: cpu0 never reaches
+ * armstub `in_el2`, secondaries reach it 0-or-1 times per boot —
+ * effectively random). Without a PSCI smc handler or a memory-poke
+ * wakeup path that targets cpu1/2/3 specifically, Phoenix-RTOS
+ * cannot count on the standard armstub spin-table protocol to
+ * release secondaries.
+ *
+ * Until that wakeup path is implemented, NUM_CPUS stays at 1 so
+ * the primary boot path is unaffected. The kernel-side machinery
+ * already in place (per-CPU stacks in _set_up_vbar_and_stacks,
+ * SEV after nCpusStarted bump in _hal_cpuInit, per-CPU timer arm
+ * in _hal_timerInitPerCPU, banked-PPI enable in
+ * _hal_interruptsInitPerCPU) is preserved on the agent branch for
+ * the next SMP push. See WIP commits 979e05c0 (kernel) /
+ * 6fa161c (phoenix-rtos-project) / 750b7fd (plo) for full
+ * investigation notes. */
+#define NUM_CPUS        1U
 #define SIZE_INTERRUPTS 256U
 
 #ifndef PL011_TTY_BASE
