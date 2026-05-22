@@ -350,9 +350,23 @@ void _hal_interruptsInit(void)
 }
 
 
+/* SMP Phase D observability: per-CPU bring-up counters.
+ *   [cpuId] in interruptsInitPerCpu = entered _hal_interruptsInitPerCPU
+ *   [cpuId] in interruptsEnabledPpi = enabled the timer PPI in
+ *                                     GICD_ISENABLER0 (secondaries only)
+ * primary's main_initthr prints these after the spawn loop. */
+volatile unsigned int hal_smpInterruptsInitPerCpuCount[8];
+volatile unsigned int hal_smpInterruptsEnabledPpiCount[8];
+
+
 void _hal_interruptsInitPerCPU(void)
 {
 	unsigned int timerIrq;
+	unsigned int myCpuId = hal_cpuGetID();
+
+	if (myCpuId < (sizeof(hal_smpInterruptsInitPerCpuCount) / sizeof(hal_smpInterruptsInitPerCpuCount[0]))) {
+		hal_cpuAtomicInc(&hal_smpInterruptsInitPerCpuCount[myCpuId]);
+	}
 
 	*(interrupts_common.gicc + gicc_ctlr) &= ~0x3U;
 
@@ -379,7 +393,7 @@ void _hal_interruptsInitPerCPU(void)
 	 * SEV → _hal_timerInit back-to-back). Primary itself doesn't
 	 * need to do anything here — its later hal_interruptsSetHandler
 	 * for the timer enables its own banked bit. */
-	if (hal_cpuGetID() != 0U) {
+	if (myCpuId != 0U) {
 		do {
 			timerIrq = hal_timerIrq();
 			if (timerIrq != 0U) {
@@ -389,6 +403,9 @@ void _hal_interruptsInitPerCPU(void)
 		} while (1);
 		if (timerIrq < SPI_FIRST_IRQID) {
 			interrupts_enableIRQ(timerIrq);
+			if (myCpuId < (sizeof(hal_smpInterruptsEnabledPpiCount) / sizeof(hal_smpInterruptsEnabledPpiCount[0]))) {
+				hal_cpuAtomicInc(&hal_smpInterruptsEnabledPpiCount[myCpuId]);
+			}
 		}
 	}
 }

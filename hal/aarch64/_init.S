@@ -864,6 +864,22 @@ _core_0_virtual:
 
 
 _other_core_trap:
+	/* SMP Phase D trap marker — "$1"/"$2"/"$3" per wakeup iteration.
+	 * Each WFE wakeup attempt emits one marker. Lets us count how
+	 * many times each secondary wakes and reads nCpusStarted as 0
+	 * vs. !=0. Even one occurrence proves the trap was reached. */
+	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9202:
+	ldr w5, [x7]
+	tst w5, #UARTFR_TXFF
+	b.ne 9202b
+	ldr x7, =PL011_TTY_BASE
+	mov w6, #'$'
+	str w6, [x7]
+	mov x6, x8
+	add w6, w6, #'0'
+	str w6, [x7]
+
 	dsb ish
 	wfe
 	ldr w0, [x1, #:lo12:nCpusStarted]
@@ -883,8 +899,52 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
+	/* SMP Phase D marker (top of _other_core_virtual): "@1"/"@2"/"@3"
+	 * — secondary just exited _other_core_trap's WFE-loop with
+	 * nCpusStarted!=0 and reached the per-CPU init sequence. The '@'
+	 * prefix is rare in normal kernel output so the trailing digit is
+	 * easy to attribute. */
+	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9101:
+	ldr w5, [x7]
+	tst w5, #UARTFR_TXFF
+	b.ne 9101b
+	ldr x7, =PL011_TTY_BASE
+	mov w6, #'@'
+	str w6, [x7]
+	mov x6, x8
+	add w6, w6, #'0'
+	str w6, [x7]
+
 	bl _set_up_vbar_and_stacks
+
+	/* SMP Phase D marker after _set_up_vbar_and_stacks ("#1"/"#2"/"#3"). */
+	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9102:
+	ldr w5, [x7]
+	tst w5, #UARTFR_TXFF
+	b.ne 9102b
+	ldr x7, =PL011_TTY_BASE
+	mov w6, #'#'
+	str w6, [x7]
+	mov x6, x8
+	add w6, w6, #'0'
+	str w6, [x7]
+
 	bl _hal_interruptsInitPerCPU
+
+	/* SMP Phase D marker after _hal_interruptsInitPerCPU ("&1"/"&2"/"&3"). */
+	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9103:
+	ldr w5, [x7]
+	tst w5, #UARTFR_TXFF
+	b.ne 9103b
+	ldr x7, =PL011_TTY_BASE
+	mov w6, #'&'
+	str w6, [x7]
+	mov x6, x8
+	add w6, w6, #'0'
+	str w6, [x7]
 	bl _hal_cpuInit
 	/* SMP Phase C step 3: program this CPU's per-CPU architectural
 	 * timer (CNTV_CVAL_EL0 + CNTV_CTL_EL0 are banked per CPU). The
@@ -930,48 +990,54 @@ _fill_page_descr:
 	ret
 
 _set_up_vbar_and_stacks:
-	/* Assumptions:
-	 * Running in kernel virtual memory (above VADDR_KERNEL)
-	 * x8 => CPU ID
-	 * clobbers x0, x1 */
-	/* Set vector table */
+	/* Per-CPU bring-up. Called only by secondaries (primary inlines the
+	 * equivalent setup before `b main`). Assumptions:
+	 *   - Running in kernel virtual memory (above VADDR_KERNEL).
+	 *   - x8 holds this CPU's MPIDR Aff0 (set at line ~662 in the shared
+	 *     entry path before the cbnz that branches secondaries here).
+	 *
+	 * Critical fix (SMP Phase D, 2026-05-22): this function previously
+	 * called `bl uart_putc_reg` twice for "S"/"T" debug markers without
+	 * saving LR, so the inner `bl`s clobbered x30 and the function's
+	 * own `ret` jumped back into its own body — secondaries livelocked
+	 * mid-bringup, never reaching _hal_interruptsInitPerCPU /
+	 * _hal_timerInitPerCPU. The debug markers are removed entirely
+	 * (Phase A/B already established that secondaries do enter this
+	 * code path), so no inner `bl` is needed.
+	 *
+	 * Critical fix (same commit): every secondary used to set SP to
+	 * `PMAP_COMMON_STACK + SIZE_INITIAL_KSTACK` — the top of CPU 0's
+	 * stack slot, shared by all secondaries. C frames from concurrent
+	 * secondaries clobbered each other. pmap.c reserves
+	 * `stack[NUM_CPUS][SIZE_INITIAL_KSTACK]` starting at
+	 * PMAP_COMMON_STACK, so we just index by CPU ID:
+	 *   SP = PMAP_COMMON_STACK + (cpu_id + 1) * SIZE_INITIAL_KSTACK
+	 * (i.e. top of stack[cpu_id], growing down into its slot).
+	 *
+	 * clobbers x0, x1, x2 */
+
+	/* Vector table */
 	adrp x0, _vector_table
 	add x0, x0, :lo12:_vector_table
 	msr vbar_el1, x0
-	
-	/* Debug: After setting vector table */
-	mov w0, #83
-	bl uart_putc_reg
+	isb
 
-	/* Set TTBR0 translation table to the page that was cleared out earlier. */
+	/* TTBR0 = scratch (kept idempotent: _other_core_trap already wrote
+	 * the same value before branching here, but a second write costs
+	 * nothing and keeps the function self-contained). */
 	adrp x0, PMAP_COMMON_SCRATCH_PAGE
 	msr ttbr0_el1, x0
-	
-	/* Strong synchronization to ensure TTBR0 switch completes */
 	isb
 	dsb sy
-	
-	/* Debug: After TTBR0 setup */
-	mov w0, #84
-	bl uart_putc_reg
 
-	/* Set up kernel stack per core - MINIMAL VERSION */
+	/* Switch to SP_EL1 and install this CPU's dedicated stack. */
 	msr spsel, #1
-	
-	/* Use absolute minimum stack setup - just set SP to a safe address */
 	adrp x0, PMAP_COMMON_STACK
-	mov x1, SIZE_INITIAL_KSTACK
+	add x1, x8, #1
+	mov x2, SIZE_INITIAL_KSTACK
+	mul x1, x1, x2
 	add sp, x0, x1
-	
-	/* Inline UART debug immediately after stack setup */
-	ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
-1:	ldr w4, [x3]
-	tst w4, #UARTFR_TXFF
-	b.ne 1b
-	ldr x3, =PL011_TTY_BASE
-	mov w4, #85  /* U marker */
-	str w4, [x3]
-	
+
 	ret
 
 .size _start, .-_start

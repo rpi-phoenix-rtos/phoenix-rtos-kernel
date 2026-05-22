@@ -227,15 +227,30 @@ static void _threads_updateWakeup(time_t now, thread_t *minimum)
 }
 
 
+/* SMP Phase D observability: per-CPU timer-tick counter. Incremented
+ * on every timer ISR. Primary's main_initthr prints a snapshot of all
+ * four counters after the syspage spawn loop, so we can confirm
+ * cores 1-3 actually receive their PPI and call into the scheduler.
+ * Once Phase D is closed and we have higher-level evidence that
+ * threads run on secondaries, this can be promoted to a debug syscall
+ * (or removed entirely). */
+volatile unsigned int threads_smpTickCount[8];
+
+
 static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 {
 	thread_t *t;
 	time_t now;
 	spinlock_ctx_t sc;
+	unsigned int myCpuId = hal_cpuGetID();
+
+	if (myCpuId < (sizeof(threads_smpTickCount) / sizeof(threads_smpTickCount[0]))) {
+		hal_cpuAtomicInc(&threads_smpTickCount[myCpuId]);
+	}
 
 	/* parasoft-begin-suppress MISRAC2012-RULE_14_3 "hal_cpuGetID()'s return value might
 	 * not be known at compile time for different architectures" */
-	if (hal_cpuGetID() != 0U) {
+	if (myCpuId != 0U) {
 		/* Invoke scheduler */
 		return 1;
 	}

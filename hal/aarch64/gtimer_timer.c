@@ -92,6 +92,14 @@ void _hal_timerInit(u32 interval)
 }
 
 
+/* SMP Phase D observability: per-CPU bring-up counters. Bumped from
+ * _hal_timerInitPerCPU below; primary's main_initthr prints them after
+ * the spawn loop so we can see whether secondaries reached this code
+ * at all. cpu0 stays 0 — primary's _hal_timerInit is the equivalent
+ * entry point and it doesn't call this function. */
+volatile unsigned int hal_smpTimerInitPerCpuCount[8];
+
+
 /* SMP Phase C step 3: arm this CPU's per-CPU architectural timer so
  * it actually fires the PPI we enabled in _hal_interruptsInitPerCPU.
  * `CNTV_CVAL_EL0` / `CNTV_CTL_EL0` are banked per-CPU, so each
@@ -100,6 +108,12 @@ void _hal_timerInit(u32 interval)
  * routes the timer PPI but the timer never asserts. */
 void _hal_timerInitPerCPU(void)
 {
+	unsigned int cpuId = hal_cpuGetID();
+
+	if (cpuId < (sizeof(hal_smpTimerInitPerCpuCount) / sizeof(hal_smpTimerInitPerCpuCount[0]))) {
+		hal_cpuAtomicInc(&hal_smpTimerInitPerCpuCount[cpuId]);
+	}
+
 	if (timer_common.ready == 0) {
 		return;
 	}

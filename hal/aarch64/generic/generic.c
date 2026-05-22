@@ -102,10 +102,21 @@ void _hal_cpuInit(void)
 {
 	if (hal_started() == 0) {
 		nCpusStarted++;
+		/* Wake any secondary stuck in _other_core_trap's WFE. Primary's
+		 * non-atomic store above released the gate that secondaries
+		 * poll on, but WFE only wakes on SEV (or a system event such as
+		 * an interrupt). Without this, secondaries park forever and
+		 * never reach _other_core_virtual on a NUM_CPUS>1 build.
+		 * The store is followed by a release barrier so secondaries
+		 * observe nCpusStarted!=0 before they see the event. */
+		hal_cpuDataSyncBarrier();
+		hal_cpuSignalEvent();
 		return;
 	}
 
 	hal_cpuAtomicInc(&nCpusStarted);
+	hal_cpuDataSyncBarrier();
+	hal_cpuSignalEvent();
 }
 
 
