@@ -957,6 +957,23 @@ _other_core_trap:
 	br x0
 
 _other_core_virtual:
+#if NUM_CPUS == 1
+	/* NUM_CPUS=1: park secondaries here forever. They reached
+	 * _other_core_trap from the shared `cbnz x8, _other_core_trap`
+	 * (which is unconditional on the assembly side regardless of
+	 * NUM_CPUS), exited the WFE loop on primary's nCpusStarted
+	 * bump, and now arrived here. Without this guard they would
+	 * call into C helpers (_hal_interruptsInitPerCPU,
+	 * _hal_timerInitPerCPU, etc.) which assume per-CPU state the
+	 * kernel hasn't allocated when NUM_CPUS==1 — and which writes
+	 * GIC/CPU-interface registers concurrently with primary, causing
+	 * primary to hang. */
+	msr daifSet, #0xf
+9100:
+	wfi
+	b 9100b
+#endif
+
 	/* SMP Phase D marker (top of _other_core_virtual): "@1"/"@2"/"@3"
 	 * — secondary just exited _other_core_trap's WFE-loop with
 	 * nCpusStarted!=0 and reached the per-CPU init sequence. The '@'
