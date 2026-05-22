@@ -352,6 +352,8 @@ void _hal_interruptsInit(void)
 
 void _hal_interruptsInitPerCPU(void)
 {
+	unsigned int timerIrq;
+
 	*(interrupts_common.gicc + gicc_ctlr) &= ~0x3U;
 
 	/* Initialize CPU Interface of the gic
@@ -362,6 +364,21 @@ void _hal_interruptsInitPerCPU(void)
 	/* EnableGrp0 = 1; EnableGrp1 = 1; AckCtl = 1; FIQEn = 1 in secure mode
 	 * EnableGrp1 = 1 in non-secure mode, other bits are ignored */
 	*(interrupts_common.gicc + gicc_ctlr) = *(interrupts_common.gicc + gicc_ctlr) | 0xfU;
+
+	/* SMP Phase C step 2 (see docs/notes/2026-05-22-smp-phase-c-design.md):
+	 * the architectural timer is a PPI, and PPI enable bits in
+	 * GICD_ISENABLER0 (offset 0x100) are banked per-CPU. Primary
+	 * already called hal_interruptsSetHandler() for the timer at
+	 * boot, which enabled the bit for CPU 0; each secondary CPU
+	 * must enable the same PPI for its own banked register. Without
+	 * this the secondary's gtimer fires but the GIC drops the
+	 * interrupt and the secondary stays in WFI forever. */
+	if (hal_started() != 0) {
+		timerIrq = hal_timerIrq();
+		if (timerIrq < SPI_FIRST_IRQID) {
+			interrupts_enableIRQ(timerIrq);
+		}
+	}
 }
 
 
