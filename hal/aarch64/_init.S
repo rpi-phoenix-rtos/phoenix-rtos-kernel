@@ -201,6 +201,26 @@
 _start:
 	uart_reinit_115200
 
+	/* SMP Phase D: print '+' + cpu_id at the very entry to _start so we
+	 * can verify secondaries actually reach kernel code from armstub's
+	 * br x4. Markers fire while still at EL2 (pre-drop). x10/x11 used
+	 * to avoid clobbering whatever plo passed in x0..x9. */
+	mrs x10, mpidr_el1
+	and x10, x10, #0xff
+	cbz x10, 9601f
+	ldr x11, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9600:
+	ldr w12, [x11]
+	tst w12, #UARTFR_TXFF
+	b.ne 9600b
+	ldr x11, =PL011_TTY_BASE
+	mov w12, #'+'
+	str w12, [x11]
+	mov x12, x10
+	add w12, w12, #'0'
+	str w12, [x11]
+9601:
+
         /*
          * Drop EL2 -> EL1 if we entered at EL2.
          *
@@ -266,6 +286,44 @@ el1_entry:
 
 	/* Mask all interrupts */
 	msr daifSet, #0xf
+
+	/* SMP Phase D: secondaries arrive here from armstub's
+	 * `br x4` (where x4 = kernel entry PA, written by plo's
+	 * release-2). Armstub clears x0-x3 before the branch but leaves
+	 * x9 unspecified, so the assumption `x9 = syspage PA` only holds
+	 * for the primary (which entered via plo's hal_exitToEL1).
+	 *
+	 * Fix: plo's hal_cpuJump writes the syspage PA to PA 0xD8 (=
+	 * armstub spin_cpu0, which no secondary ever reads from its
+	 * WFE-spin since cpu0 doesn't spin) just before release-2.
+	 * Reload x9 from there if cpu_id != 0 so secondaries see the
+	 * same x9 the primary already has. At this point MMU is still
+	 * off (or low-PA identity mapped) so a direct PA 0xD8 load works.
+	 * Clobbers x6 here only; the shared code below re-reads MPIDR
+	 * later for its own cbnz logic. */
+	mrs x6, mpidr_el1
+	and x6, x6, #0xff
+	cbz x6, 9501f
+
+	/* SMP Phase D marker: print '!1'/'!2'/'!3' (the '!' prefix is rare
+	 * in normal kernel output so the trailing digit is easy to
+	 * attribute). Confirms each secondary reached el1_entry from
+	 * armstub's br x4. */
+	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
+9500:
+	ldr w5, [x7]
+	tst w5, #UARTFR_TXFF
+	b.ne 9500b
+	ldr x7, =PL011_TTY_BASE
+	mov w5, #'!'
+	str w5, [x7]
+	mov x5, x6
+	add w5, w5, #'0'
+	str w5, [x7]
+
+	mov x7, #0xd8
+	ldr x9, [x7]
+9501:
 
 	/* SCTLR_EL1 baseline (MMU + caches OFF for now).
 	 *
