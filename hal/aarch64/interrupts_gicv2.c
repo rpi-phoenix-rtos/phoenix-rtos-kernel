@@ -367,14 +367,26 @@ void _hal_interruptsInitPerCPU(void)
 
 	/* SMP Phase C step 2 (see docs/notes/2026-05-22-smp-phase-c-design.md):
 	 * the architectural timer is a PPI, and PPI enable bits in
-	 * GICD_ISENABLER0 (offset 0x100) are banked per-CPU. Primary
-	 * already called hal_interruptsSetHandler() for the timer at
-	 * boot, which enabled the bit for CPU 0; each secondary CPU
-	 * must enable the same PPI for its own banked register. Without
-	 * this the secondary's gtimer fires but the GIC drops the
-	 * interrupt and the secondary stays in WFI forever. */
-	if (hal_started() != 0) {
-		timerIrq = hal_timerIrq();
+	 * GICD_ISENABLER0 (offset 0x100) are banked per-CPU. Primary's
+	 * hal_interruptsSetHandler() at boot enables the bit for CPU 0;
+	 * each secondary CPU must enable the same PPI for its own banked
+	 * register. Without this the secondary's gtimer fires but the
+	 * GIC drops the interrupt and the secondary stays in WFI forever.
+	 *
+	 * On secondaries we spin briefly until primary's _hal_timerInit
+	 * has set timer_common.ready (so hal_timerIrq() returns the real
+	 * PPI number). The window is small (primary runs _hal_cpuInit →
+	 * SEV → _hal_timerInit back-to-back). Primary itself doesn't
+	 * need to do anything here — its later hal_interruptsSetHandler
+	 * for the timer enables its own banked bit. */
+	if (hal_cpuGetID() != 0U) {
+		do {
+			timerIrq = hal_timerIrq();
+			if (timerIrq != 0U) {
+				break;
+			}
+			__asm__ volatile ("yield" ::: "memory");
+		} while (1);
 		if (timerIrq < SPI_FIRST_IRQID) {
 			interrupts_enableIRQ(timerIrq);
 		}
