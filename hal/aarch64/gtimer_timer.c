@@ -92,6 +92,22 @@ void _hal_timerInit(u32 interval)
 }
 
 
+/* SMP Phase C step 3: arm this CPU's per-CPU architectural timer so
+ * it actually fires the PPI we enabled in _hal_interruptsInitPerCPU.
+ * `CNTV_CVAL_EL0` / `CNTV_CTL_EL0` are banked per-CPU, so each
+ * secondary needs to program its own — primary's call to
+ * hal_timerRegister() only programs CPU 0. Without this the GIC
+ * routes the timer PPI but the timer never asserts. */
+void _hal_timerInitPerCPU(void)
+{
+	if (timer_common.ready == 0) {
+		return;
+	}
+
+	hal_gtimerStateSetWakeup(&timer_common.state, timer_common.interval);
+}
+
+
 char *hal_timerFeatures(char *features, size_t len)
 {
 	const char *text;
