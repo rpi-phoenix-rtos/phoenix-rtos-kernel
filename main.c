@@ -190,6 +190,19 @@ static void main_initthr(void *unused)
 		p += lib_sprintf(p, "\n");
 		hal_consolePrint(ATTR_USER, buf);
 
+		/* D-8 follow-up: dump tick counters again 15 s later, well
+		 * AFTER the first secondary CNTV PPI fires at t=10 s. If
+		 * D-9's re-arm and the cross-CPU scheduling are healthy
+		 * we expect cpu1..3 tick counts to be growing. */
+		(void)proc_threadSleep(15 * 1000000LL);
+
+		p = buf;
+		p += lib_sprintf(p, "smp: tick+15s");
+		for (i = 0; i < n; i++) {
+			p += lib_sprintf(p, " cpu%u=%u", i, threads_smpTickCount[i]);
+		}
+		p += lib_sprintf(p, "\n");
+		hal_consolePrint(ATTR_USER, buf);
 	}
 #endif
 
