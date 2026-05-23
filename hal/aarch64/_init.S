@@ -937,12 +937,12 @@ _other_core_virtual:
 	bl _hal_cpuInit
 	bl _hal_timerInitPerCPU
 
-	/* SMP-D-5 bisect: keep DAIF MASKED for now. Enabling timer
-	 * + unmasking IRQs (daifClr #7) breaks primary's scheduler
-	 * — secondary's timer ISR enters threads_schedule which races
-	 * primary's main_initthr. The next iteration needs to make the
-	 * scheduler properly multi-CPU-safe before unmasking IRQs on
-	 * secondaries. */
+	/* SMP-D-5 milestone state: full HAL init complete on
+	 * secondaries; DAIF stays MASKED so the timer PPI doesn't
+	 * fire IRQs. Boot reaches psh prompt cleanly. Enabling DAIF
+	 * (even for cpu1 alone) breaks primary's main_initthr — the
+	 * SMP scheduler path is the next investigation target,
+	 * not within scope of this commit. */
 	msr daifSet, #0xf
 1:
 	wfi
