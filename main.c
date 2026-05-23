@@ -189,6 +189,7 @@ static void main_initthr(void *unused)
 		}
 		p += lib_sprintf(p, "\n");
 		hal_consolePrint(ATTR_USER, buf);
+
 	}
 #endif
 
