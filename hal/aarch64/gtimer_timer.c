@@ -100,6 +100,16 @@ void _hal_timerInit(u32 interval)
 volatile unsigned int hal_smpTimerInitPerCpuCount[8];
 
 
+/* SMP Phase D-8 experiment N override (2026-05-23). When non-zero,
+ * secondaries arm CNTV with this interval instead of
+ * timer_common.interval. Used to test whether the D-6 hang is
+ * timing-sensitive (immediate-firing PPI during primary boot)
+ * or timing-agnostic (any IRQ delivery on a secondary breaks
+ * primary). Set via the per-cpu timer init path; default 0 means
+ * fall back to the normal scheduler-tick interval. */
+volatile unsigned int hal_smpFirstIntervalUs = 0U;
+
+
 /* SMP Phase C step 3: arm this CPU's per-CPU architectural timer so
  * it actually fires the PPI we enabled in _hal_interruptsInitPerCPU.
  * `CNTV_CVAL_EL0` / `CNTV_CTL_EL0` are banked per-CPU, so each
@@ -109,6 +119,7 @@ volatile unsigned int hal_smpTimerInitPerCpuCount[8];
 void _hal_timerInitPerCPU(void)
 {
 	unsigned int cpuId = hal_cpuGetID();
+	u32 interval;
 
 	if (cpuId < (sizeof(hal_smpTimerInitPerCpuCount) / sizeof(hal_smpTimerInitPerCpuCount[0]))) {
 		hal_cpuAtomicInc(&hal_smpTimerInitPerCpuCount[cpuId]);
@@ -118,7 +129,11 @@ void _hal_timerInitPerCPU(void)
 		return;
 	}
 
-	hal_gtimerStateSetWakeup(&timer_common.state, timer_common.interval);
+	interval = ((cpuId != 0U) && (hal_smpFirstIntervalUs != 0U))
+		? hal_smpFirstIntervalUs
+		: timer_common.interval;
+
+	hal_gtimerStateSetWakeup(&timer_common.state, interval);
 }
 
 
