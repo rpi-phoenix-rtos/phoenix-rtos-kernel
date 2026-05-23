@@ -111,12 +111,32 @@ void _hal_cpuInit(void)
 		 * observe nCpusStarted!=0 before they see the event. */
 		hal_cpuDataSyncBarrier();
 		hal_cpuSignalEvent();
-		return;
+	}
+	else {
+		hal_cpuAtomicInc(&nCpusStarted);
+		hal_cpuDataSyncBarrier();
+		hal_cpuSignalEvent();
 	}
 
-	hal_cpuAtomicInc(&nCpusStarted);
-	hal_cpuDataSyncBarrier();
-	hal_cpuSignalEvent();
+#if NUM_CPUS != 1
+	/* SMP-D synchronization barrier — match zynqmp's
+	 * `_hal_cpuInit` pattern (hal/aarch64/zynqmp/zynqmp.c:528).
+	 * Every cpu blocks here until ALL cpus have entered this
+	 * function. Without this barrier, primary returns from
+	 * _hal_cpuInit and proceeds to _hal_timerInit → _hal_init
+	 * return → main() → _vm_init while secondaries are
+	 * concurrently running their own _hal_interruptsInitPerCPU /
+	 * _hal_cpuInit / _hal_timerInitPerCPU, which writes GIC
+	 * distributor registers concurrent with primary's GIC setup
+	 * and races primary's vm/proc init. The resulting hang at
+	 * "vm: init done" was observed in 4-cycle runs with markers
+	 * removed but NUM_CPUS=4. With this barrier, secondaries'
+	 * downstream init runs in parallel with primary's vm/proc
+	 * init only AFTER all 4 cpus have arrived here. */
+	while (hal_cpuAtomicGet(&nCpusStarted) != hal_cpuGetCount()) {
+		hal_cpuWaitForEvent();
+	}
+#endif
 }
 
 
