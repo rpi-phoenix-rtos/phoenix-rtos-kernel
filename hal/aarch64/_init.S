@@ -935,17 +935,20 @@ _other_core_virtual:
 	bl _set_up_vbar_and_stacks
 	bl _hal_interruptsInitPerCPU
 	bl _hal_cpuInit
-	/* SMP-D-6 experiment I (2026-05-23): skip _hal_timerInitPerCPU
-	 * so the secondary's CNTV is never armed. PPI 27 is enabled in
-	 * the GIC via _hal_interruptsInitPerCPU above, but with CNTV
-	 * disabled the timer never asserts the PPI line, so even with
-	 * DAIF unmasked the secondary takes no IRQ. If primary still
-	 * hangs at "hi: primary-ready set", the failure is in the
-	 * secondary's GIC config writes themselves, not in IRQ delivery.
-	 * If primary survives, the issue is specifically the IRQ
-	 * entry/exit / EOI sequence on the secondary. */
+
+	/* SMP Phase D-7 milestone (2026-05-23): secondaries reach full
+	 * HAL bring-up except for the per-CPU CNTV arm. With CNTV not
+	 * armed, no timer PPI fires, so even with DAIF unmasked the
+	 * core takes no IRQ. Experiment I confirmed (this commit's
+	 * predecessor): with this skip primary completes boot through
+	 * fbcon + USB attempt. Re-arming CNTV consistently hangs
+	 * primary at "hi: primary-ready set" via a path that survives
+	 * threads_schedule bypass and the real-spinlock-from-day-0
+	 * fix. Root cause is queued for SMP Phase D-8 (timer-PPI
+	 * delivery investigation). For now: DAIF stays MASKED so the
+	 * core is fully silent — no risk of stray IRQ. */
 	/* bl _hal_timerInitPerCPU */
-	msr daifClr, #7
+	msr daifSet, #0xf
 1:
 	wfi
 	b 1b
