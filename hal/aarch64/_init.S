@@ -201,26 +201,6 @@
 _start:
 	uart_reinit_115200
 
-	/* SMP Phase D: print '+' + cpu_id at the very entry to _start so we
-	 * can verify secondaries actually reach kernel code from armstub's
-	 * br x4. Markers fire while still at EL2 (pre-drop). x10/x11 used
-	 * to avoid clobbering whatever plo passed in x0..x9. */
-	mrs x10, mpidr_el1
-	and x10, x10, #0xff
-	cbz x10, 9601f
-	ldr x11, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9600:
-	ldr w12, [x11]
-	tst w12, #UARTFR_TXFF
-	b.ne 9600b
-	ldr x11, =PL011_TTY_BASE
-	mov w12, #'+'
-	str w12, [x11]
-	mov x12, x10
-	add w12, w12, #'0'
-	str w12, [x11]
-9601:
-
         /*
          * Drop EL2 -> EL1 if we entered at EL2.
          *
@@ -304,23 +284,6 @@ el1_entry:
 	mrs x6, mpidr_el1
 	and x6, x6, #0xff
 	cbz x6, 9501f
-
-	/* SMP Phase D marker: print '!1'/'!2'/'!3' (the '!' prefix is rare
-	 * in normal kernel output so the trailing digit is easy to
-	 * attribute). Confirms each secondary reached el1_entry from
-	 * armstub's br x4. */
-	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9500:
-	ldr w5, [x7]
-	tst w5, #UARTFR_TXFF
-	b.ne 9500b
-	ldr x7, =PL011_TTY_BASE
-	mov w5, #'!'
-	str w5, [x7]
-	mov x5, x6
-	add w5, w5, #'0'
-	str w5, [x7]
-
 	mov x7, #0xd8
 	ldr x9, [x7]
 9501:
@@ -922,22 +885,6 @@ _core_0_virtual:
 
 
 _other_core_trap:
-	/* SMP Phase D trap marker — "$1"/"$2"/"$3" per wakeup iteration.
-	 * Each WFE wakeup attempt emits one marker. Lets us count how
-	 * many times each secondary wakes and reads nCpusStarted as 0
-	 * vs. !=0. Even one occurrence proves the trap was reached. */
-	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9202:
-	ldr w5, [x7]
-	tst w5, #UARTFR_TXFF
-	b.ne 9202b
-	ldr x7, =PL011_TTY_BASE
-	mov w6, #'$'
-	str w6, [x7]
-	mov x6, x8
-	add w6, w6, #'0'
-	str w6, [x7]
-
 	dsb ish
 	wfe
 	ldr w0, [x1, #:lo12:nCpusStarted]
@@ -974,52 +921,8 @@ _other_core_virtual:
 	b 9100b
 #endif
 
-	/* SMP Phase D marker (top of _other_core_virtual): "@1"/"@2"/"@3"
-	 * — secondary just exited _other_core_trap's WFE-loop with
-	 * nCpusStarted!=0 and reached the per-CPU init sequence. The '@'
-	 * prefix is rare in normal kernel output so the trailing digit is
-	 * easy to attribute. */
-	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9101:
-	ldr w5, [x7]
-	tst w5, #UARTFR_TXFF
-	b.ne 9101b
-	ldr x7, =PL011_TTY_BASE
-	mov w6, #'@'
-	str w6, [x7]
-	mov x6, x8
-	add w6, w6, #'0'
-	str w6, [x7]
-
 	bl _set_up_vbar_and_stacks
-
-	/* SMP Phase D marker after _set_up_vbar_and_stacks ("#1"/"#2"/"#3"). */
-	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9102:
-	ldr w5, [x7]
-	tst w5, #UARTFR_TXFF
-	b.ne 9102b
-	ldr x7, =PL011_TTY_BASE
-	mov w6, #'#'
-	str w6, [x7]
-	mov x6, x8
-	add w6, w6, #'0'
-	str w6, [x7]
-
 	bl _hal_interruptsInitPerCPU
-
-	/* SMP Phase D marker after _hal_interruptsInitPerCPU ("&1"/"&2"/"&3"). */
-	ldr x7, =(PL011_TTY_BASE + UARTFR_OFFSET)
-9103:
-	ldr w5, [x7]
-	tst w5, #UARTFR_TXFF
-	b.ne 9103b
-	ldr x7, =PL011_TTY_BASE
-	mov w6, #'&'
-	str w6, [x7]
-	mov x6, x8
-	add w6, w6, #'0'
-	str w6, [x7]
 	bl _hal_cpuInit
 	/* SMP Phase C step 3: program this CPU's per-CPU architectural
 	 * timer (CNTV_CVAL_EL0 + CNTV_CTL_EL0 are banked per CPU). The
