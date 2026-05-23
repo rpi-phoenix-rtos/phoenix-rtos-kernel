@@ -935,14 +935,15 @@ _other_core_virtual:
 	bl _set_up_vbar_and_stacks
 	bl _hal_interruptsInitPerCPU
 	bl _hal_cpuInit
-	/* SMP Phase C step 3: program this CPU's per-CPU architectural
-	 * timer (CNTV_CVAL_EL0 + CNTV_CTL_EL0 are banked per CPU). The
-	 * matching PPI was already enabled in _hal_interruptsInitPerCPU
-	 * above; without this call CVAL stays at boot-default and the
-	 * timer never fires on the secondary. */
 	bl _hal_timerInitPerCPU
 
-	msr daifClr, #7
+	/* SMP-D-5 bisect: keep DAIF MASKED for now. Enabling timer
+	 * + unmasking IRQs (daifClr #7) breaks primary's scheduler
+	 * — secondary's timer ISR enters threads_schedule which races
+	 * primary's main_initthr. The next iteration needs to make the
+	 * scheduler properly multi-CPU-safe before unmasking IRQs on
+	 * secondaries. */
+	msr daifSet, #0xf
 1:
 	wfi
 	b 1b

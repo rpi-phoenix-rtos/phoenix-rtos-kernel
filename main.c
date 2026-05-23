@@ -243,15 +243,13 @@ int main(void)
 	 * to take over, vm/proc/threads are stable enough for
 	 * secondaries to bring themselves up safely. */
 #if NUM_CPUS != 1
-	/* SMP-D-5 isolation experiment: temporarily DON'T set the ready
-	 * flag, so secondaries stay parked at the wait forever. If boot
-	 * then progresses through main_initthr → fbcon → psh normally,
-	 * the issue is wakened secondaries. If it still hangs, something
-	 * else is broken in main_initthr / scheduler.
-	 *
-	 * (void)hal_smpPrimaryReady;
-	 */
-	hal_consolePrint(ATTR_USER, "hi: primary-ready withheld\n");
+	{
+		extern volatile unsigned int hal_smpPrimaryReady;
+		hal_smpPrimaryReady = 1U;
+		hal_cpuDataSyncBarrier();
+		hal_cpuSignalEvent();
+	}
+	hal_consolePrint(ATTR_USER, "hi: primary-ready set\n");
 #endif
 
 	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */
