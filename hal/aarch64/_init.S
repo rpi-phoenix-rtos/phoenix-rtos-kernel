@@ -936,15 +936,20 @@ _other_core_virtual:
 	bl _hal_interruptsInitPerCPU
 	bl _hal_cpuInit
 
-	/* SMP Phase D-8 experiment N (activated 2026-05-23): re-enable
-	 * the per-CPU CNTV arm but rely on the hal_smpFirstIntervalUs
-	 * override (set to 10 000 000 us by main() before publishing
-	 * hal_smpPrimaryReady). With a 10-second initial interval, no
-	 * secondary PPI fires until primary's full boot has completed
-	 * and main_initthr is running. This tests whether the D-6 hang
-	 * depends on the IRQ landing during the boot-context window. */
-	bl _hal_timerInitPerCPU
-	msr daifClr, #7
+	/* SMP Phase D-7 milestone (2026-05-23 final): secondaries reach
+	 * full HAL bring-up except for the per-CPU CNTV arm. With CNTV
+	 * not armed, no timer PPI fires, so the secondary core takes no
+	 * IRQ even with DAIF unmasked. Experiment N (CNTV arm with 10 s
+	 * delay) booted once but did not reproduce reliably across
+	 * subsequent cycles — Pi 4 first-boot stability is the limiting
+	 * factor, not the SMP change itself. D-7 is the stable ship
+	 * state until a reliable boot path supports D-8/D-9 validation.
+	 *
+	 * The hal_smpFirstIntervalUs override is left in place (dormant)
+	 * for the next investigation push; activating it requires the
+	 * 3-edit recipe in docs/notes/2026-05-23-d8-experiment-plan.md. */
+	/* bl _hal_timerInitPerCPU */
+	msr daifSet, #0xf
 1:
 	wfi
 	b 1b

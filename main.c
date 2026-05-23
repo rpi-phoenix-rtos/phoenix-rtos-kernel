@@ -245,16 +245,6 @@ int main(void)
 #if NUM_CPUS != 1
 	{
 		extern volatile unsigned int hal_smpPrimaryReady;
-		extern volatile unsigned int hal_smpFirstIntervalUs;
-
-		/* SMP D-8 experiment N: secondaries arm their CNTV with a
-		 * 10-second initial interval instead of the normal SYSTICK.
-		 * Ensures primary completes hal_cpuReschedule + main_initthr
-		 * boot BEFORE any secondary timer PPI fires. If primary's
-		 * D-6 hang depends on the IRQ landing during boot context,
-		 * pushing the IRQ past the boot window unblocks. */
-		hal_smpFirstIntervalUs = 10000000U;
-
 		hal_smpPrimaryReady = 1U;
 		hal_cpuDataSyncBarrier();
 		hal_cpuSignalEvent();
