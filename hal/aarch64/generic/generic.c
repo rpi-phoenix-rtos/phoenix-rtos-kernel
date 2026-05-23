@@ -118,25 +118,15 @@ void _hal_cpuInit(void)
 		hal_cpuSignalEvent();
 	}
 
-#if NUM_CPUS != 1
-	/* SMP-D synchronization barrier — match zynqmp's
-	 * `_hal_cpuInit` pattern (hal/aarch64/zynqmp/zynqmp.c:528).
-	 * Every cpu blocks here until ALL cpus have entered this
-	 * function. Without this barrier, primary returns from
-	 * _hal_cpuInit and proceeds to _hal_timerInit → _hal_init
-	 * return → main() → _vm_init while secondaries are
-	 * concurrently running their own _hal_interruptsInitPerCPU /
-	 * _hal_cpuInit / _hal_timerInitPerCPU, which writes GIC
-	 * distributor registers concurrent with primary's GIC setup
-	 * and races primary's vm/proc init. The resulting hang at
-	 * "vm: init done" was observed in 4-cycle runs with markers
-	 * removed but NUM_CPUS=4. With this barrier, secondaries'
-	 * downstream init runs in parallel with primary's vm/proc
-	 * init only AFTER all 4 cpus have arrived here. */
-	while (hal_cpuAtomicGet(&nCpusStarted) != hal_cpuGetCount()) {
-		hal_cpuWaitForEvent();
-	}
-#endif
+	/* SMP-D synchronization barrier: see commit history. The
+	 * barrier here would deadlock against secondaries'
+	 * _hal_interruptsInitPerCPU spin-waiting for primary's
+	 * _hal_timerInit (which can't run if primary is at the
+	 * barrier). Workaround was to swap the init order
+	 * (timerInit before cpuInit) but that didn't fix the boot
+	 * hang at "console: pl011 init done" with NUM_CPUS=4 — a
+	 * different concurrent path is also racing. The barrier
+	 * stays disabled until we have better diagnostics. */
 }
 
 
