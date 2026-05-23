@@ -251,6 +251,15 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 	/* parasoft-begin-suppress MISRAC2012-RULE_14_3 "hal_cpuGetID()'s return value might
 	 * not be known at compile time for different architectures" */
 	if (myCpuId != 0U) {
+		/* SMP D-9: re-arm THIS cpu's CNTV. CNTV PPI is level-
+		 * triggered; without programming a new CVAL the line stays
+		 * asserted and the IRQ fires continuously, starving the
+		 * idle thread. CNTV is banked per-CPU so hal_timerSetWakeup
+		 * programs the firing secondary's own timer. Only cpu0
+		 * walks the sleeping tree and updates the global wakeup
+		 * deadline; secondaries just take a tick and let cpu0 do
+		 * the housekeeping. */
+		hal_timerSetWakeup(SYSTICK_INTERVAL);
 		/* Invoke scheduler */
 		return 1;
 	}

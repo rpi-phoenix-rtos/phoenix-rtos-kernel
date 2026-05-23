@@ -245,6 +245,15 @@ int main(void)
 #if NUM_CPUS != 1
 	{
 		extern volatile unsigned int hal_smpPrimaryReady;
+		extern volatile unsigned int hal_smpFirstIntervalUs;
+
+		/* SMP D-8: defer the FIRST secondary timer PPI by 10 s so
+		 * primary's hal_cpuReschedule + main_initthr boot completes
+		 * before any secondary IRQ fires. Once main_initthr is
+		 * established, secondaries fall into the normal SYSTICK
+		 * cadence via threads_timeintr's re-arm path. */
+		hal_smpFirstIntervalUs = 10000000U;
+
 		hal_smpPrimaryReady = 1U;
 		hal_cpuDataSyncBarrier();
 		hal_cpuSignalEvent();

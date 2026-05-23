@@ -99,6 +99,15 @@ void _hal_timerInit(u32 interval)
  * entry point and it doesn't call this function. */
 volatile unsigned int hal_smpTimerInitPerCpuCount[8];
 
+/* SMP Phase D-8 override: when non-zero, secondaries arm CNTV with
+ * this interval instead of timer_common.interval for the FIRST
+ * tick. Used to defer the first secondary timer PPI past primary's
+ * boot-reschedule window — primary's main() sets this before
+ * publishing hal_smpPrimaryReady. After the first tick, subsequent
+ * arms (in threads_timeintr → hal_timerSetWakeup) use the normal
+ * SYSTICK_INTERVAL. */
+volatile unsigned int hal_smpFirstIntervalUs = 0U;
+
 
 /* SMP Phase C step 3: arm this CPU's per-CPU architectural timer so
  * it actually fires the PPI we enabled in _hal_interruptsInitPerCPU.
@@ -109,6 +118,7 @@ volatile unsigned int hal_smpTimerInitPerCpuCount[8];
 void _hal_timerInitPerCPU(void)
 {
 	unsigned int cpuId = hal_cpuGetID();
+	u32 interval;
 
 	if (cpuId < (sizeof(hal_smpTimerInitPerCpuCount) / sizeof(hal_smpTimerInitPerCpuCount[0]))) {
 		hal_cpuAtomicInc(&hal_smpTimerInitPerCpuCount[cpuId]);
@@ -118,7 +128,11 @@ void _hal_timerInitPerCPU(void)
 		return;
 	}
 
-	hal_gtimerStateSetWakeup(&timer_common.state, timer_common.interval);
+	interval = ((cpuId != 0U) && (hal_smpFirstIntervalUs != 0U))
+		? hal_smpFirstIntervalUs
+		: timer_common.interval;
+
+	hal_gtimerStateSetWakeup(&timer_common.state, interval);
 }
 
 
