@@ -935,15 +935,16 @@ _other_core_virtual:
 	bl _set_up_vbar_and_stacks
 	bl _hal_interruptsInitPerCPU
 	bl _hal_cpuInit
-	bl _hal_timerInitPerCPU
-
-	/* SMP-D-6 experiment E: unmask IRQ/FIQ on secondaries so the
-	 * timer PPI fires. Paired with `hal_smpSkipScheduler=1` in
-	 * threads.c and the real-spinlock-from-day-0 fix in
-	 * spinlock.c. The bypass kill switch lets us first validate
-	 * that IRQ entry/exit no longer breaks primary; once that's
-	 * confirmed we can disable the bypass and let secondaries
-	 * actually run the scheduler. */
+	/* SMP-D-6 experiment I (2026-05-23): skip _hal_timerInitPerCPU
+	 * so the secondary's CNTV is never armed. PPI 27 is enabled in
+	 * the GIC via _hal_interruptsInitPerCPU above, but with CNTV
+	 * disabled the timer never asserts the PPI line, so even with
+	 * DAIF unmasked the secondary takes no IRQ. If primary still
+	 * hangs at "hi: primary-ready set", the failure is in the
+	 * secondary's GIC config writes themselves, not in IRQ delivery.
+	 * If primary survives, the issue is specifically the IRQ
+	 * entry/exit / EOI sequence on the secondary. */
+	/* bl _hal_timerInitPerCPU */
 	msr daifClr, #7
 1:
 	wfi
