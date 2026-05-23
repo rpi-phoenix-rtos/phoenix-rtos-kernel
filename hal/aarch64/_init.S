@@ -937,13 +937,14 @@ _other_core_virtual:
 	bl _hal_cpuInit
 	bl _hal_timerInitPerCPU
 
-	/* SMP-D-5 milestone state: full HAL init complete on
-	 * secondaries; DAIF stays MASKED so the timer PPI doesn't
-	 * fire IRQs. Boot reaches psh prompt cleanly. Enabling DAIF
-	 * (even for cpu1 alone) breaks primary's main_initthr — the
-	 * SMP scheduler path is the next investigation target,
-	 * not within scope of this commit. */
-	msr daifSet, #0xf
+	/* SMP-D-6 experiment E: unmask IRQ/FIQ on secondaries so the
+	 * timer PPI fires. Paired with `hal_smpSkipScheduler=1` in
+	 * threads.c and the real-spinlock-from-day-0 fix in
+	 * spinlock.c. The bypass kill switch lets us first validate
+	 * that IRQ entry/exit no longer breaks primary; once that's
+	 * confirmed we can disable the bypass and let secondaries
+	 * actually run the scheduler. */
+	msr daifClr, #7
 1:
 	wfi
 	b 1b

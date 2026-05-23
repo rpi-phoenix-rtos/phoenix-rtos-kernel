@@ -37,18 +37,18 @@ void hal_spinlockSet(spinlock_t *spinlock, spinlock_ctx_t *sc)
 		: "x2", "memory");
 	return;
 #else
-	if (hal_started() == 0) {
-		(void)spinlock;
-		__asm__ volatile(
-			"mrs x2, daif\n"
-			"msr daifSet, #3\n"
-			"str w2, [%0]\n"
-			:
-			: "r"(sc)
-			: "x2", "memory");
-		return;
-	}
-
+	/* SMP-D-6 (2026-05-23): the prior `hal_started()` gate that
+	 * fell back to a fake (daif-only) spinlock during early boot
+	 * was unsafe in SMP mode — once secondaries are released and
+	 * start taking timer IRQs (via the `daifClr #7` at the bottom
+	 * of `_other_core_virtual`), both cpu0 and the secondaries
+	 * enter `interrupts_dispatch` and race on
+	 * `interrupts_common.counters[]` / `handlers[]` with no real
+	 * mutual exclusion. Always use the ldaxr/stxr real-lock path
+	 * regardless of hal_started — the lock itself is initialised
+	 * by `_hal_spinlockCreate` which `_hal_init_c` runs before
+	 * any secondary is released, so the lock byte is always 1
+	 * (unlocked) by the time anyone tries to grab it. */
 	/* clang-format off */
 	__asm__ volatile (
 		"mrs x2, daif\n"
@@ -82,17 +82,9 @@ void hal_spinlockClear(spinlock_t *spinlock, spinlock_ctx_t *sc)
 		: "x2", "memory");
 	return;
 #else
-	if (hal_started() == 0) {
-		(void)spinlock;
-		__asm__ volatile(
-			"ldr w2, [%0]\n"
-			"msr daif, x2\n"
-			:
-			: "r"(sc)
-			: "x2", "memory");
-		return;
-	}
-
+	/* SMP-D-6: see hal_spinlockSet — same `hal_started()` gate
+	 * removal applies here. Always release the real lock with
+	 * stlrb so the global monitor wakes other CPUs in wfe. */
 	/* clang-format off */
 	__asm__ volatile (
 		"mov w2, #1\n"
