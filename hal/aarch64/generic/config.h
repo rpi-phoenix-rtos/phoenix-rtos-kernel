@@ -36,7 +36,7 @@
  * the next SMP push. See WIP commits 979e05c0 (kernel) /
  * 6fa161c (phoenix-rtos-project) / 750b7fd (plo) for full
  * investigation notes. */
-#define NUM_CPUS        1U
+#define NUM_CPUS        4U
 #define SIZE_INTERRUPTS 256U
 
 #ifndef PL011_TTY_BASE

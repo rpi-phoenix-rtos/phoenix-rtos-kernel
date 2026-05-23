@@ -14,6 +14,7 @@
  */
 
 #include "hal/hal.h"
+#include "hal/console.h"
 #include "dtb.h"
 
 #include "syspage.h"
@@ -142,10 +143,15 @@ void _hal_init_c(void)
 	_pmap_preinit(dtbStart, dtbEnd);
 	_hal_platformInit();
 	_hal_consoleInit();
+	hal_consolePrint(ATTR_USER, "hi: console\n");
 	_hal_exceptionsInit();
+	hal_consolePrint(ATTR_USER, "hi: exc\n");
 	_hal_interruptsInit();
+	hal_consolePrint(ATTR_USER, "hi: intr\n");
 	_hal_cpuInit();
+	hal_consolePrint(ATTR_USER, "hi: cpu\n");
 	_hal_timerInit(SYSTICK_INTERVAL);
+	hal_consolePrint(ATTR_USER, "hi: timer\n");
 
 	return;
 }
