@@ -24,6 +24,7 @@
 .extern hal_syspage
 .extern relOffs
 .extern nCpusStarted
+.extern hal_smpPrimaryReady
 .extern _end
 
 
@@ -905,21 +906,31 @@ _other_core_trap:
 
 _other_core_virtual:
 #if NUM_CPUS == 1
-	/* NUM_CPUS=1: park secondaries here forever. They reached
-	 * _other_core_trap from the shared `cbnz x8, _other_core_trap`
-	 * (which is unconditional on the assembly side regardless of
-	 * NUM_CPUS), exited the WFE loop on primary's nCpusStarted
-	 * bump, and now arrived here. Without this guard they would
-	 * call into C helpers (_hal_interruptsInitPerCPU,
-	 * _hal_timerInitPerCPU, etc.) which assume per-CPU state the
-	 * kernel hasn't allocated when NUM_CPUS==1 — and which writes
-	 * GIC/CPU-interface registers concurrently with primary, causing
-	 * primary to hang. */
+	/* NUM_CPUS=1: park secondaries here forever. */
 	msr daifSet, #0xf
 9100:
 	wfi
 	b 9100b
 #endif
+
+	/* SMP-D-5 primary-ready wait. Spin until primary publishes
+	 * hal_smpPrimaryReady != 0 (from main() after vm/proc/threads
+	 * init). Without this gate, secondaries' GIC/atomic activity
+	 * races primary's vm subsystem and hangs the boot.
+	 *
+	 * Read via TTBR1 high-VA mapping (MMU is on here, shared MMU
+	 * setup from lines 0-664 set up TTBR1). x8 is preserved
+	 * (cpu_id). Clobbers x9, x10. */
+9120:
+	adrp x9, hal_smpPrimaryReady
+	add x9, x9, :lo12:hal_smpPrimaryReady
+	ldr w10, [x9]
+	cbnz w10, 9121f
+	wfe
+	b 9120b
+9121:
+	dsb ish
+	isb
 
 	bl _set_up_vbar_and_stacks
 	bl _hal_interruptsInitPerCPU

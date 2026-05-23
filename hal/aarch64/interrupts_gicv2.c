@@ -358,6 +358,20 @@ void _hal_interruptsInit(void)
 volatile unsigned int hal_smpInterruptsInitPerCpuCount[8];
 volatile unsigned int hal_smpInterruptsEnabledPpiCount[8];
 
+/* SMP-D primary-ready flag: secondaries spin-wait on this in
+ * _other_core_virtual (assembly) before invoking the per-CPU C
+ * init helpers. Primary sets it to 1 from main() after vm/proc/
+ * threads init has completed, so secondaries' GIC/atomic activity
+ * doesn't race primary's setup.
+ *
+ * Without this flag, NUM_CPUS=4 was observed to hang at "vm: init
+ * done" when secondaries wrote BSS markers in _other_core_virtual
+ * (cache-line contention with primary's vm subsystem). With the
+ * flag, secondaries park at the assembly-side wait until primary
+ * publishes readiness, then complete their bring-up in parallel
+ * with primary's idle loop / scheduler. */
+volatile unsigned int hal_smpPrimaryReady;
+
 
 void _hal_interruptsInitPerCPU(void)
 {

@@ -215,9 +215,13 @@ int main(void)
 	lib_printf("hal: %s\n", hal_timerFeatures(s, sizeof(s)));
 
 	_vm_init(&main_common.kmap, &main_common.kernel);
+	hal_consolePrint(ATTR_USER, "hi: vm-done\n");
 	(void)_perf_init(&main_common.kmap);
+	hal_consolePrint(ATTR_USER, "hi: perf-done\n");
 	(void)_proc_init(&main_common.kmap, &main_common.kernel);
+	hal_consolePrint(ATTR_USER, "hi: proc-done\n");
 	_syscalls_init();
+	hal_consolePrint(ATTR_USER, "hi: syscalls-done\n");
 
 #if 0 /* Basic kernel tests */
 	/* Start tests */
@@ -230,9 +234,29 @@ int main(void)
 #endif
 
 	(void)proc_start(main_initthr, NULL, (const char *)"init");
+	hal_consolePrint(ATTR_USER, "hi: proc-start-done\n");
+
+	/* SMP-D-5: publish primary-ready flag. Secondaries spin-wait on
+	 * this in _other_core_virtual before invoking the per-CPU C
+	 * init helpers, so they don't race primary's vm/proc/threads
+	 * setup. With main_initthr now spawned and the scheduler about
+	 * to take over, vm/proc/threads are stable enough for
+	 * secondaries to bring themselves up safely. */
+#if NUM_CPUS != 1
+	/* SMP-D-5 isolation experiment: temporarily DON'T set the ready
+	 * flag, so secondaries stay parked at the wait forever. If boot
+	 * then progresses through main_initthr → fbcon → psh normally,
+	 * the issue is wakened secondaries. If it still hangs, something
+	 * else is broken in main_initthr / scheduler.
+	 *
+	 * (void)hal_smpPrimaryReady;
+	 */
+	hal_consolePrint(ATTR_USER, "hi: primary-ready withheld\n");
+#endif
 
 	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */
 	(void)hal_cpuReschedule(NULL, NULL);
+	hal_consolePrint(ATTR_USER, "hi: reschedule-done\n");
 
 	return 0;
 }
