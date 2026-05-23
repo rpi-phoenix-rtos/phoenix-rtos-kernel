@@ -236,18 +236,6 @@ static void _threads_updateWakeup(time_t now, thread_t *minimum)
  * (or removed entirely). */
 volatile unsigned int threads_smpTickCount[8];
 
-/* SMP Phase D-6 binary-search kill switch. When set to non-zero, the
- * timer ISR on a secondary CPU returns 0 (do NOT invoke scheduler)
- * instead of 1. Combined with `msr daifClr, #7` at the bottom of
- * _other_core_virtual, this allows the IRQ entry/exit mechanics
- * (interrupts_dispatch + threads_timeintr + GIC EOI) to be exercised
- * on secondaries WITHOUT entering threads_schedule. If primary
- * survives, the bug is in threads_schedule. If primary still breaks,
- * the bug is in IRQ entry/exit. Defaults to 1 (skip scheduler) so the
- * tick-counter probe alone is the first signal we look for. Flip to 0
- * once scheduler IRQ-path is fixed. */
-volatile unsigned int hal_smpSkipScheduler = 1U;
-
 
 static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 {
@@ -263,11 +251,6 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 	/* parasoft-begin-suppress MISRAC2012-RULE_14_3 "hal_cpuGetID()'s return value might
 	 * not be known at compile time for different architectures" */
 	if (myCpuId != 0U) {
-		/* SMP-D-6: bypass scheduler on secondaries to binary-search
-		 * which half of the IRQ path is broken. */
-		if (hal_smpSkipScheduler != 0U) {
-			return 0;
-		}
 		/* Invoke scheduler */
 		return 1;
 	}
