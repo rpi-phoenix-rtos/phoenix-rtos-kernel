@@ -202,6 +202,15 @@
 _start:
 	uart_reinit_115200
 
+	/* SMP cold-boot diagnostic (2026-05-23): emit a single 'K'
+	 * the very first thing after baud reinit so we can tell, on a
+	 * silent "smp release-2 → kernel entry → (nothing)" hang,
+	 * whether kernel _start ran at all. If 'K' appears in the
+	 * UART log, _start started and the hang is later; if 'K' is
+	 * absent, kernel _start never ran (firmware/plo-seam issue,
+	 * not a kernel-side bug). */
+	uart_putc 75
+
         /*
          * Drop EL2 -> EL1 if we entered at EL2.
          *
