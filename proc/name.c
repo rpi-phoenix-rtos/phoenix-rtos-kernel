@@ -29,13 +29,14 @@ typedef struct _dcache_entry_t {
 
 
 static struct {
-	int root_registered;
-	oid_t root_oid;
-	int devfs_registered;
-	oid_t devfs_oid;
+	int rootRegistered;
+	oid_t rootOid;
+	int devfsRegistered;
+	oid_t devfsOid;
 
 	dcache_entry_t *dcache[0x1U << HASH_LEN];
-	lock_t dcache_lock;
+
+	lock_t lock;
 } name_common;
 
 
@@ -87,7 +88,7 @@ static void name_traceRegister(const char *name)
 /* Despite the historical name, this is also the devfs-fast-path
  * predicate used at the top of proc_portLookup() — when it returns
  * non-zero AND devfs has registered, the lookup short-circuits to
- * the cached devfs_oid without going through proc_send to the root
+ * the cached devfsOid without going through proc_send to the root
  * server. Returning a constant 0 here (as a previous cleanup pass
  * did) silently breaks the fast path and makes every devfs lookup
  * fall through to a dcache-then-root-server query — which races
@@ -108,46 +109,62 @@ static void name_traceDevfs(const char *msg)
 int proc_portRegister(u32 port, const char *name, oid_t *oid)
 {
 	dcache_entry_t *entry;
-	unsigned int hash = dcache_strHash(name);
-
-	/* Check if entry already exists */
-	(void)proc_lockSet(&name_common.dcache_lock);
-	if (_dcache_entryLookup(hash, name) != NULL) {
-		(void)proc_lockClear(&name_common.dcache_lock);
-		return -EEXIST;
-	}
-	(void)proc_lockClear(&name_common.dcache_lock);
+	unsigned int hash;
 
 	if (name[0] == '/' && name[1] == '\0') {
-		name_common.root_oid.port = port;
-		if (oid != NULL) {
-			name_common.root_oid.id = oid->id;
+		(void)proc_lockSet(&name_common.lock);
+
+		if (name_common.rootRegistered != 0) {
+			(void)proc_lockClear(&name_common.lock);
+			return -EEXIST;
 		}
-		name_common.root_registered = 1;
+
+		name_common.rootOid.port = port;
+		name_common.rootOid.id = (oid != NULL) ? oid->id : 0U;
+		name_common.rootRegistered = 1;
+
+		(void)proc_lockClear(&name_common.lock);
+
 		name_traceRegister(name);
 		return EOK;
 	}
 
+	hash = dcache_strHash(name);
+
+	/* Pre-allocate entry to avoid holding the lock during allocation */
 	entry = vm_kmalloc(sizeof(dcache_entry_t) + hal_strlen(name) + 1U);
+
+	(void)proc_lockSet(&name_common.lock);
+
+	/* Check if entry already exists */
+	if (_dcache_entryLookup(hash, name) != NULL) {
+		(void)proc_lockClear(&name_common.lock);
+		if (entry != NULL) {
+			vm_kfree(entry);
+		}
+		return -EEXIST;
+	}
+
 	if (entry == NULL) {
+		(void)proc_lockClear(&name_common.lock);
 		return -ENOMEM;
 	}
 
 	entry->oid.port = port;
-	if (oid != NULL) {
-		entry->oid.id = oid->id;
-	}
+	entry->oid.id = (oid != NULL) ? oid->id : 0U;
 
 	(void)hal_strcpy(entry->name, name);
 
-	(void)proc_lockSet(&name_common.dcache_lock);
 	entry->next = name_common.dcache[hash];
 	name_common.dcache[hash] = entry;
+
 	if (name_traceIs(name, "devfs") != 0) {
-		name_common.devfs_oid = entry->oid;
-		name_common.devfs_registered = 1;
+		name_common.devfsOid = entry->oid;
+		name_common.devfsRegistered = 1;
 	}
-	(void)proc_lockClear(&name_common.dcache_lock);
+
+	(void)proc_lockClear(&name_common.lock);
+
 	name_traceRegister(name);
 
 	return EOK;
@@ -157,9 +174,17 @@ int proc_portRegister(u32 port, const char *name, oid_t *oid)
 int proc_portUnregister(const char *name)
 {
 	dcache_entry_t *entry, *prev = NULL;
-	unsigned int hash = dcache_strHash(name);
+	unsigned int hash;
 
-	(void)proc_lockSet(&name_common.dcache_lock);
+	(void)proc_lockSet(&name_common.lock);
+
+	if (name[0] == '/' && name[1] == '\0') {
+		name_common.rootRegistered = 0;
+		(void)proc_lockClear(&name_common.lock);
+		return EOK;
+	}
+
+	hash = dcache_strHash(name);
 	entry = name_common.dcache[hash];
 
 	while (entry != NULL && hal_strcmp(entry->name, name) != 0) {
@@ -170,12 +195,12 @@ int proc_portUnregister(const char *name)
 
 	if (entry == NULL) {
 		/* There is no such entry, nothing to do */
-		(void)proc_lockClear(&name_common.dcache_lock);
+		(void)proc_lockClear(&name_common.lock);
 		return -ENOENT;
 	}
 
 	if (name_traceIs(name, "devfs") != 0) {
-		name_common.devfs_registered = 0;
+		name_common.devfsRegistered = 0;
 	}
 
 	if (prev != NULL) {
@@ -184,7 +209,8 @@ int proc_portUnregister(const char *name)
 	else {
 		name_common.dcache[hash] = entry->next;
 	}
-	(void)proc_lockClear(&name_common.dcache_lock);
+
+	(void)proc_lockClear(&name_common.lock);
 
 	vm_kfree(entry);
 
@@ -196,6 +222,7 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 {
 	int err;
 	dcache_entry_t *entry;
+	unsigned int hash;
 	msg_t *msg;
 	size_t len, i;
 	oid_t srv;
@@ -207,40 +234,47 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 	}
 
 	if (name[0] == '/' && name[1] == '\0') {
-		if (name_common.root_registered != 0) {
+		(void)proc_lockSet(&name_common.lock);
+
+		if (name_common.rootRegistered != 0) {
 			if (file != NULL) {
-				*file = name_common.root_oid;
+				*file = name_common.rootOid;
 			}
 
 			if (dev != NULL) {
-				*dev = name_common.root_oid;
+				*dev = name_common.rootOid;
 			}
+			(void)proc_lockClear(&name_common.lock);
 			return EOK;
 		}
 
-		return -EINVAL;
+		(void)proc_lockClear(&name_common.lock);
+		return -ENOENT;
 	}
 
-	if (name_traceDevfsLookup(name) != 0) {
-		(void)proc_lockSet(&name_common.dcache_lock);
-		if (name_common.devfs_registered != 0) {
+	if (traceDevfs != 0) {
+		(void)proc_lockSet(&name_common.lock);
+		if (name_common.devfsRegistered != 0) {
 			if (file != NULL) {
-				*file = name_common.devfs_oid;
+				*file = name_common.devfsOid;
 			}
 
 			if (dev != NULL) {
-				*dev = name_common.devfs_oid;
+				*dev = name_common.devfsOid;
 			}
-			(void)proc_lockClear(&name_common.dcache_lock);
+			(void)proc_lockClear(&name_common.lock);
 			name_traceDevfs("name: devfs direct hit\n");
 			return EOK;
 		}
-		(void)proc_lockClear(&name_common.dcache_lock);
+		(void)proc_lockClear(&name_common.lock);
 	}
 
-	/* Search cache for full path */
-	(void)proc_lockSet(&name_common.dcache_lock);
-	entry = _dcache_entryLookup(dcache_strHash(name), name);
+	hash = dcache_strHash(name);
+
+	(void)proc_lockSet(&name_common.lock);
+
+	/* Search cache for full path (fast path) */
+	entry = _dcache_entryLookup(hash, name);
 	if (entry != NULL) {
 		if (traceDevfs != 0) {
 			name_traceDevfs("name: devfs cache hit\n");
@@ -252,14 +286,14 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 		if (dev != NULL) {
 			*dev = entry->oid;
 		}
-		(void)proc_lockClear(&name_common.dcache_lock);
+
+		(void)proc_lockClear(&name_common.lock);
 		return EOK;
 	}
-	(void)proc_lockClear(&name_common.dcache_lock);
 
-	srv = name_common.root_oid;
+	/* Avoid holding the lock during allocation */
+	(void)proc_lockClear(&name_common.lock);
 
-	/* Search cache for starting point */
 	len = hal_strlen(name);
 
 	if (len < sizeof(pstack)) {
@@ -273,6 +307,28 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 
 		pptr = pheap;
 	}
+
+	(void)proc_lockSet(&name_common.lock);
+
+	/* Search cache again for full path (in case it was added before the lock was reacquired) */
+	entry = _dcache_entryLookup(hash, name);
+	if (entry != NULL) {
+		if (file != NULL) {
+			*file = entry->oid;
+		}
+
+		if (dev != NULL) {
+			*dev = entry->oid;
+		}
+
+		(void)proc_lockClear(&name_common.lock);
+		if (pheap != NULL) {
+			vm_kfree(pheap);
+		}
+		return EOK;
+	}
+
+	srv = name_common.rootOid;
 
 	i = len;
 	(void)hal_strcpy(pptr, name);
@@ -288,25 +344,25 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 
 		pptr[i] = '\0';
 
-		(void)proc_lockSet(&name_common.dcache_lock);
 		entry = _dcache_entryLookup(dcache_strHash(pptr), pptr);
 		if (entry != NULL) {
 			srv = entry->oid;
-			(void)proc_lockClear(&name_common.dcache_lock);
 			break;
 		}
-		(void)proc_lockClear(&name_common.dcache_lock);
 	}
 
-	if (name_common.root_registered == 0 && i == 0U) {
+	if (name_common.rootRegistered == 0 && i == 0U) {
+		(void)proc_lockClear(&name_common.lock);
 		if (traceDevfs != 0) {
 			name_traceDevfs("name: devfs no root\n");
 		}
 		if (pheap != NULL) {
 			vm_kfree(pheap);
 		}
-		return -EINVAL;
+		return -ENOENT;
 	}
+
+	(void)proc_lockClear(&name_common.lock);
 
 	msg = vm_kmalloc(sizeof(msg_t));
 	if (msg == NULL) {
@@ -638,9 +694,9 @@ off_t proc_size(oid_t oid)
 
 void _name_init(void)
 {
-	(void)proc_lockInit(&name_common.dcache_lock, &proc_lockAttrDefault, "name.common");
+	(void)proc_lockInit(&name_common.lock, &proc_lockAttrDefault, "name.common");
 
 	hal_memset(name_common.dcache, 0, sizeof(name_common.dcache));
-	name_common.root_registered = 0;
-	name_common.devfs_registered = 0;
+	name_common.rootRegistered = 0;
+	name_common.devfsRegistered = 0;
 }
