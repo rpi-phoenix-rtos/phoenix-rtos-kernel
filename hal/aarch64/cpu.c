@@ -67,12 +67,19 @@ int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, si
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "Need to assign function address to processor register" */
 	ctx->pc = (u64)start;
 
+	/* TD-10: a real SError handler now exists (exceptions_serrorHandler),
+	 * but SError stays MASKED here. Unmasking was tested on real Pi 4 and
+	 * revealed a live, currently-unfixed external-abort SError source in
+	 * the BCM2711 PCIe / VL805 USB bring-up (esr=0xbf000002, IDS=1 IMP-DEF,
+	 * imprecise; isolation-proven: 0 SErrors with USB disabled). Removing
+	 * the mask before that abort is fixed regresses the boot. Keep masked;
+	 * remove NO_SERR once the PCIe access is fixed. See TD-10 + memory
+	 * pi4-serror-pcie-source. */
 	if (ustack != NULL) {
 		ctx->psr = MODE_EL0 | NO_SERR;
 		ctx->sp = (u64)ustack;
 	}
 	else {
-		/* SError is asynchronous; keep it masked until the platform has a real handler/policy. */
 		ctx->psr = MODE_EL1_SP1 | NO_SERR;
 		ctx->sp = (u64)kstack + kstacksz;
 	}

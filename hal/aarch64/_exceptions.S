@@ -380,6 +380,9 @@ hal_jmp:
 	mov sp, x1
 	msr sp_el0, x2
 	/* TODO: There are some extensions that have their flags in SPSR and we clear them here. */
+	/* TD-10: SError stays masked at user entry. A real handler exists, but
+	 * unmasking exposed a live PCIe/USB external-abort SError source that
+	 * must be fixed first (see hal/aarch64/cpu.c TD-10 note). */
 	mov x1, #(MODE_EL0 | NO_SERR)
 	msr spsr_el1, x1
 
