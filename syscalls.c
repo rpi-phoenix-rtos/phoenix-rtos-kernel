@@ -40,11 +40,6 @@
  * Kernel
  */
 
-static struct {
-	unsigned int pshRootLookupResult;
-} syscalls_common;
-
-
 void syscalls_debug(u8 *ustack)
 {
 	const char *s;
@@ -53,19 +48,6 @@ void syscalls_debug(u8 *ustack)
 
 	GETFROMSTACK(ustack, const char *, s, 0U);
 	hal_consolePrint(ATTR_USER, s);
-}
-
-
-static void syscalls_pshLookupTrace(process_t *proc, const char *name, int err)
-{
-	if ((proc == NULL) || (proc->path == NULL) || (name == NULL) || (hal_strcmp(proc->path, "psh") != 0)) {
-		return;
-	}
-
-	if ((syscalls_common.pshRootLookupResult == 0U) && (hal_strcmp(name, "/") == 0)) {
-		syscalls_common.pshRootLookupResult = 1U;
-		lib_printf("syscalls: psh root lookup %d\n", err);
-	}
 }
 
 
@@ -942,7 +924,6 @@ int syscalls_lookup(u8 *ustack)
 	}
 
 	err = proc_portLookup(name, file, dev);
-	syscalls_pshLookupTrace(proc, name, err);
 
 	return err;
 }

@@ -57,6 +57,24 @@ static void _hal_consoleProbe(hal_pl011_t *uart, const char *s)
 
 void hal_consolePrint(int attr, const char *s)
 {
+	spinlock_ctx_t sc;
+	int locked = 0;
+
+	/* Serialize the whole (attr + string + reset) sequence so concurrent
+	 * writers — other CPUs, and every userspace debug() syscall, which all
+	 * land here (syscalls_debug -> hal_consolePrint) — cannot interleave
+	 * mid-line. Before the console lock exists (pre-_hal_consoleInit) or
+	 * before SMP is up (hal_started()==0) writers are single-core, so no
+	 * lock is taken. The lock is shared with hal_consolePutch (the kernel
+	 * klog mirror), so the two console paths are mutually exclusive. It is a
+	 * leaf lock: hal_consolePrint never takes log_common.lock, and the only
+	 * nesting (log_write -> mirror -> hal_consolePutch) is always
+	 * log_common.lock -> console_common.lock, so no deadlock. */
+	if ((console_common.enabled != 0) && (hal_started() != 0)) {
+		hal_spinlockSet(&console_common.lock, &sc);
+		locked = 1;
+	}
+
 	if (attr == ATTR_BOLD) {
 		_hal_consoleEarlyPrint(CONSOLE_BOLD);
 	}
@@ -69,6 +87,10 @@ void hal_consolePrint(int attr, const char *s)
 
 	_hal_consoleEarlyPrint(s);
 	_hal_consoleEarlyPrint(CONSOLE_NORMAL);
+
+	if (locked != 0) {
+		hal_spinlockClear(&console_common.lock, &sc);
+	}
 }
 
 

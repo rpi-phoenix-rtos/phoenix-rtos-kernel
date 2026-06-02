@@ -398,8 +398,30 @@ size_t log_write(const char *data, size_t len)
 		/* No need to check log_common.enabled again,
 		 * it's used only on kernel panic */
 
+		/* TD-14/observability: lib_printf output is buffered to this ring and is
+		 * drained by userspace libklog/pl011-tty only LATE in boot and (as
+		 * measured on Pi4) unreliably. So we PERMANENTLY mirror every byte
+		 * straight to the UART console here (raw, faithful) — the UART is the
+		 * kernel's own, always-complete, deterministic boot log and does not
+		 * depend on any userspace reader attaching.
+		 *
+		 * Split sinks (see pl011-tty): the UART comes from this mirror; the
+		 * ring's readers (libklog) deliver the same bytes to the HDMI fbcon
+		 * ONLY (their pl011-tty callback does not re-emit to the UART), so the
+		 * mirror and the drain never double up on the UART. The mirror runs
+		 * unconditionally — it is NOT gated on `readers` — precisely so that
+		 * attaching the fbcon drain cannot regress UART completeness.
+		 *
+		 * hal_consolePutch shares console_common.lock with hal_consolePrint, so
+		 * every per-string console writer (the SMP bring-up diagnostics and all
+		 * userspace debug()) is emitted atomically and cannot interleave with a
+		 * mirrored line at the character level. (We mirror raw per byte rather
+		 * than via hal_consolePrint because the latter decorates each call with a
+		 * CONSOLE_NORMAL reset, which a partial-line flush would splice into the
+		 * log text.) */
 		for (i = 0; i < len; ++i) {
 			_log_push(data[i]);
+			hal_consolePutch(data[i]);
 			if (_log_full() != 0) {
 				do {
 					/* Log full, remove oldest line to make space */
