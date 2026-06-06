@@ -72,8 +72,5 @@ void _usrv_start(void)
 
 void _usrv_init(void)
 {
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-
-	*uart = 'U';
 	_log_init();
 }

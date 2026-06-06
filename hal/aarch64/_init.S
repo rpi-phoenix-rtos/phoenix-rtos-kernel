@@ -66,13 +66,6 @@
 #endif
 
 
-.macro uart_tag2 c1 c2
-	uart_putc 10
-	uart_putc \c1
-	uart_putc \c2
-	uart_putc 10
-.endm
-
 .macro early_vector slot
         mov x18, #\slot
         b _early_exception_common
@@ -198,15 +191,6 @@
 .org 0
 _start:
 	uart_reinit_115200
-
-	/* SMP cold-boot diagnostic (2026-05-23): emit a single 'K'
-	 * the very first thing after baud reinit so we can tell, on a
-	 * silent "smp release-2 → kernel entry → (nothing)" hang,
-	 * whether kernel _start ran at all. If 'K' appears in the
-	 * UART log, _start started and the hang is later; if 'K' is
-	 * absent, kernel _start never ran (firmware/plo-seam issue,
-	 * not a kernel-side bug). */
-	uart_putc 75
 
         /*
          * Drop EL2 -> EL1 if we entered at EL2.
@@ -1019,46 +1003,6 @@ _inval_icache_range:
         ret
 
 
-uart_putc_reg:
-1:
-        ldr x3, =(PL011_TTY_BASE + UARTFR_OFFSET)
-        ldr w4, [x3]
-        tst w4, #UARTFR_TXFF
-        b.ne 1b
-        ldr x3, =PL011_TTY_BASE
-        str w0, [x3]
-        ret
-
-uart_puthex4:
-        and w0, w0, #0xf
-        cmp w0, #10
-        b.lo 1f
-        add w0, w0, #55
-        b uart_putc_reg
-1:
-        add w0, w0, #48
-        b uart_putc_reg
-
-uart_puthex64:
-        mov x2, x0
-        mov x1, #60
-1:
-        lsr x0, x2, x1
-        bl uart_puthex4
-        subs x1, x1, #4
-        b.pl 1b
-        ret
-
-_early_uart_print_tag:
-        /* x0 => pointer to a zero-terminated tag */
-        ldrb w1, [x0], #1
-        cbz w1, 1f
-        mov w0, w1
-        bl uart_putc_reg
-        b _early_uart_print_tag
-1:
-        ret
-
 /* Permanent early-exception diagnostic: no-call early exception dump.
  *
  * The previous version used many bl/ret to PL011 helpers and to a string
@@ -1189,22 +1133,6 @@ _early_vector_table:
         early_vector 14
 .org (_early_vector_table + 0x780)
         early_vector 15
-
-.align 4
-_early_ex_tag:
-        .asciz "EX="
-
-.align 4
-_early_esr_tag:
-        .asciz "ESR="
-
-.align 4
-_early_elr_tag:
-        .asciz "ELR="
-
-.align 4
-_early_far_tag:
-        .asciz "FAR="
 
 .ltorg
 

@@ -487,24 +487,8 @@ void log_disable(void)
 
 void _log_init(void)
 {
-	volatile unsigned int *uart = (volatile unsigned int *)0xffffffffffe00000ull;
-	volatile unsigned int *uartfr = (volatile unsigned int *)0xffffffffffe00018ull;
-
-	*uart = 'l';
-	while ((*uartfr & 0x20u) != 0u) {
-	}
-	*uart = 'L';
 	hal_memset(&log_common, 0, sizeof(log_common));
-	while ((*uartfr & 0x20u) != 0u) {
-	}
-	*uart = 'm';
 	(void)proc_lockInit(&log_common.lock, &proc_lockAttrDefault, "log.common");
-	while ((*uartfr & 0x20u) != 0u) {
-	}
-	*uart = 'k';
 
 	log_common.enabled = 1;
-	while ((*uartfr & 0x20u) != 0u) {
-	}
-	*uart = 'E';
 }
