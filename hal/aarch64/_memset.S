@@ -21,11 +21,13 @@
 #define TMP       x5
 #define TMP2      x6
 
-/* The Raspberry Pi 4 bring-up path reaches EL1 via firmware/armstub/PLO,
- * not TF-A. Until the EL2 trap state for DC ZVA is proven, avoid using
- * ZVA on Cortex-A72: the first post-D-cache large zeroing operation
- * (_log_init's log_common memset) hangs on real Pi 4 with no exception
- * output. Normal stores keep D-cache enabled and preserve correctness. */
+/* TODO(TD-20): The Raspberry Pi 4 bring-up path reaches EL1 via
+ * firmware/armstub/PLO, not TF-A. Until the EL2 trap state for DC ZVA is
+ * proven, avoid using ZVA on Cortex-A72: the first post-D-cache large
+ * zeroing operation (_log_init's log_common memset) hangs on real Pi 4
+ * with no exception output. Normal stores keep D-cache enabled and
+ * preserve correctness. Lift this gate once the EL2 DC-ZVA trap state is
+ * proven (HW-only; does not repro in QEMU). */
 #if defined(__TARGET_AARCH64A72) && !defined(MEMSET_WITHOUT_ZVA)
 #define MEMSET_WITHOUT_ZVA
 #endif

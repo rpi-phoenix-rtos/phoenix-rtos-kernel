@@ -214,7 +214,8 @@ void syspage_init(void)
 				/* Safety cap: plo can legitimately emit > 10 entries per
 				 * map (observed: 11 on Pi 4 first map). 64 is a wide
 				 * margin over any plausible map population while still
-				 * bounding the loop against pathological inputs. */
+				 * bounding the loop against pathological inputs.
+				 * Permanent defensive bound; see TD-04-hack-1 (resolved). */
 				entryCount = 0;
 				do {
 					if (entryCount++ >= 64) {
@@ -235,6 +236,7 @@ void syspage_init(void)
 		prog = syspage_common.syspage->progs;
 		progCount = 0;
 		do {
+			/* Permanent defensive bound; see TD-04-hack-1 (resolved). */
 			if (progCount++ >= 64) {
 				break;
 			}

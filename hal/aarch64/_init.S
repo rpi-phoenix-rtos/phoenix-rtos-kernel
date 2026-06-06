@@ -149,14 +149,10 @@
 #define DEFAULT_ATTRS 0x703
 
 /* Same as DEFAULT_ATTRS but with AttrIndx=1 (MAIR slot 1 = 0x44 = Normal
- * Non-Cacheable, inner+outer). Used for the single TTL3 entry that maps
- * the page containing _hal_syspageCopied. The destination of plo's
- * syspage copy must read back exactly what plo wrote into DDR; on
- * BCM2711 silicon the A72 D-cache observes per-boot-randomized stale
- * lines from the bootcode/start4.elf/armstub firmware chain (or VPU
- * writes into firmware-reserved DRAM windows) at this PA, so the safe
- * approach is to bypass the cache entirely for that one page. See
- * docs/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md TD-04. */
+ * Non-Cacheable, inner+outer). The old TD-04 _hal_syspageCopied NC
+ * override that used this was deleted (Phase Z3, see _start); the
+ * syspage page is now mapped cacheable (DEFAULT_ATTRS). NC_ATTRS now
+ * serves only the TD-15 mailbox-buffer alias at DEVICES_TTL3[1]. */
 #define NC_ATTRS 0x707
 
 /* C-2 (2026-05-15): Normal Cacheable WBWA, Inner-Shareable TTBR0
@@ -170,10 +166,11 @@
  * AttrIdx=0 → MAIR slot 0 = Normal WBWA cacheable. SH=Inner Shareable.
  * AF set, nG (matches earlier NC value of 0xf05 except AttrIdx).
  *
- * The TD-04 NC override on the single _hal_syspageCopied TTL3 entry is
- * deliberately preserved — plo writes that page Non-Cacheable and the
- * kernel reads it via the high-VA NC alias, never via the low-PA
- * cacheable alias, so the kernel's view is consistent. */
+ * The _hal_syspageCopied page is now mapped cacheable (DEFAULT_ATTRS);
+ * the old TD-04 NC override was deleted (Phase Z3). plo runs caches-on
+ * and does a dc civac DDR teardown before handoff, and the kernel
+ * clean+invalidates the syspage range itself, so the cacheable low-PA
+ * alias and high-VA kernel mapping share a consistent view. */
 #define NC_BLOCK_ATTRS 0xf01
 
 /* Needs to be updated if hal_syspage_t is changed */
@@ -566,37 +563,9 @@ el1_entry:
 	dsb ish
 	isb
 
-	/* Turn on MMU. Caches stay OFF (C=0, I=0) — known-good baseline.
-	 *
-	 * Stage 1 cache enable was attempted in many variants; all fail:
-	 *   - Phase A (M+I): boot reaches X4/X5/td15/td16, faults at
-	 *     syspage.c:476 (hal_syspageRelocate). RES1 baseline didn't
-	 *     change it. armstub-side 859971 didn't change it.
-	 *   - Phase B (M+C+I): boot hangs at X3 (before X4 marker) —
-	 *     immediate post-flip stall, classic "stale D-cache shadows
-	 *     page tables" failure mode.
-	 *
-	 * Conclusion: we are missing something fundamental. Spawned a
-	 * deep-research wave (FreeBSD/NetBSD/seL4/ARM ARM authoritative
-	 * spec, plo->kernel handoff cache maintenance, BCM2711 firmware
-	 * state, diagnostic technique survey). Reverting to known-good
-	 * (EL drop + M-only) until research wave returns with concrete
-	 * direction.
-	 */
-	/* Stage 1 cache enable (Step 5 of canonical-idiom alignment plan):
-	 * M | C | I in a single SCTLR_EL1 write with canonical barrier ritual.
-	 *
-	 * Prerequisites in tree:
-	 *   - kernel _start invokes hal_cpuInvalDataCacheAll (Step 1)
-	 *   - plo flushes full DDR before handoff (Step 2)
-	 *   - plo's mmu.c + cache.c generalised to dispatch on currentEL
-	 *     (Path A) + TCR_EL2 field-layout fixup for the EL2 path
-	 *     (RES0 bit 23 cleared; IPS moved from bits 34:32 -> 18:16)
-	 *   - plo runs with MMU+caches ON via hal_memoryInit + canonical
-	 *     teardown in hal_cpuJump (Step 3)
-	 *   - all TLB/I-cache maintenance uses Inner-Shareable variants
-	 *     (vmalle1is, ialluis, dsb ish) — Step 4
-	 */
+	/* Enable MMU+D-cache+I-cache (SCTLR.M|C|I) in a single write below;
+	 * A72; canonical barrier ritual with a defensive set/way invalidate
+	 * immediately prior. (TD-16 RESOLVED 2026-05-17.) */
 	/* Pre-flip canonical fence (Linux set_sctlr ritual shape). */
 	ic   ialluis
 	dsb  ish
@@ -604,39 +573,19 @@ el1_entry:
 	dsb  ish
 	isb
 
-	/* Phase Z + research insight (2026-05-17): defensive set/way D-cache
-	 * invalidate IMMEDIATELY before the M|C|I flip. Recommended by all
-	 * three research subagents (Linux/ATF/U-Boot, FreeBSD/NetBSD,
-	 * A72-microarch) as the single most-likely-missing step. The
-	 * earlier hal_cpuInvalDataCacheAll at _start (line 351) ran long
-	 * before this point; the A72 L2 prefetcher and L1D hardware
-	 * prefetcher can have speculatively populated lines between then
-	 * and now (DEN0024 §5 notes prefetchers may activate even with
-	 * SCTLR.C=0 on out-of-order cores). Re-invalidate so the cache is
-	 * GUARANTEED empty at the moment M|C|I goes live. */
+	/* Defensive set/way D-cache invalidate immediately before the M|C|I
+	 * flip: the A72 prefetchers may speculatively populate lines even
+	 * with SCTLR.C=0, so re-invalidate to guarantee the cache is empty
+	 * when caches go live (the earlier _start invalidate ran long ago). */
 	mov x28, x9                       /* preserve syspage PA */
 	bl  hal_cpuInvalDataCacheAll
 	mov x9, x28
 	dsb ish
 	isb
 
-	/* Phase Z2 (2026-05-17): single-shot M|C|I — canonical zynqmp
-	 * aarch64a53 pattern. Pairs with Phase Z1 (plo runs cache-on +
-	 * dc civac teardown), Phase Z3 (delete TD-04 NC overrides), and
-	 * Phase Z4 (delete post-copy clean_inval).
-	 *
-	 * The previous c3a-c3t experiments tested single-shot, staged,
-	 * NC walks, deferred enable, etc. — ALL failed. Subagent analysis
-	 * concluded those failures were rooted in plo handing off a
-	 * non-canonical state (caches off, dc ivac instead of dc civac);
-	 * the kernel had to work around that contract and the workarounds
-	 * cascaded. With Phase Z1 restoring the canonical plo teardown,
-	 * the kernel should now be able to enable M|C|I in one MSR like
-	 * every other working Phoenix-RTOS port.
-	 *
-	 * If this fails (translation fault on first walk, or EX=4 handler
-	 * self-fault), the Pi 4 / A72 silicon is genuinely incompatible
-	 * with the canonical pattern and we revert to M-only. */
+	/* Single-shot M|C|I — canonical zynqmp aarch64 pattern. Pairs with
+	 * plo running caches-on with a dc civac DDR teardown before handoff,
+	 * so the kernel enables MMU+caches in one SCTLR write. */
 	mrs  x0, sctlr_el1
 	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
 	orr  x0, x0, #(1 << 2)    /* SCTLR_EL1.C  — D-cache enable */
@@ -773,13 +722,12 @@ _core_0_virtual:
 	 * this comment as a do-not-redo marker; the real fix needs another
 	 * approach — see tracking/current-step.md.) */
 
-	/* TD-04 fix: copy through the HIGH-VA mapping of VADDR_SYSPAGE
-	 * (loaded from the literal pool), not through a low-PA `adrp +
-	 * lo12`. The high-VA TTL3 entry was just overridden to AttrIndx=1
-	 * (Normal Non-Cacheable), so str instructions targeting this
-	 * pointer write directly to DDR and bypass the A72 D-cache —
-	 * exactly the behaviour we need to make the copied bytes immune
-	 * to the BCM2711 cache-coherency anomaly observed in the E2 probe.
+	/* Copy through the HIGH-VA mapping of VADDR_SYSPAGE (loaded from the
+	 * literal pool), not through a low-PA `adrp + lo12`. The high-VA TTL3
+	 * entry is now mapped cacheable (DEFAULT_ATTRS); the old TD-04 NC
+	 * override was deleted (Phase Z3). Coherency relies on plo's caches-on
+	 * + dc civac DDR teardown plus the _clean_inval_dcache_range over
+	 * [x9, x9+size) above, so the copied bytes are authoritative in DDR.
 	 *
 	 * (The earlier comment here noted that "instruction-side TTBR1
 	 * fetch is broken" on this hardware. That observation still
@@ -1111,7 +1059,7 @@ _early_uart_print_tag:
 1:
         ret
 
-/* TODO(TD-16-exdump): no-call early exception dump.
+/* Permanent early-exception diagnostic: no-call early exception dump.
  *
  * The previous version used many bl/ret to PL011 helpers and to a string
  * walker that read low-PA literal-pool data. When TD-16 cache-enable
@@ -1363,11 +1311,10 @@ _hal_init:
 
 .section ".bss"
 /* Page-align so the entire 4 KiB symbol fits exactly into one TTL3 entry.
- * That single entry is overridden in _start to use Normal Non-Cacheable
- * attributes (MAIR slot 1) — see the TD-04 fix block. Without alignment
- * the symbol would straddle two pages and we'd need to override two
- * entries; with alignment one is sufficient and the bookkeeping is
- * trivial. */
+ * The page is mapped cacheable (DEFAULT_ATTRS) like the rest of the
+ * kernel; the old TD-04 Normal-Non-Cacheable override was deleted
+ * (Phase Z3). Alignment is kept for clean single-entry TTL3 bookkeeping
+ * (the symbol does not straddle two pages). */
 .balign SIZE_PAGE
 _hal_syspageCopied:
 	.zero SIZE_PAGE
