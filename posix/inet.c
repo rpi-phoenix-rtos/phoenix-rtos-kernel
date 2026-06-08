@@ -28,7 +28,22 @@ static ssize_t socksrvcall(msg_t *msg)
 
 	err = proc_lookup(PATH_SOCKSRV, NULL, &oid);
 	if (err < 0) {
-		return err;
+		/* The literal "/dev/netsocket" lookup fails before the root fs has
+		 * registered "/" (the NFS-root early-boot case: the NFS server needs
+		 * a socket to mount the export, yet it IS what will register "/").
+		 * The socket node already exists in devfs (lwip create_dev's it via
+		 * the "devfs" named port, stripping the /dev/ prefix), so reach it the
+		 * same way through that named port. proc_lookup("devfs/netsocket")
+		 * uses the existing prefix-strip walk in proc_portLookup(): it strips
+		 * "/netsocket", hits the registered "devfs" dcache entry, and sends an
+		 * mtLookup for the relative name to the devfs server -- byte-for-byte
+		 * the userspace socksrvcall fallback in libphoenix sys/socket.c. Pure
+		 * fallback: once "/" exists the literal lookup above succeeds and
+		 * behaviour is unchanged. */
+		err = proc_lookup("devfs/netsocket", NULL, &oid);
+		if (err < 0) {
+			return err;
+		}
 	}
 
 	err = proc_send(oid.port, msg);
