@@ -323,6 +323,18 @@ el1_entry:
 	/* BIT(16) + BIT(17) = ZEN (don't trap SVE) */
 	mov x0, #((0x3 << 20) | (0x3 << 16))
 	msr cpacr_el1, x0
+
+	/* Let EL0 read the architectural counters without trapping:
+	 * CNTKCTL_EL1.EL0PCTEN (bit 0) + EL0VCTEN (bit 1). The reset value of
+	 * CNTKCTL_EL1 is architecturally UNKNOWN and Phoenix never wrote it, so
+	 * an EL0 `mrs ..., cntvct_el0` (userspace fast monotonic clock, e.g.
+	 * lighttpd, and the eventual vDSO) traps to EL1 as "Trapped MSR/MRS/SYS".
+	 * This grants counter *reads* only — it does not enable the EL0 timer
+	 * interrupt/comparator path, so it is orthogonal to the SMP CNTV
+	 * scheduler caveat. Set on every core (all reach el1_entry); EL1's own
+	 * timer use is unaffected (EL1 access is always permitted). */
+	mov x0, #0x3
+	msr cntkctl_el1, x0
 	isb
 
 	/* Invalidate caches and TLB.
