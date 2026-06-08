@@ -66,6 +66,35 @@ static void main_initthr(void *unused)
 
 	/* Start programs from syspage */
 	prog = syspage_progList();
+
+	/* TD13_DUMP: one-shot direct state dump of the syspage program list,
+	 * immediately before the spawn loop. Confirms-or-refutes TD-13: does
+	 * the tail (psh) ->next return to the head on real Pi 4, or run away?
+	 * Single-core, IRQs already masked here, HARD-bounded at 40 so the
+	 * dump itself cannot run away even if a ->next is wild. Uses a private
+	 * walk pointer (dbg) so it cannot perturb the spawn loop's `prog`.
+	 * Diagnostic only; revertable. See TD-13-spawn-cap. */
+	{
+		extern u64 relOffs;
+		syspage_prog_t *dbg = syspage_progList();
+		syspage_prog_t *head = syspage_progList();
+		int td13_i;
+		lib_printf("TD13_DUMP: head=%p relOffs=0x%lx\n", (void *)head, (unsigned long)relOffs);
+		for (td13_i = 0; (dbg != NULL) && (td13_i < 40); ++td13_i) {
+			lib_printf("TD13_DUMP: [%d] entry=%p next=%p prev=%p name='%s'\n",
+				td13_i, (void *)dbg, (void *)dbg->next, (void *)dbg->prev,
+				(dbg->argv != NULL) ? dbg->argv : "(null)");
+			dbg = dbg->next;
+			if (dbg == head) {
+				lib_printf("TD13_DUMP: tail->next == head after %d entries (list IS circular)\n", td13_i + 1);
+				break;
+			}
+		}
+		if (td13_i >= 40) {
+			lib_printf("TD13_DUMP: walk hit 40-entry bound WITHOUT returning to head (list NOT circular)\n");
+		}
+	}
+
 	if (prog != NULL) {
 		/* TODO(TD-13-spawn-cap): hard cap on spawn-loop iterations on
 		 * real Pi 4. Empirically the loop iterates correctly through
