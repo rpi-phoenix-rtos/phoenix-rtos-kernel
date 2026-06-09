@@ -319,6 +319,35 @@ void hal_cpuGetCycles(cycles_t *cb)
 }
 
 
+void hal_cpuWatchpointSet(addr_t va, int enable)
+{
+	/* MDSCR_EL1.MDE = bit 15 (monitor-mode debug enable). */
+	const unsigned long mdscrMde = (1UL << 15);
+
+	if (enable == 0) {
+		sysreg_write(dbgwcr0_el1, 0UL);
+		sysreg_write(mdscr_el1, sysreg_read(mdscr_el1) & ~mdscrMde);
+		hal_cpuInstrBarrier();
+		return;
+	}
+
+	/* Clear the OS lock so debug exceptions can be generated (EL3/firmware may
+	 * leave it set). */
+	sysreg_write(oslar_el1, 0UL);
+	sysreg_write(mdscr_el1, sysreg_read(mdscr_el1) | mdscrMde);
+
+	/* Watched doubleword address (DBGWVR is 8-byte aligned). */
+	sysreg_write(dbgwvr0_el1, va & ~7UL);
+
+	/* DBGWCR0_EL1: E[0]=1 enable; PAC[2:1]=0b11 match EL0+EL1; LSC[4:3]=0b10
+	 * store-only; BAS[12:5]=0xFF all 8 bytes; HMC[13]=0, SSC[15:14]=0,
+	 * MASK[20:16]=0 (no range). (ARM ARM D2: DBGWCRn_EL1.) */
+	const unsigned long wcr = (1UL << 0) | (0x3UL << 1) | (0x2UL << 3) | (0xFFUL << 5);
+	sysreg_write(dbgwcr0_el1, wcr);
+	hal_cpuInstrBarrier();
+}
+
+
 void hal_cpuLowPower(time_t us, spinlock_t *spinlock, spinlock_ctx_t *sc)
 {
 	hal_spinlockClear(spinlock, sc);

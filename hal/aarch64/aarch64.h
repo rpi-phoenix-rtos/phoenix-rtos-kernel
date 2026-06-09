@@ -182,6 +182,16 @@ void hal_cpuEnableICache(void);
 void hal_cpuEnableCaches(void);
 
 
+/* Self-hosted A72 data watchpoint (debug/diagnostic, Route A). Programs the
+ * single hardware watchpoint comparator (DBGWVR0/DBGWCR0) to fault on a store
+ * to the doubleword containing `va`, at EL0 or EL1, and enables monitor-mode
+ * debug (MDSCR_EL1.MDE). The resulting watchpoint debug exception is taken to
+ * EL1 and dumped by exceptions_watchpointHandler. enable==0 disarms (clears
+ * DBGWCR0.E and MDSCR_EL1.MDE). Arms only the calling CPU's debug registers;
+ * userspace is cpu0-only today so the caller (a syscall on cpu0) is sufficient. */
+void hal_cpuWatchpointSet(addr_t va, int enable);
+
+
 /* parasoft-begin-suppress MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 
 /* Invalidate TLB entries by ASID Match */

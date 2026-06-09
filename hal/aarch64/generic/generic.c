@@ -70,6 +70,13 @@ int hal_platformctl(void *ptr)
 			}
 			break;
 
+		case pctl_watchpoint:
+			if (data->action == pctl_set) {
+				hal_cpuWatchpointSet(data->task.watchpoint.va, (int)data->task.watchpoint.enable);
+				ret = 0;
+			}
+			break;
+
 		default:
 			/* No action required */
 			break;

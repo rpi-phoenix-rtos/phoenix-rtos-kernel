@@ -219,6 +219,26 @@ static void exceptions_serrorHandler(unsigned int n, exc_context_t *ctx)
 }
 
 
+/* Self-hosted A72 watchpoint (Route A, debug/diagnostic). When a watchpoint
+ * armed via platformctl(pctl_watchpoint) fires, dump the context — pc/ELR is
+ * the writer, far is the watched address — and halt (never reboot, even under
+ * NDEBUG: the whole point is to freeze and read the culprit over UART). This is
+ * the "halt-first" stage; value-discrimination + resume (to skip legitimate
+ * writers) is a separate, conditional follow-up. */
+static void exceptions_watchpointHandler(unsigned int n, exc_context_t *ctx)
+{
+	char buff[SIZE_CTXDUMP];
+
+	hal_exceptionsDumpContext(buff, ctx, n);
+	hal_consolePrint(ATTR_BOLD, "\nwatchpoint hit - halting (pc=writer, far=watched addr):\n");
+	hal_consolePrint(ATTR_BOLD, buff);
+
+	for (;;) {
+		hal_cpuHalt();
+	}
+}
+
+
 void threads_setupUserReturn(void *retval, cpu_context_t *ctx);
 
 
@@ -347,4 +367,8 @@ void _hal_exceptionsInit(void)
 
 	/* TD-10: SError gets a dedicated dump-and-halt handler (see above). */
 	exceptions.handler[EXC_SERROR] = exceptions_serrorHandler;
+
+	/* Route A: EL0 data watchpoints (armed via platformctl(pctl_watchpoint))
+	 * dump-and-halt instead of the default reboot, so the writer is readable. */
+	exceptions.handler[EXC_WATCHPOINT_EL0] = exceptions_watchpointHandler;
 }

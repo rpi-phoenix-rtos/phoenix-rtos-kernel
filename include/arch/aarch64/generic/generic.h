@@ -21,7 +21,7 @@
 
 typedef struct {
 	enum { pctl_set = 0, pctl_get } action;
-	enum { pctl_reboot = 0, pctl_graphmode } type;
+	enum { pctl_reboot = 0, pctl_graphmode, pctl_watchpoint } type;
 
 	union {
 		struct {
@@ -36,6 +36,16 @@ typedef struct {
 			unsigned short pitch;
 			unsigned long framebuffer; /* addr_t */
 		} graphmode;
+
+		/* Self-hosted A72 data watchpoint (debug/diagnostic, Route A). Arms a
+		 * store watchpoint on `va` (EL0+EL1); the watchpoint debug exception is
+		 * dumped over the console by exceptions_watchpointHandler. Used to catch
+		 * the writer of a corrupted location (e.g. USB #121 hub_common.events).
+		 * enable==0 disarms. Single comparator (DBGWVR0/DBGWCR0). */
+		struct {
+			unsigned long va;
+			unsigned int enable;
+		} watchpoint;
 	} task;
 } __attribute__((packed)) platformctl_t;
 
