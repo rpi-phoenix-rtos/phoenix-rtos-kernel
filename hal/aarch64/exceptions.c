@@ -219,23 +219,55 @@ static void exceptions_serrorHandler(unsigned int n, exc_context_t *ctx)
 }
 
 
+/* Value-trap window for the watchpoint handler, set by hal_cpuWatchpointSet
+ * (cpu.c). trapHi == 0 => halt on any store. */
+extern addr_t hal_wpTrapLo;
+extern addr_t hal_wpTrapHi;
+
+
 /* Self-hosted A72 watchpoint (Route A, debug/diagnostic). When a watchpoint
- * armed via platformctl(pctl_watchpoint) fires, dump the context — pc/ELR is
- * the writer, far is the watched address — and halt (never reboot, even under
- * NDEBUG: the whole point is to freeze and read the culprit over UART). This is
- * the "halt-first" stage; value-discrimination + resume (to skip legitimate
- * writers) is a separate, conditional follow-up. */
+ * armed via platformctl(pctl_watchpoint) fires:
+ *  - halt+dump (pc/ELR = writer, far = watched addr) if either the trap window
+ *    is disabled (trapHi == 0), the faulting store is not the simple
+ *    `str Xt, [Xn{,#imm}]` form we can emulate, or the value being stored is in
+ *    [trapLo, trapHi) (e.g. a code-pointer wild write — the thing we're hunting).
+ *    Never reboots, even under NDEBUG, so the culprit is readable over UART; the
+ *    preemptive scheduler keeps the rest of the system alive.
+ *  - otherwise the store is legitimate (NULL / heap pointer): emulate it (the
+ *    watchpoint fires before the access completes) and step past it, leaving the
+ *    watchpoint armed so a later wild write is still caught.
+ * A72 is ARMv8.0 (no FEAT_PAN), so EL1 may read the faulting EL0 instruction and
+ * write the EL0 store target directly. */
 static void exceptions_watchpointHandler(unsigned int n, exc_context_t *ctx)
 {
-	char buff[SIZE_CTXDUMP];
+	unsigned int instr = *(volatile unsigned int *)(addr_t)ctx->cpuCtx.pc;
+	unsigned int rt = instr & 0x1fU;
+	/* STR (64-bit, unsigned offset): `str Xt, [Xn{,#imm}]` — the only form
+	 * list.c emits for `*list = X`. */
+	int isStrImm = ((instr & 0xffc00000U) == 0xf9000000U) ? 1 : 0;
+	unsigned long value = (rt == 31U) ? 0UL : ctx->cpuCtx.x[rt];
+	int trap;
 
-	hal_exceptionsDumpContext(buff, ctx, n);
-	hal_consolePrint(ATTR_BOLD, "\nwatchpoint hit - halting (pc=writer, far=watched addr):\n");
-	hal_consolePrint(ATTR_BOLD, buff);
-
-	for (;;) {
-		hal_cpuHalt();
+	if (hal_wpTrapHi == 0UL) {
+		trap = 1;
 	}
+	else {
+		trap = ((isStrImm == 0) || ((value >= (unsigned long)hal_wpTrapLo) && (value < (unsigned long)hal_wpTrapHi))) ? 1 : 0;
+	}
+
+	if (trap != 0) {
+		char buff[SIZE_CTXDUMP];
+		hal_exceptionsDumpContext(buff, ctx, n);
+		hal_consolePrint(ATTR_BOLD, "\nwatchpoint hit - halting (pc=writer, far=watched addr):\n");
+		hal_consolePrint(ATTR_BOLD, buff);
+		for (;;) {
+			hal_cpuHalt();
+		}
+	}
+
+	/* Legitimate store: far is the exact accessed address; emulate and step. */
+	*(volatile unsigned long *)(addr_t)ctx->far = value;
+	ctx->cpuCtx.pc += 4UL;
 }
 
 

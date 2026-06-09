@@ -188,8 +188,11 @@ void hal_cpuEnableCaches(void);
  * debug (MDSCR_EL1.MDE). The resulting watchpoint debug exception is taken to
  * EL1 and dumped by exceptions_watchpointHandler. enable==0 disarms (clears
  * DBGWCR0.E and MDSCR_EL1.MDE). Arms only the calling CPU's debug registers;
- * userspace is cpu0-only today so the caller (a syscall on cpu0) is sufficient. */
-void hal_cpuWatchpointSet(addr_t va, int enable);
+ * userspace is cpu0-only today so the caller (a syscall on cpu0) is sufficient.
+ * When trapHi != 0 the watchpoint exception handler only halts on a store whose
+ * value is in [trapLo, trapHi) and emulates+steps-over other stores; trapHi == 0
+ * halts on any store. */
+void hal_cpuWatchpointSet(addr_t va, int enable, addr_t trapLo, addr_t trapHi);
 
 
 /* parasoft-begin-suppress MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */

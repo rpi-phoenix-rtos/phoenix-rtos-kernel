@@ -45,6 +45,13 @@ typedef struct {
 		struct {
 			unsigned long va;
 			unsigned int enable;
+			/* If trapHi != 0: the watchpoint halts only when the value being
+			 * stored is in [trapLo, trapHi) (e.g. a code-pointer wild write);
+			 * legitimate stores of NULL / heap pointers are emulated and
+			 * stepped over, keeping the watchpoint armed. If trapHi == 0: halt
+			 * on any store (the simple halt-first mode). */
+			unsigned long trapLo;
+			unsigned long trapHi;
 		} watchpoint;
 	} task;
 } __attribute__((packed)) platformctl_t;

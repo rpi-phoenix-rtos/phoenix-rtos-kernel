@@ -319,10 +319,19 @@ void hal_cpuGetCycles(cycles_t *cb)
 }
 
 
-void hal_cpuWatchpointSet(addr_t va, int enable)
+/* Value-trap window read by exceptions_watchpointHandler (see exceptions.c).
+ * trapHi == 0 means "halt on any store". */
+addr_t hal_wpTrapLo = 0;
+addr_t hal_wpTrapHi = 0;
+
+
+void hal_cpuWatchpointSet(addr_t va, int enable, addr_t trapLo, addr_t trapHi)
 {
 	/* MDSCR_EL1.MDE = bit 15 (monitor-mode debug enable). */
 	const unsigned long mdscrMde = (1UL << 15);
+
+	hal_wpTrapLo = trapLo;
+	hal_wpTrapHi = trapHi;
 
 	if (enable == 0) {
 		sysreg_write(dbgwcr0_el1, 0UL);
