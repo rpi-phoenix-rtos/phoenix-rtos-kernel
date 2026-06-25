@@ -944,22 +944,6 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 		}
 	}
 
-	{
-		char buf[96];
-		unsigned long len;
-
-		/* One-liner summary of detected RAM range. Useful on first-boot
-		 * regression triage; not in any hot path. */
-		len = hal_i2s("pmap: banks=", buf, (unsigned long)nBanks, 10, 0);
-		buf[len++] = ' ';
-		len += hal_i2s("min=0x", buf + len, (unsigned long)pmap_common.mem.min, 16, 0);
-		buf[len++] = ' ';
-		len += hal_i2s("max=0x", buf + len, (unsigned long)pmap_common.mem.max, 16, 0);
-		buf[len++] = '\n';
-		buf[len] = '\0';
-		hal_consolePrint(ATTR_USER, buf);
-	}
-
 	/* Set code to read-only, everything else XN and remove mappings past
 	 * the kernel end. Pi 4 bootstrap maps two TTL3 pages because the kernel
 	 * image now extends past the first 2 MiB window.

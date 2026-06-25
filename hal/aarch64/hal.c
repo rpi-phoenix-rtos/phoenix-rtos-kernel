@@ -95,26 +95,11 @@ void _hal_init_c(void)
 	addr_t dtbStart;
 	addr_t dtbEnd;
 
-	/* TD-04-hack-2 + TD-04-hack-3 cleaned up 2026-05-17.
-	 *
-	 * Pre-cleanup state: this function had ~17 inline marker stores
-	 * (H, 4, 5, 6, F/S, r/D, s, E, 7, 8, 9, a, b, c, d, e) to a
-	 * TTBR1-mapped early-UART pointer at 0xffffffffffe00000, plus a
-	 * faked `dtbEnd = dtbStart + 0x10000` because reading `dtb->end`
-	 * hung the kernel on real Pi 4 silicon in the cache-off era.
-	 *
-	 * With the 2026-05-17 armstub fix (CPUACTLR_EL1[46] erratum 1319367
-	 * + L2CTLR_EL1 BCM2711 timing) the underlying cache-coherency
-	 * defect is gone; the Heisenbug-shaped hangs that originally
-	 * justified the markers and the fake `dtbEnd` no longer reproduce.
-	 *
-	 * Markers stripped to reduce UART chatter (helps boot speed —
-	 * every byte to UART also gets mirrored to HDMI by pl011-tty's
-	 * fbcon path; fewer bytes = faster). Real `dtb->end` read
-	 * restored — correctness improvement; the prior 64 KiB cap could
-	 * silently truncate parsing for any DTB > 64 KiB (Pi 4's is
-	 * currently 56 KiB so the hack was within bounds, but a future
-	 * Pi variant or kernel cmdline addition could push it over). */
+	/* dtbEnd is read from the real DTB size (firmwareDtbSize or dtb->end).
+	 * An earlier Pi 4 cache-coherency workaround faked it as
+	 * dtbStart + 0x10000, which could silently truncate parsing of a DTB
+	 * larger than 64 KiB; that workaround was removed 2026-05-17 once the
+	 * armstub cache fix landed. See TD-04. */
 
 	hal_common.started = 0;
 	schedulerLocked = 0;
@@ -143,15 +128,10 @@ void _hal_init_c(void)
 	_pmap_preinit(dtbStart, dtbEnd);
 	_hal_platformInit();
 	_hal_consoleInit();
-	hal_consolePrint(ATTR_USER, "hi: console\n");
 	_hal_exceptionsInit();
-	hal_consolePrint(ATTR_USER, "hi: exc\n");
 	_hal_interruptsInit();
-	hal_consolePrint(ATTR_USER, "hi: intr\n");
 	_hal_cpuInit();
-	hal_consolePrint(ATTR_USER, "hi: cpu\n");
 	_hal_timerInit(SYSTICK_INTERVAL);
-	hal_consolePrint(ATTR_USER, "hi: timer\n");
 
 	return;
 }
