@@ -692,12 +692,6 @@ _core_0_virtual:
 	adrp x0, hal_syspage
 	str x1, [x0, #:lo12:hal_syspage]
 
-	/* E2 probe: stash the original plo syspage PA into x14 so the
-	 * post-copy probe can read source bytes via x14 + 0x310 and
-	 * compare against the dest-side reads (the copy advances x9 by
-	 * `size`, so x9 alone isn't usable post-copy). */
-	mov x14, x9
-
 	/* Clean+invalidate the plo-owned syspage cache range before reading it.
 	 * plo builds the syspage with MMU+D-cache enabled; when it jumps to the
 	 * kernel it does NOT flush D-cache. Some dirty lines (seen as bit-level
@@ -1034,14 +1028,7 @@ _inval_icache_range:
  * x18..x29 so they don't trample the architecturally-defined exception
  * context. They use the early PL011 alias when MMU is on (so device
  * memory) which is mapped in PMAP_COMMON_DEVICES_TTL3; if the fault
- * happened pre-MMU we would not reach this code anyway.
- *
- * Rejected by the previous agent on the grounds that real Pi was
- * "slow not crashed" — but the user clarified the boot was simply
- * waiting on a cache-disabled tty, not in a crashed state, so the
- * diagnostic value of this dump outweighs the fact that any fault
- * here followed by a slow boot is more informative than a fault
- * followed by silence. */
+ * happened pre-MMU we would not reach this code anyway. */
 .macro early_putc_inline ch
 997991:
         ldr x21, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
