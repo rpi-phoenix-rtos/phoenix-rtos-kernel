@@ -30,6 +30,15 @@
 #define KERNEL_LOG_SIZE 2048
 #endif
 
+/* Task #31 — logging build mode (defined in the board's board_config.h; 0 for
+ * every board that doesn't opt in). When 1, the normal-path UART klog mirror
+ * below is compiled out so the verbose kernel log no longer floods the console
+ * (it is captured to /var/log/messages by the rpi4-klogd daemon instead). The
+ * panic path is never gated, so critical output always reaches the UART. */
+#ifndef RPI4_LOG_TO_FILE
+#define RPI4_LOG_TO_FILE 0
+#endif
+
 #define TCGETS 0x405c7401UL
 
 
@@ -421,7 +430,15 @@ size_t log_write(const char *data, size_t len)
 		 * log text.) */
 		for (i = 0; i < len; ++i) {
 			_log_push(data[i]);
+#if !RPI4_LOG_TO_FILE
+			/* DEBUG mode (default): mirror every klog byte to the UART, the
+			 * kernel's own complete deterministic boot log. In USER mode
+			 * (RPI4_LOG_TO_FILE) this normal-path mirror is suppressed to keep
+			 * the console quiet — the bytes still enter the ring (above) so the
+			 * rpi4-klogd daemon and dmesg read the full log. The panic path
+			 * (log_common.enabled == 0, the else branch below) is never gated. */
 			hal_consolePutch(data[i]);
+#endif
 			if (_log_full() != 0) {
 				do {
 					/* Log full, remove oldest line to make space */
