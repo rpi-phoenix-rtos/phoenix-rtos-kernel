@@ -32,10 +32,12 @@
 /* casts needed as return type is not always the same as *ptr (why? GCC bug?) */
 #if defined(__aarch64__) && (NUM_CPUS == 1)
 
-/* TODO(TD-13): The current Pi 4 single-core bring-up cannot safely use the
- * AArch64 exclusive-access atomics emitted by GCC for __atomic_* builtins.
- * Mask interrupts and use plain memory updates, matching the single-core
- * AArch64 spinlock path. Revisit when Cortex-A72 SMP/coherency is enabled. */
+/* Single-core scope (TD-01/TD-11): the shipping Pi 4 config schedules on
+ * cpu0 only (NUM_CPUS == 1). In that build the AArch64 exclusive-access
+ * atomics GCC emits for the __atomic_* builtins are unnecessary, so mask
+ * interrupts and use plain memory updates, matching the single-core
+ * AArch64 spinlock path. SMP builds (NUM_CPUS != 1) use the real
+ * __atomic_* path below. Full Cortex-A72 SMP scheduling is future work. */
 #define lib_atomicIncrement(ptr) ({ \
 	spinlock_ctx_t _sc; \
 	typeof(*(ptr)) _ret; \
