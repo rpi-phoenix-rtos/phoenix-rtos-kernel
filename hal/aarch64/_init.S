@@ -586,7 +586,7 @@ el1_entry:
 	orr  x0, x0, #(1 << 0)    /* SCTLR_EL1.M  — MMU enable */
 	orr  x0, x0, #(1 << 2)    /* SCTLR_EL1.C  — D-cache enable */
 	orr  x0, x0, #(1 << 12)   /* SCTLR_EL1.I  — I-cache enable */
-	orr  x0, x0, #(1 << 26)   /* SCTLR_EL1.UCI — allow EL0 cache maintenance (dc civac/cvac/ivac, ic ivau); Linux-standard, lets userspace drivers do streaming-DMA cache ops */
+	orr  x0, x0, #(1 << 26)   /* SCTLR_EL1.UCI — allow EL0 cache maintenance (dc cvau/cvac/cvap/cvadp/civac + ic ivau); Linux-standard, lets userspace drivers do streaming-DMA cache ops. NOTE: UCI does NOT enable dc ivac (invalidate-only is EL1-only); EL0 streaming-DMA must use dc civac (clean+invalidate) — see lwip genet RX. */
 	msr  sctlr_el1, x0
 	isb
 
