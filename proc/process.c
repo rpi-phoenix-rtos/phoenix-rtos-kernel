@@ -683,6 +683,69 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 }
 
 
+/* Fault in the pages of the (lazily mapped) ELF image that overlap [off, off+len).
+ * Ranges outside the mapped image are ignored — the ELF validator run afterwards
+ * rejects the binary if such offsets are actually malformed. */
+static int process_forceRange(void *base, size_t size, size_t off, size_t len)
+{
+	ptr_t w, end;
+	int err;
+
+	if ((len == 0U) || (off >= size)) {
+		return EOK;
+	}
+	if (len > (size - off)) {
+		len = size - off;
+	}
+
+	end = round_page((ptr_t)base + off + len);
+	for (w = ((ptr_t)base + off) & ~((ptr_t)SIZE_PAGE - 1U); w < end; w += SIZE_PAGE) {
+		err = vm_mapForce(process_common.kmap, (void *)w, PROT_READ);
+		if (err != EOK) {
+			/* Propagate the real fault (e.g. -EIO from a failed backing read)
+			 * rather than masking it, so an exec failure names its cause. */
+			return err;
+		}
+	}
+	return EOK;
+}
+
+
+/* Fault in only the ELF metadata a 64-bit load dereferences: the program-header
+ * table, the section-header table and the section-name string table. The segment
+ * data in between is pointer-range-checked only (never read during parsing), so
+ * leaving it demand-paged avoids eagerly pulling the whole file from the backing
+ * store. Offsets are still untrusted here, so each deref is bounds-checked. */
+static int process_forceElf64Headers(Elf64_Ehdr *ehdr, size_t size)
+{
+	int err;
+	Elf64_Shdr *shstrshdr;
+
+	/* Stride by sizeof(), not e_*entsize: the validator and loader index these
+	 * tables as Elf64_Phdr[]/Elf64_Shdr[] regardless of the header's entsize, so
+	 * forcing by sizeof() covers exactly the pages they dereference (a malformed
+	 * entsize must not leave a touched page unforced -> kernel fault dump). */
+	err = process_forceRange(ehdr, size, (size_t)ehdr->e_phoff, (size_t)ehdr->e_phnum * sizeof(Elf64_Phdr));
+	if (err != EOK) {
+		return err;
+	}
+
+	err = process_forceRange(ehdr, size, (size_t)ehdr->e_shoff, (size_t)ehdr->e_shnum * sizeof(Elf64_Shdr));
+	if (err != EOK) {
+		return err;
+	}
+
+	shstrshdr = (Elf64_Shdr *)((char *)ehdr + ehdr->e_shoff) + ehdr->e_shstrndx;
+	if (process_isPtrValid(ehdr, size, shstrshdr, sizeof(*shstrshdr)) != 0) {
+		err = process_forceRange(ehdr, size, (size_t)((char *)shstrshdr - (char *)ehdr), sizeof(*shstrshdr));
+		if (err == EOK) {
+			err = process_forceRange(ehdr, size, (size_t)shstrshdr->sh_offset, (size_t)shstrshdr->sh_size);
+		}
+	}
+	return err;
+}
+
+
 static int process_load(process_t *process, vm_object_t *o, off_t base, size_t size, void **ustack, void **entry)
 {
 	void *stack;
@@ -690,6 +753,7 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 	vm_map_t *map = process->mapp;
 	size_t ustacksz = SIZE_USTACK;
 	int err = EOK;
+	unsigned int prevLazy;
 	hal_tls_t tlsNew;
 	ptr_t tbssAddr = 0;
 
@@ -701,27 +765,52 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 
 	size = round_page(size);
 
+	/* Map the ELF image into the kernel map to parse its headers. Force the
+	 * mapping to be demand-paged for the mmap itself so the VA is reserved
+	 * WITHOUT eagerly reading the whole file from the backing store: a large
+	 * binary on a remote filesystem (NFS) would otherwise be pulled in one page
+	 * read at a time and pinned in full, stalling exec and risking -ENOMEM. Only
+	 * the metadata pages the parser dereferences are faulted in below; the
+	 * segment data in between is mapped per-segment by process_load{32,64}. exec
+	 * is single-threaded for this process, so toggling its lazy flag here is
+	 * safe (vm_mmap reads the flag from the current process). */
+	prevLazy = process->lazy;
+	process->lazy = 1;
 	ehdr = vm_mmap(process_common.kmap, NULL, NULL, size, PROT_READ, o, base, MAP_NONE);
+	process->lazy = prevLazy;
 	if (ehdr == NULL) {
 		return -ENOMEM;
 	}
 
-	switch (ehdr->e_ident[4]) {
-		/* 32-bit binary */
-		case 1:
-			*entry = (void *)(ptr_t)((Elf32_Ehdr *)ehdr)->e_entry;
-			err = process_load32(map, o, base, ehdr, size, &ustacksz, &tlsNew, &tbssAddr);
-			break;
+	/* Fault in page 0 (the ELF identification), then the metadata pages. A
+	 * 64-bit image needs only its header/phdr/shdr/name-table ranges; for any
+	 * other class fall back to forcing the whole image (the original behaviour).
+	 * A force failure propagates the real fault code (e.g. -EIO) so it is not
+	 * confused with -ENOEXEC from the validator rejecting a successfully-read
+	 * but malformed image. */
+	err = vm_mapForce(process_common.kmap, ehdr, PROT_READ);
+	if (err == EOK) {
+		err = (ehdr->e_ident[4] == 2) ? process_forceElf64Headers(ehdr, size) : process_forceRange(ehdr, size, 0, size);
+	}
 
-		/* 64-bit binary */
-		case 2:
-			*entry = (void *)(ptr_t)ehdr->e_entry;
-			err = process_load64(map, o, base, ehdr, size, &ustacksz, &tlsNew, &tbssAddr);
-			break;
+	if (err == EOK) {
+		switch (ehdr->e_ident[4]) {
+			/* 32-bit binary */
+			case 1:
+				*entry = (void *)(ptr_t)((Elf32_Ehdr *)ehdr)->e_entry;
+				err = process_load32(map, o, base, ehdr, size, &ustacksz, &tlsNew, &tbssAddr);
+				break;
 
-		default:
-			err = -ENOEXEC;
-			break;
+			/* 64-bit binary */
+			case 2:
+				*entry = (void *)(ptr_t)ehdr->e_entry;
+				err = process_load64(map, o, base, ehdr, size, &ustacksz, &tlsNew, &tbssAddr);
+				break;
+
+			default:
+				err = -ENOEXEC;
+				break;
+		}
 	}
 	(void)vm_munmap(process_common.kmap, ehdr, size);
 
