@@ -1158,6 +1158,11 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	}
 
 	if (err != EOK) {
+		/* exec failed inside the freshly-created process: the parent's vfork has
+		 * already returned, so this is invisible to the shell (no output, no fault,
+		 * process just exits). Name the failing exec + errno so a silent load failure
+		 * (e.g. a short/garbled read of an ELF off NFS) is diagnosable on the console. */
+		lib_printf("proc: exec '%s' failed (err=%d)\n", (current->process->path != NULL) ? current->process->path : "?", err);
 		current->process->exit = err;
 		proc_threadEnd();
 	}

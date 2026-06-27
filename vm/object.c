@@ -171,10 +171,13 @@ int vm_objectPut(vm_object_t *o)
 }
 
 
-static page_t *object_fetch(oid_t oid, u64 offs)
+static page_t *object_fetch(oid_t oid, u64 offs, size_t osize)
 {
 	page_t *p;
 	void *v;
+	size_t total = 0;
+	size_t target;
+	int r;
 
 	if (proc_open(oid, 0) < 0) {
 		return NULL;
@@ -193,11 +196,35 @@ static page_t *object_fetch(oid_t oid, u64 offs)
 		return NULL;
 	}
 
-	if (proc_read(oid, (off_t)offs, v, SIZE_PAGE, 0) < 0) {
-		(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
-		vm_pageFree(p);
-		(void)proc_close(oid, 0);
-		return NULL;
+	/* Read up to the file end within this page, looping over short reads. A backing
+	 * store may legitimately satisfy a read with fewer bytes than requested (this is
+	 * normal for network filesystems such as NFS, where a single READ RPC can return
+	 * short); the page allocator does not zero page contents, so a single proc_read()
+	 * that returned short would leave the page tail filled with stale data, corrupting
+	 * demand-paged code/data and silently breaking exec-from-NFS of large binaries.
+	 * The loop is bounded by the object size so it never issues a read at or past EOF
+	 * (offs < o->size is guaranteed by the caller), keeping behaviour identical to the
+	 * old single-read path for filesystems that always return full reads. The page tail
+	 * beyond the file end is zero-filled (the ELF loader maps whole pages). */
+	target = ((u64)osize - offs < SIZE_PAGE) ? (size_t)((u64)osize - offs) : SIZE_PAGE;
+	while (total < target) {
+		r = proc_read(oid, (off_t)(offs + total), (char *)v + total, target - total, 0);
+		if (r < 0) {
+			(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
+			vm_pageFree(p);
+			(void)proc_close(oid, 0);
+			return NULL;
+		}
+		if (r == 0) {
+			/* Server reported EOF earlier than the object size promised; the trailing
+			 * zero-fill below covers the gap rather than spinning. */
+			break;
+		}
+		total += (size_t)r;
+	}
+
+	if (total < SIZE_PAGE) {
+		hal_memset((char *)v + total, 0, SIZE_PAGE - total);
 	}
 
 	(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
@@ -249,7 +276,7 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 
 	(void)proc_lockClear(&map->lock);
 
-	*page = object_fetch(o->oid, offs);
+	*page = object_fetch(o->oid, offs, o->size);
 
 	err = vm_lockVerify(map, amap, o, vaddr, offs);
 	if (err != 0) {
