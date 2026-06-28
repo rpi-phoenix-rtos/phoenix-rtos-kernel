@@ -247,6 +247,12 @@ int unix_close(unsigned int socket);
 int unix_poll(unsigned int socket, unsigned short events);
 
 
+/* Block until an AF_UNIX socket changes readiness or `deadline` (absolute,
+ * proc_gettime raw units) passes — the readiness-woken backend for posix_poll.
+ * Returns -EINTR if the calling process is being torn down, else 0. */
+int unix_pollWait(time_t deadline);
+
+
 void unix_sockets_init(void);
 
 #endif

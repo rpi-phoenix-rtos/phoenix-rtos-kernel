@@ -39,15 +39,16 @@
 #endif
 
 /*
- * Re-check granularity (us) for poll()/select() while waiting for a watched fd
- * to become ready. posix_poll is currently a poll-and-sleep loop (not woken on
- * readiness), so this bounds the latency of detecting that a socket/pipe became
- * readable. The old 100 ms made every X client round-trip (libxcb waits each
- * reply with poll(-1)) cost up to 100 ms -> a desktop that crawled. 2 ms keeps
- * interactive IPC snappy. INTERIM: the proper fix is a readiness-woken poll for
- * AF_UNIX fds (they already have wait-queues) so blocked pollers don't spin.
+ * Fallback re-check granularity (us) for poll()/select(). AF_UNIX fds are now
+ * readiness-woken (posix_poll blocks on the unix poll queue via unix_pollWait,
+ * woken the instant a socket changes state), so this interval only bounds the
+ * latency for fds whose readiness comes from a remote server over mtGetAttr
+ * (network sockets, devices), which has no readiness-wakeup yet. It is also the
+ * safety-net timeout behind the AF_UNIX wait, so a missed notify degrades to
+ * this latency rather than a hang. 20 ms: responsive enough for remote-fd polls
+ * without the ~500Hz spin a sub-ms value would impose on every blocked poller.
  */
-#define POLL_INTERVAL 2000
+#define POLL_INTERVAL 20000
 
 
 /* NOTE: socket/port ids are limited to 32-bits, hence possible downcast of oid.id from id_t to unsigned int */
@@ -2356,7 +2357,7 @@ int posix_futimens(int fildes, const struct timespec *times)
 }
 
 
-static int do_poll_iteration(struct pollfd *fds, nfds_t nfds)
+static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix)
 {
 	msg_t msg;
 	int ready = 0;
@@ -2387,6 +2388,9 @@ static int do_poll_iteration(struct pollfd *fds, nfds_t nfds)
 			(void)posix_fileDeref(f);
 
 			if (f->type == ftUnixSocket) {
+				if (hasUnix != NULL) {
+					*hasUnix = 1;
+				}
 				err = unix_poll((unsigned int)msg.oid.id, events);
 			}
 			else {
@@ -2429,7 +2433,8 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 {
 	unsigned int i, n;
 	int ready;
-	time_t timeout, now;
+	int hasUnix = 0;
+	time_t timeout, now, cur;
 
 	n = 0U;
 
@@ -2455,15 +2460,15 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		timeout = 0;
 	}
 
-	ready = do_poll_iteration(fds, nfds);
+	ready = do_poll_iteration(fds, nfds, &hasUnix);
 	while (ready == 0) {
+		proc_gettime(&cur, NULL);
 		if (timeout != 0) {
-			proc_gettime(&now, NULL);
-			if (now > timeout) {
+			if (cur > timeout) {
 				break;
 			}
 
-			now = timeout - now;
+			now = timeout - cur;
 			if (now > POLL_INTERVAL) {
 				now = POLL_INTERVAL;
 			}
@@ -2472,8 +2477,24 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 			now = POLL_INTERVAL;
 		}
 
-		(void)proc_threadSleep(now);
-		ready = do_poll_iteration(fds, nfds);
+		/*
+		 * If any watched fd is an AF_UNIX socket, block on the unix poll queue
+		 * (woken the instant any unix socket changes readiness) with `now` as a
+		 * timeout fallback — so local X client<->server round-trips are not gated
+		 * by the re-check interval. Sets with no AF_UNIX fd keep the timed sleep
+		 * (their readiness comes from a remote server via mtGetAttr, which has no
+		 * readiness-wakeup yet).
+		 */
+		if (hasUnix != 0) {
+			if (unix_pollWait(cur + now) == -EINTR) {
+				return -EINTR;
+			}
+		}
+		else {
+			(void)proc_threadSleep(now);
+		}
+
+		ready = do_poll_iteration(fds, nfds, &hasUnix);
 	}
 
 	return ready;

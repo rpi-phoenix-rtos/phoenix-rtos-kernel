@@ -76,6 +76,15 @@ typedef struct _unixsock_t {
 static struct {
 	rbtree_t tree;
 	lock_t lock;
+	/* Readiness-woken poll() for AF_UNIX fds. Every unix-socket state change
+	 * (data queued, write space, peer close) wakes pollQueue; posix_poll waits
+	 * on it (with a timed fallback) instead of polling on a sleep loop, so X
+	 * client<->server round-trips have ~zero latency. One global queue + the
+	 * battle-tested proc_threadWait keeps the multi-fd case simple (a poller is a
+	 * single waiter; the wakeupPending sentinel covers the check-then-wait race).
+	 */
+	thread_t *pollQueue;
+	spinlock_t pollLock;
 } unix_common;
 
 
@@ -488,6 +497,7 @@ int unix_accept4(unsigned int socket, struct sockaddr *address, socklen_t *addre
 		new->remote = r;
 
 		(void)proc_threadWakeup(&r->queue);
+		(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
 		hal_spinlockClear(&r->spinlock, &sc);
 
 		err = (int)new->id;
@@ -698,6 +708,7 @@ int unix_connect(unsigned int socket, const struct sockaddr *address, socklen_t 
 			hal_spinlockSet(&r->spinlock, &sc);
 			LIST_ADD(&r->connecting, s);
 			(void)proc_threadWakeup(&r->queue);
+			(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
 			hal_spinlockClear(&r->spinlock, &sc);
 
 			hal_spinlockSet(&s->spinlock, &sc);
@@ -840,6 +851,7 @@ static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int fla
 				if (peek == 0U) {
 					hal_spinlockSet(&s->spinlock, &sc);
 					(void)proc_threadWakeup(&s->writeq);
+					(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
 					hal_spinlockClear(&s->spinlock, &sc);
 				}
 				break;
@@ -980,6 +992,7 @@ static ssize_t send(unsigned int socket, const void *buf, size_t len, unsigned i
 				if (err > 0) {
 					hal_spinlockSet(&r->spinlock, &sc);
 					(void)proc_threadWakeup(&r->queue);
+					(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
 					hal_spinlockClear(&r->spinlock, &sc);
 
 					break;
@@ -1276,8 +1289,30 @@ int unix_poll(unsigned int socket, unsigned short events)
 }
 
 
+/*
+ * Wait until an AF_UNIX socket becomes ready or `deadline` (absolute, in
+ * proc_gettime() raw units) passes. Woken early by unix_pollNotify() from any
+ * socket state change. The deadline is a fallback (covers non-unix fds in the
+ * same set and any missed notify) — so this can never hang, only add latency.
+ */
+int unix_pollWait(time_t deadline)
+{
+	spinlock_ctx_t sc;
+	int err;
+
+	/* Interruptible so a poll() in a process being torn down aborts promptly
+	 * (returns -EINTR) instead of waiting out the fallback timeout. */
+	hal_spinlockSet(&unix_common.pollLock, &sc);
+	err = proc_threadWaitInterruptible(&unix_common.pollQueue, &unix_common.pollLock, deadline, &sc);
+	hal_spinlockClear(&unix_common.pollLock, &sc);
+	return err;
+}
+
+
 void unix_sockets_init(void)
 {
 	lib_rbInit(&unix_common.tree, unixsock_cmp, unixsock_augment);
 	(void)proc_lockInit(&unix_common.lock, &proc_lockAttrDefault, "unix.common");
+	hal_spinlockCreate(&unix_common.pollLock, "unix.poll");
+	unix_common.pollQueue = NULL;
 }
