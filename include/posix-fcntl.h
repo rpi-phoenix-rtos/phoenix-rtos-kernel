@@ -42,6 +42,23 @@
 enum { F_DUPFD = 0, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL, F_SETFL,
 	F_GETOWN, F_SETOWN, F_GETLK, F_SETLK, F_SETLKW };
 
+/* Self-referential macros so portable code that probes with `#ifdef F_GETFL`
+ * (autoconf, gnulib, bfd, ...) detects these operations — the C preprocessor
+ * cannot see the enum constants above. Each macro expands to the same
+ * identifier (the enum value), so the values and behaviour are unchanged. The
+ * enum is fully parsed before these are defined, so it is not affected. */
+#define F_DUPFD         F_DUPFD
+#define F_DUPFD_CLOEXEC F_DUPFD_CLOEXEC
+#define F_GETFD         F_GETFD
+#define F_SETFD         F_SETFD
+#define F_GETFL         F_GETFL
+#define F_SETFL         F_SETFL
+#define F_GETOWN        F_GETOWN
+#define F_SETOWN        F_SETOWN
+#define F_GETLK         F_GETLK
+#define F_SETLK         F_SETLK
+#define F_SETLKW        F_SETLKW
+
 /* clang-format on */
 
 
