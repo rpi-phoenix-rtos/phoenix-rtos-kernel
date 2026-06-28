@@ -38,7 +38,16 @@
 #define TRACE(str, ...)
 #endif
 
-#define POLL_INTERVAL 100000
+/*
+ * Re-check granularity (us) for poll()/select() while waiting for a watched fd
+ * to become ready. posix_poll is currently a poll-and-sleep loop (not woken on
+ * readiness), so this bounds the latency of detecting that a socket/pipe became
+ * readable. The old 100 ms made every X client round-trip (libxcb waits each
+ * reply with poll(-1)) cost up to 100 ms -> a desktop that crawled. 2 ms keeps
+ * interactive IPC snappy. INTERIM: the proper fix is a readiness-woken poll for
+ * AF_UNIX fds (they already have wait-queues) so blocked pollers don't spin.
+ */
+#define POLL_INTERVAL 2000
 
 
 /* NOTE: socket/port ids are limited to 32-bits, hence possible downcast of oid.id from id_t to unsigned int */
