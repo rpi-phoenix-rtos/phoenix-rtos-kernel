@@ -1201,6 +1201,9 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	if (err == EOK) {
 		proc_changeMap(current->process, &current->process->map, NULL, &current->process->map.pmap);
 	}
+	else {
+		lib_printf("DIAG-NOMEM: vm_mapCreate err=%d (#43 exec map alloc)\n", err); /* TEMP-NOMEM-DIAG (#43) */
+	}
 	(void)i;
 #else
 	(void)pmap_create(&current->process->map.pmap, NULL, NULL, NULL);
