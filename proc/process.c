@@ -575,11 +575,13 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if ((filesz != 0U) && (vm_mmap(map, vaddr, NULL, round_page(filesz), prot, o, base + offs, flags) == NULL)) {
+			lib_printf("DIAG-NOMEM: seg-file vaddr=%p filesz=%zu\n", vaddr, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 			return -ENOMEM;
 		}
 
 		if (filesz != memsz) {
 			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
+				lib_printf("DIAG-NOMEM: seg-bss vaddr=%p memsz=%zu filesz=%zu\n", vaddr, (size_t)memsz, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 				return -ENOMEM;
 			}
 
@@ -667,11 +669,13 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if ((filesz != 0U) && (vm_mmap(map, vaddr, NULL, round_page(filesz), prot, o, base + offs, flags) == NULL)) {
+			lib_printf("DIAG-NOMEM: seg-file vaddr=%p filesz=%zu\n", vaddr, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 			return -ENOMEM;
 		}
 
 		if (filesz != memsz) {
 			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
+				lib_printf("DIAG-NOMEM: seg-bss vaddr=%p memsz=%zu filesz=%zu\n", vaddr, (size_t)memsz, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 				return -ENOMEM;
 			}
 
