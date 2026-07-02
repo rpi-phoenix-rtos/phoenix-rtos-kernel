@@ -171,66 +171,128 @@ int vm_objectPut(vm_object_t *o)
 }
 
 
-static page_t *object_fetch(oid_t oid, u64 offs, size_t osize)
+/* Demand-paging read-ahead window. A file-backed page fault previously fetched exactly
+ * one 4 KB page and paid THREE synchronous server round-trips for it (proc_open +
+ * proc_read + proc_close). Faulting a large binary in one page at a time therefore
+ * crawled: a 24 MB static executable spent ~68 s in per-page round-trips before it even
+ * reached main() when exec'd from ext2-on-SD. Fetching a bounded cluster per fault with a
+ * single open/read/close amortizes that overhead ~an order of magnitude and pre-loads the
+ * neighbouring pages sequential code execution is about to touch. The window is bounded
+ * (never the whole file) so lazy exec-from-NFS stays lazy (#43). */
+#define OBJECT_READAHEAD_PAGES 16u
+
+/* Fetch up to `want` consecutive backing-store pages starting at page-aligned `offs` into
+ * freshly-allocated pages (out[0] is the base page for `offs`), using ONE open + one bulk
+ * read + one close for the whole cluster. `offs < osize` is guaranteed by the caller; the
+ * window is clamped to the object's backing pages so no read is ever issued at/past EOF.
+ * Each returned page's tail beyond the file end (or beyond a short read) is zero-filled so
+ * stale allocator data can never leak into demand-paged code/data. Returns EOK with
+ * *got >= 1 on success, or a negative error with *got == 0 (nothing allocated) on failure.
+ * Degrades to a single page under kernel-heap pressure so paging still makes progress. */
+static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, page_t **out, size_t *got)
 {
 	page_t *p;
-	void *v;
-	size_t total = 0;
-	size_t target;
-	int r;
+	void *buf, *v;
+	size_t i, span, total, avail, target;
+	int r, err = EOK;
+
+	*got = 0;
+
+	/* Clamp the window to the pages that still back file data (never read past EOF). */
+	avail = (size_t)(((u64)round_page(osize) - offs) / SIZE_PAGE);
+	if (avail == 0u) {
+		avail = 1u;
+	}
+	if (want > avail) {
+		want = avail;
+	}
+	if (want > OBJECT_READAHEAD_PAGES) {
+		want = OBJECT_READAHEAD_PAGES;
+	}
+	if (want == 0u) {
+		want = 1u;
+	}
+
+	buf = vm_kmalloc(want * SIZE_PAGE);
+	if (buf == NULL) {
+		/* Fall back to a single page so demand-paging still progresses under kernel-heap
+		 * pressure (this matches the footprint of the old one-page-at-a-time fetch). */
+		want = 1u;
+		buf = vm_kmalloc(SIZE_PAGE);
+		if (buf == NULL) {
+			return -ENOMEM;
+		}
+	}
+
+	/* Real file bytes within the window; the last page may be partial. */
+	span = ((u64)osize - offs < (u64)want * SIZE_PAGE) ? (size_t)((u64)osize - offs) : (want * SIZE_PAGE);
 
 	if (proc_open(oid, 0) < 0) {
-		return NULL;
+		vm_kfree(buf);
+		return -EIO;
 	}
 
-	p = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
-	if (p == NULL) {
-		(void)proc_close(oid, 0);
-		return NULL;
-	}
-
-	v = vm_mmap(object_common.kmap, NULL, p, SIZE_PAGE, PROT_WRITE | PROT_USER, object_common.kernel, 0, MAP_NONE);
-	if (v == NULL) {
-		vm_pageFree(p);
-		(void)proc_close(oid, 0);
-		return NULL;
-	}
-
-	/* Read up to the file end within this page, looping over short reads. A backing
-	 * store may legitimately satisfy a read with fewer bytes than requested (this is
-	 * normal for network filesystems such as NFS, where a single READ RPC can return
-	 * short); the page allocator does not zero page contents, so a single proc_read()
-	 * that returned short would leave the page tail filled with stale data, corrupting
-	 * demand-paged code/data and silently breaking exec-from-NFS of large binaries.
-	 * The loop is bounded by the object size so it never issues a read at or past EOF
-	 * (offs < o->size is guaranteed by the caller), keeping behaviour identical to the
-	 * old single-read path for filesystems that always return full reads. The page tail
-	 * beyond the file end is zero-filled (the ELF loader maps whole pages). */
-	target = ((u64)osize - offs < SIZE_PAGE) ? (size_t)((u64)osize - offs) : SIZE_PAGE;
-	while (total < target) {
-		r = proc_read(oid, (off_t)(offs + total), (char *)v + total, target - total, 0);
+	/* Single bulk read for the whole window, looping over short reads (a backing store
+	 * may legitimately satisfy a read with fewer bytes than requested -- normal for NFS
+	 * where a READ RPC can return short). Bytes past `total` are zero-filled per page
+	 * below, so a short/EOF read never leaves stale data in a mapped page. */
+	total = 0;
+	while (total < span) {
+		r = proc_read(oid, (off_t)(offs + total), (char *)buf + total, span - total, 0);
 		if (r < 0) {
-			(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
-			vm_pageFree(p);
-			(void)proc_close(oid, 0);
-			return NULL;
+			err = r;
+			break;
 		}
 		if (r == 0) {
 			/* Server reported EOF earlier than the object size promised; the trailing
-			 * zero-fill below covers the gap rather than spinning. */
+			 * zero-fill covers the gap rather than spinning. */
 			break;
 		}
 		total += (size_t)r;
 	}
 
-	if (total < SIZE_PAGE) {
-		hal_memset((char *)v + total, 0, SIZE_PAGE - total);
-	}
-
-	(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
 	(void)proc_close(oid, 0);
 
-	return p;
+	if (err != EOK) {
+		vm_kfree(buf);
+		return err;
+	}
+
+	for (i = 0; i < want; ++i) {
+		p = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+		if (p == NULL) {
+			break;
+		}
+
+		v = vm_mmap(object_common.kmap, NULL, p, SIZE_PAGE, PROT_WRITE | PROT_USER, object_common.kernel, 0, MAP_NONE);
+		if (v == NULL) {
+			vm_pageFree(p);
+			break;
+		}
+
+		/* Copy this page's slice of the bulk read; zero-fill the remainder (the EOF tail
+		 * of the last page, or a page entirely beyond a short read). */
+		target = (i * SIZE_PAGE < total) ? min(total - (i * SIZE_PAGE), (size_t)SIZE_PAGE) : 0u;
+		if (target > 0u) {
+			hal_memcpy(v, (char *)buf + (i * SIZE_PAGE), target);
+		}
+		if (target < SIZE_PAGE) {
+			hal_memset((char *)v + target, 0, SIZE_PAGE - target);
+		}
+
+		(void)vm_munmap(object_common.kmap, v, SIZE_PAGE);
+		out[i] = p;
+		(*got)++;
+	}
+
+	vm_kfree(buf);
+
+	/* The base page must exist for the faulting access to make progress. */
+	if (*got == 0u) {
+		return -ENOMEM;
+	}
+
+	return EOK;
 }
 
 
@@ -276,33 +338,56 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 
 	(void)proc_lockClear(&map->lock);
 
-	*page = object_fetch(o->oid, offs, o->size);
+	{
+		page_t *cluster[OBJECT_READAHEAD_PAGES];
+		size_t got = 0, ci, baseIdx = (size_t)(offs / SIZE_PAGE);
 
-	err = vm_lockVerify(map, amap, o, vaddr, offs);
-	if (err != 0) {
-		if (*page != NULL) {
-			vm_pageFree(*page);
+		if (object_fetchCluster(o->oid, offs, o->size, OBJECT_READAHEAD_PAGES, cluster, &got) < 0) {
+			got = 0;
 		}
 
-		return err;
-	}
+		*page = (got > 0u) ? cluster[0] : NULL;
 
-	(void)proc_lockSet(&object_common.lock);
+		err = vm_lockVerify(map, amap, o, vaddr, offs);
+		if (err != 0) {
+			for (ci = 0; ci < got; ++ci) {
+				vm_pageFree(cluster[ci]);
+			}
 
-	if (o->pages[offs / SIZE_PAGE] != NULL) {
-		/* Someone loaded a page in the meantime, use it */
-		if (*page != NULL) {
-			vm_pageFree(*page);
+			return err;
 		}
 
-		*page = o->pages[offs / SIZE_PAGE];
+		(void)proc_lockSet(&object_common.lock);
+
+		/* Install the read-ahead pages (baseIdx+1 ..) into the object's page cache so the
+		 * upcoming faults on them hit the cache instead of paying another round-trip. The
+		 * base page (ci == 0) keeps the original "someone raced us in" handling below. The
+		 * window was clamped to the object's backing pages, so baseIdx + ci is always in
+		 * range. */
+		for (ci = 1; ci < got; ++ci) {
+			if (o->pages[baseIdx + ci] == NULL) {
+				o->pages[baseIdx + ci] = cluster[ci];
+			}
+			else {
+				vm_pageFree(cluster[ci]);
+			}
+		}
+
+		if (o->pages[baseIdx] != NULL) {
+			/* Someone loaded the base page in the meantime, use it */
+			if (*page != NULL) {
+				vm_pageFree(*page);
+			}
+
+			*page = o->pages[baseIdx];
+		}
+		else {
+			o->pages[baseIdx] = *page;
+		}
+
 		(void)proc_lockClear(&object_common.lock);
 		return EOK;
 	}
-
-	o->pages[offs / SIZE_PAGE] = *page;
-	(void)proc_lockClear(&object_common.lock);
-	return EOK;
 }
 
 
