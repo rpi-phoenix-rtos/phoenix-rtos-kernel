@@ -409,6 +409,105 @@ int syscalls_schedInfo(u8 *ustack)
 }
 
 
+int syscalls_schedGet(u8 *ustack)
+{
+	int err, pid, tid;
+	process_t *proc;
+	thread_t *current, *t = NULL;
+	sched_params_t *params;
+
+	GETFROMSTACK(ustack, int, pid, 0U);
+	GETFROMSTACK(ustack, int, tid, 1U);
+	GETFROMSTACK(ustack, sched_params_t *, params, 2U);
+
+	current = proc_current();
+
+	if (params == NULL || vm_mapBelongs(current->process, params, sizeof(*params)) < 0) {
+		return -EINVAL;
+	}
+
+	proc = pid != 0 ? proc_find(pid) : current->process;
+	if (proc == NULL) {
+		return -ESRCH;
+	}
+
+	do {
+		t = tid != 0 ? threads_findThread(tid) : current;
+		if (t == NULL) {
+			err = -ESRCH;
+			break;
+		}
+
+		if (t->process != proc) {
+			err = -EINVAL;
+			break;
+		}
+
+		err = proc_schedGet(t, params);
+	} while (0);
+
+	if (t != NULL && t != current) {
+		(void)threads_put(t);
+	}
+
+	if (pid != 0) {
+		(void)proc_put(proc);
+	}
+
+	return err;
+}
+
+
+int syscalls_schedSet(u8 *ustack)
+{
+	int err, pid, tid, policy;
+	process_t *proc;
+	thread_t *current, *t = NULL;
+	sched_params_t *params;
+
+	GETFROMSTACK(ustack, int, pid, 0U);
+	GETFROMSTACK(ustack, int, tid, 1U);
+	GETFROMSTACK(ustack, int, policy, 2U);
+	GETFROMSTACK(ustack, sched_params_t *, params, 3U);
+
+	current = proc_current();
+
+	if (params == NULL || vm_mapBelongs(current->process, params, sizeof(*params)) < 0) {
+		return -EINVAL;
+	}
+
+	proc = pid != 0 ? proc_find(pid) : current->process;
+	if (proc == NULL) {
+		return -ESRCH;
+	}
+
+	do {
+		t = tid != 0 ? threads_findThread(tid) : current;
+		if (t == NULL) {
+			err = -ESRCH;
+			break;
+		}
+
+		if (t->process != proc) {
+			err = -EINVAL;
+			break;
+		}
+
+		err = proc_schedSet(t, policy, params);
+	} while (0);
+
+	if (t != NULL && t != current) {
+		(void)threads_put(t);
+	}
+
+	if (pid != 0) {
+		(void)proc_put(proc);
+	}
+
+	return err;
+}
+
+
 /*
  * System state info
  */

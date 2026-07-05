@@ -2057,6 +2057,41 @@ int proc_schedInfo(process_t *proc, int policy, sched_info_t *info)
 }
 
 
+int proc_schedGet(thread_t *t, sched_params_t *params)
+{
+	spinlock_ctx_t sc;
+	int priority, priorityBase;
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	priority = (int)t->priority;
+	priorityBase = (int)t->priorityBase;
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	params->priority = priority;
+	params->priorityBase = priorityBase;
+	params->policy = SCHED_RR;
+
+	return EOK;
+}
+
+
+int proc_schedSet(thread_t *t, int policy, sched_params_t *params)
+{
+	int err;
+
+	if (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER) {
+		return -EINVAL;
+	}
+
+	if (policy != SCHED_RR) {
+		return -ENOSYS;
+	}
+
+	err = proc_threadPriority(t, params->priorityBase);
+	return err < 0 ? err : EOK;
+}
+
+
 int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 {
 	unsigned int i;

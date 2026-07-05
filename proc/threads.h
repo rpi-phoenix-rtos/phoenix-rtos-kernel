@@ -157,6 +157,12 @@ void proc_threadBroadcastYield(thread_t **queue);
 int proc_schedInfo(process_t *proc, int policy, sched_info_t *info);
 
 
+int proc_schedGet(thread_t *t, sched_params_t *params);
+
+
+int proc_schedSet(thread_t *t, int policy, sched_params_t *params);
+
+
 thread_t *threads_findThread(int tid);
 
 
