@@ -920,7 +920,8 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 		pmap_common.mem.nResvRegions = nResv;
 	}
 
-	pmap_common.mem.min = banks[0].start;	pmap_common.mem.max = banks[0].end;
+	pmap_common.mem.min = banks[0].start;
+	pmap_common.mem.max = banks[0].end;
 
 	pmap_common.mem.count = 0;
 	for (i = 0; i < nBanks; i++) {

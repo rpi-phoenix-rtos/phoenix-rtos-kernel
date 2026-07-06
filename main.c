@@ -154,7 +154,11 @@ int main(void)
 	 * setup. With main_initthr now spawned and the scheduler about
 	 * to take over, vm/proc/threads are stable enough for
 	 * secondaries to bring themselves up safely. */
-#if NUM_CPUS != 1
+	/* hal_smpPrimaryReady / hal_smpFirstIntervalUs are aarch64-only SMP
+	 * bring-up state; gate on __aarch64__ so this shared main.c still links
+	 * on other SMP targets (sparcv8leon gr740/gr712rc), which have their own
+	 * secondary-CPU start path and don't provide these symbols. */
+#if (NUM_CPUS != 1) && defined(__aarch64__)
 	{
 		extern volatile unsigned int hal_smpPrimaryReady;
 		extern volatile unsigned int hal_smpFirstIntervalUs;
@@ -170,7 +174,6 @@ int main(void)
 		hal_cpuDataSyncBarrier();
 		hal_cpuSignalEvent();
 	}
-	hal_consolePrint(ATTR_USER, "hi: primary-ready set\n");
 #endif
 
 	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */

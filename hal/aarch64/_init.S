@@ -429,8 +429,13 @@ el1_entry:
 	str x1, [x0, x2, lsl 3]
 	msr ttbr0_el1, x0
 
+#if defined(PL011_TTY_EARLY_VADDR)
+	/* rpi4: install the early diagnostic vector (dumps ESR/ELR/FAR over the
+	 * early PL011 alias). Other aarch64 targets don't define the early UART VA
+	 * and keep the armstub VBAR mirrored above until the real vector install. */
 	adr x0, _early_vector_table
 	msr vbar_el1, x0
+#endif
 
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
 	msr ttbr1_el1, x0
@@ -1028,7 +1033,12 @@ _inval_icache_range:
  * x18..x29 so they don't trample the architecturally-defined exception
  * context. They use the early PL011 alias when MMU is on (so device
  * memory) which is mapped in PMAP_COMMON_DEVICES_TTL3; if the fault
- * happened pre-MMU we would not reach this code anyway. */
+ * happened pre-MMU we would not reach this code anyway.
+ *
+ * Guarded on PL011_TTY_EARLY_VADDR (defined only by the rpi4 board): the whole
+ * facility references that early UART alias, so other aarch64 targets exclude it
+ * (and its VBAR install above) to keep this shared _init.S linking. */
+#if defined(PL011_TTY_EARLY_VADDR)
 .macro early_putc_inline ch
 997991:
         ldr x21, =(PL011_TTY_EARLY_VADDR + UARTFR_OFFSET)
@@ -1133,6 +1143,7 @@ _early_vector_table:
         early_vector 14
 .org (_early_vector_table + 0x780)
         early_vector 15
+#endif /* PL011_TTY_EARLY_VADDR */
 
 .ltorg
 
