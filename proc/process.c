@@ -575,13 +575,11 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if ((filesz != 0U) && (vm_mmap(map, vaddr, NULL, round_page(filesz), prot, o, base + offs, flags) == NULL)) {
-			lib_printf("DIAG-NOMEM: seg-file vaddr=%p filesz=%zu\n", vaddr, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 			return -ENOMEM;
 		}
 
 		if (filesz != memsz) {
 			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
-				lib_printf("DIAG-NOMEM: seg-bss vaddr=%p memsz=%zu filesz=%zu\n", vaddr, (size_t)memsz, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 				return -ENOMEM;
 			}
 
@@ -669,13 +667,11 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 		}
 
 		if ((filesz != 0U) && (vm_mmap(map, vaddr, NULL, round_page(filesz), prot, o, base + offs, flags) == NULL)) {
-			lib_printf("DIAG-NOMEM: seg-file vaddr=%p filesz=%zu\n", vaddr, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 			return -ENOMEM;
 		}
 
 		if (filesz != memsz) {
 			if ((round_page(memsz) != round_page(filesz)) && (vm_mmap(map, vaddr, NULL, round_page(memsz) - round_page(filesz), prot, NULL, -1, MAP_NONE) == NULL)) {
-				lib_printf("DIAG-NOMEM: seg-bss vaddr=%p memsz=%zu filesz=%zu\n", vaddr, (size_t)memsz, (size_t)filesz); /* TEMP-NOMEM-DIAG (#43) */
 				return -ENOMEM;
 			}
 
@@ -706,7 +702,6 @@ static int process_forceRange(void *base, size_t size, size_t off, size_t len)
 	for (w = ((ptr_t)base + off) & ~((ptr_t)SIZE_PAGE - 1U); w < end; w += SIZE_PAGE) {
 		err = vm_mapForce(process_common.kmap, (void *)w, PROT_READ);
 		if (err != EOK) {
-			lib_printf("DIAG-NOMEM: forceRange err=%d off=%zu\n", err, off); /* TEMP-NOMEM-DIAG */
 			/* Propagate the real fault (e.g. -EIO from a failed backing read)
 			 * rather than masking it, so an exec failure names its cause. */
 			return err;
@@ -784,7 +779,6 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 	ehdr = vm_mmap(process_common.kmap, NULL, NULL, size, PROT_READ, o, base, MAP_NONE);
 	process->lazy = prevLazy;
 	if (ehdr == NULL) {
-		lib_printf("DIAG-NOMEM: hdr-mmap NULL size=%zu\n", size); /* TEMP-NOMEM-DIAG */
 		return -ENOMEM;
 	}
 
@@ -829,7 +823,6 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 	/* Allocate and map user stack */
 	stack = vm_mmap(map, map->pmap.end - ustacksz, NULL, ustacksz, PROT_READ | PROT_WRITE | PROT_USER, NULL, -1, MAP_NONE);
 	if (stack == NULL) {
-		lib_printf("DIAG-NOMEM: stack-mmap NULL ustacksz=%zu\n", ustacksz); /* TEMP-NOMEM-DIAG */
 		return -ENOMEM;
 	}
 
@@ -1200,9 +1193,6 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	err = vm_mapCreate(&current->process->map, (void *)(VADDR_MIN + SIZE_PAGE), (void *)VADDR_USR_MAX);
 	if (err == EOK) {
 		proc_changeMap(current->process, &current->process->map, NULL, &current->process->map.pmap);
-	}
-	else {
-		lib_printf("DIAG-NOMEM: vm_mapCreate err=%d (#43 exec map alloc)\n", err); /* TEMP-NOMEM-DIAG (#43) */
 	}
 	(void)i;
 #else
