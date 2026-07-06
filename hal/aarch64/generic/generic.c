@@ -126,15 +126,8 @@ void _hal_cpuInit(void)
 		hal_cpuSignalEvent();
 	}
 
-	/* SMP-D synchronization barrier: see commit history. The
-	 * barrier here would deadlock against secondaries'
-	 * _hal_interruptsInitPerCPU spin-waiting for primary's
-	 * _hal_timerInit (which can't run if primary is at the
-	 * barrier). Workaround was to swap the init order
-	 * (timerInit before cpuInit) but that didn't fix the boot
-	 * hang at "console: pl011 init done" with NUM_CPUS=4 — a
-	 * different concurrent path is also racing. The barrier
-	 * stays disabled until we have better diagnostics. */
+	/* No cross-CPU rendezvous barrier here on purpose: secondaries gate on
+	 * nCpusStarted (released above with a DSB+SEV), so primary must not block. */
 }
 
 

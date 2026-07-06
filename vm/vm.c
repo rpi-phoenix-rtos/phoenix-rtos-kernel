@@ -40,28 +40,14 @@ void vm_meminfo(meminfo_t *info)
 
 void _vm_init(vm_map_t *kmap, vm_object_t *kernel)
 {
-	hal_consolePrint(ATTR_USER, "vm: enter\n");
-
 	/* parasoft-suppress-next-line MISRAC2012-RULE_18_1 "&vm.top is passed as a reference to vm.top not as an array object" */
 	_pmap_init(&kmap->pmap, &vm.bss, &vm.top);
 	_page_init(&kmap->pmap, &vm.bss, &vm.top);
-	hal_consolePrint(ATTR_USER, "vm: page init done\n");
-
-	hal_consolePrint(ATTR_USER, "vm: map init\n");
 	(void)_map_init(kmap, kernel, &vm.bss, &vm.top);
-	hal_consolePrint(ATTR_USER, "vm: map init done\n");
-
-	hal_consolePrint(ATTR_USER, "vm: zone init\n");
 	_zone_init(kmap, kernel, &vm.bss, &vm.top);
-	hal_consolePrint(ATTR_USER, "vm: kmalloc init\n");
 	(void)_kmalloc_init();
-	hal_consolePrint(ATTR_USER, "vm: kmalloc init done\n");
-
-	hal_consolePrint(ATTR_USER, "vm: object init\n");
 	(void)_object_init(kmap, kernel);
-	hal_consolePrint(ATTR_USER, "vm: amap init\n");
 	_amap_init(kmap, kernel);
-	hal_consolePrint(ATTR_USER, "vm: init done\n");
 
 	return;
 }
