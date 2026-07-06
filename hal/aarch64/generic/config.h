@@ -27,13 +27,12 @@
  * cannot count on the standard armstub spin-table protocol to
  * release secondaries.
  *
- * NUM_CPUS is 4 (all four A72 cores are enumerated) but the scheduler
- * currently runs on cpu0 only; the secondaries are parked behind
- * hal_smpPrimaryReady until a reliable wakeup path lands. The kernel-side
- * SMP machinery is already in place (per-CPU stacks in
- * _set_up_vbar_and_stacks, SEV after nCpusStarted bump in _hal_cpuInit,
- * per-CPU timer arm in _hal_timerInitPerCPU, banked-PPI enable in
- * _hal_interruptsInitPerCPU). */
+ * NUM_CPUS is 4 and all four A72 cores schedule: secondaries pass the
+ * hal_smpPrimaryReady gate in _other_core_virtual, bring up their per-CPU
+ * state (_set_up_vbar_and_stacks, _hal_interruptsInitPerCPU, _hal_cpuInit,
+ * _hal_timerInitPerCPU), unmask DAIF and take timer PPIs, so they run the
+ * scheduler alongside cpu0. The cold-boot core-release caveat above still
+ * applies: a core the firmware never released into the armstub stays down. */
 #define NUM_CPUS        4U
 #define SIZE_INTERRUPTS 256U
 

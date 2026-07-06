@@ -140,6 +140,9 @@ void _hal_cpuInit(void)
 
 __attribute__((noreturn)) void hal_cpuReboot(void)
 {
+	/* No reboot yet on BCM2711: a real reset needs either a PSCI SYSTEM_RESET
+	 * SMC (no EL3 PSCI monitor is present) or the BCM2711 watchdog/PM path.
+	 * Until one lands, halt in place rather than silently continuing. */
 	for (;;) {
 		hal_cpuHalt();
 	}
