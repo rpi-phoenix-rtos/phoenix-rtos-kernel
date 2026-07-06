@@ -825,7 +825,6 @@ int syscalls_msgSend(u8 *ustack)
 	process_t *proc = proc_current()->process;
 	u32 port;
 	msg_t *msg;
-	int err;
 
 	GETFROMSTACK(ustack, u32, port, 0U);
 	GETFROMSTACK(ustack, msg_t *, msg, 1U);
@@ -846,9 +845,7 @@ int syscalls_msgSend(u8 *ustack)
 		}
 	}
 
-	err = proc_send(port, msg);
-
-	return err;
+	return proc_send(port, msg);
 }
 
 
@@ -907,7 +904,6 @@ int syscalls_lookup(u8 *ustack)
 	process_t *proc = proc_current()->process;
 	char *name;
 	oid_t *file, *dev;
-	int err;
 
 	GETFROMSTACK(ustack, char *, name, 0U);
 	GETFROMSTACK(ustack, oid_t *, file, 1U);
@@ -923,9 +919,7 @@ int syscalls_lookup(u8 *ustack)
 		return -EFAULT;
 	}
 
-	err = proc_portLookup(name, file, dev);
-
-	return err;
+	return proc_portLookup(name, file, dev);
 }
 
 

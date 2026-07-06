@@ -86,6 +86,8 @@ static inline void hal_cpuDisableInterrupts(void)
 
 static inline void hal_cpuEnableInterrupts(void)
 {
+	/* Unmask IRQ only (#2), not FIQ: all interrupts are routed as IRQ, so FIQ
+	 * stays masked. This is deliberately asymmetric with the disable above (#3). */
 	__asm__ volatile("msr daifClr, #2\n dsb ish \n isb");
 }
 
