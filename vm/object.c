@@ -341,8 +341,10 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 	{
 		page_t *cluster[OBJECT_READAHEAD_PAGES];
 		size_t got = 0, ci, baseIdx = (size_t)(offs / SIZE_PAGE);
+		int fetchRc;
 
-		if (object_fetchCluster(o->oid, offs, o->size, OBJECT_READAHEAD_PAGES, cluster, &got) < 0) {
+		fetchRc = object_fetchCluster(o->oid, offs, o->size, OBJECT_READAHEAD_PAGES, cluster, &got);
+		if (fetchRc < 0) {
 			got = 0;
 		}
 
@@ -386,6 +388,16 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 		}
 
 		(void)proc_lockClear(&object_common.lock);
+
+		/* If the base page could not be fetched, surface the real backing-store
+		 * error (e.g. -EIO from a failed NFS READ RPC) rather than letting the
+		 * caller invent a generic -ENOMEM: a transient read failure must not
+		 * masquerade as out-of-memory (that mislabelling turned an NFS read flake
+		 * into a phantom "exec ENOMEM" that was diagnosed as a loader bug). */
+		if (*page == NULL) {
+			return (fetchRc < 0) ? fetchRc : -ENOMEM;
+		}
+
 		return EOK;
 	}
 }
