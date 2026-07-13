@@ -372,7 +372,7 @@ int syscalls_priority(u8 *ustack)
 
 	GETFROMSTACK(ustack, int, priority, 0U);
 
-	return proc_threadPriority(priority);
+	return proc_threadPriority(proc_current(), priority);
 }
 
 
