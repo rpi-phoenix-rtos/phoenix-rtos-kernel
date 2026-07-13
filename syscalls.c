@@ -389,7 +389,7 @@ int syscalls_schedInfo(u8 *ustack)
 
 	proc = pid != 0 ? proc_find(pid) : current->process;
 	if (proc == NULL) {
-		return -EINVAL;
+		return -ESRCH;
 	}
 
 	if (vm_mapBelongs(current->process, info, sizeof(*info)) < 0) {
