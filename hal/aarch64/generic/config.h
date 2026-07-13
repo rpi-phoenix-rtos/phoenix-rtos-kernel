@@ -18,21 +18,20 @@
 #include <board_config.h>
 
 #define ASID_BITS       16U
-/* Pi 4 / BCM2711 has 4 Cortex-A72 cores, but the Pi 4 firmware does
- * NOT reliably bring them all up into the armstub on cold boot
- * (multi-run UART marker capture, 2026-05-23: cpu0 never reaches
- * armstub `in_el2`, secondaries reach it 0-or-1 times per boot —
- * effectively random). Without a PSCI smc handler or a memory-poke
- * wakeup path that targets cpu1/2/3 specifically, Phoenix-RTOS
- * cannot count on the standard armstub spin-table protocol to
- * release secondaries.
+/* Pi 4 / BCM2711 has 4 Cortex-A72 cores and Phoenix-RTOS runs full 4-core SMP.
+ * NUM_CPUS is 4 and all four A72 cores schedule: the firmware releases the
+ * secondaries into the armstub spin-table (confirmed reliable, 2026-05-24), each
+ * secondary passes the hal_smpPrimaryReady gate in _other_core_virtual, brings up
+ * its per-CPU state (_set_up_vbar_and_stacks, _hal_interruptsInitPerCPU,
+ * _hal_cpuInit, _hal_timerInitPerCPU), unmasks DAIF and takes its own timer PPI,
+ * so it runs the scheduler (global run-queue, per-core CNTV preemption) alongside
+ * cpu0. Load distributes across all four cores (phase-E saturation validation
+ * 2026-05-25; HW-reconfirmed 2026-07-14 with cpuburn+top per-core).
  *
- * NUM_CPUS is 4 and all four A72 cores schedule: secondaries pass the
- * hal_smpPrimaryReady gate in _other_core_virtual, bring up their per-CPU
- * state (_set_up_vbar_and_stacks, _hal_interruptsInitPerCPU, _hal_cpuInit,
- * _hal_timerInitPerCPU), unmask DAIF and take timer PPIs, so they run the
- * scheduler alongside cpu0. The cold-boot core-release caveat above still
- * applies: a core the firmware never released into the armstub stays down. */
+ * Residual caveat: there is no PSCI smc / memory-poke fallback that force-releases
+ * a secondary, so a core the firmware never released into the armstub on a given
+ * cold boot stays down (cpu0 always runs). Not observed since the 2026-05-24
+ * firmware-release confirmation, but the recovery path is unimplemented. */
 #define NUM_CPUS        4U
 #define SIZE_INTERRUPTS 256U
 
