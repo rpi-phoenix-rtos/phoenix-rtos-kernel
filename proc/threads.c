@@ -459,7 +459,8 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 	LIB_ASSERT(selected != NULL, "no threads to schedule");
 
 	if (selected != NULL) {
-		threads_common.current[hal_cpuGetID()] = selected;
+		threads_common.current[cpuId] = selected;
+		selected->cpuId = cpuId;
 		_hal_cpuSetKernelStack(selected->kstack + selected->kstacksz);
 		selCtx = selected->context;
 
@@ -635,6 +636,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	t->priorityBase = priority;
 	t->priority = priority;
 	t->cpuTime = 0;
+	t->cpuId = 0;
 	t->maxWait = 0;
 	proc_gettime(&t->startTime, NULL);
 	t->lastTime = t->startTime;
@@ -1987,6 +1989,7 @@ int proc_threadsIter(int n, proc_threadsListCb_t cb, void *arg)
 		tinfo.tid = (unsigned int)proc_getTid(t);
 		tinfo.priority = (int)t->priorityBase;
 		tinfo.state = (int)t->state;
+		tinfo.cpuId = (int)t->cpuId;
 
 		now = _proc_gettimeRaw();
 		if (now != t->startTime) {

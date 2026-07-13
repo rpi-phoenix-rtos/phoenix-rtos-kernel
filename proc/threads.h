@@ -79,6 +79,9 @@ typedef struct _thread_t {
 	time_t cpuTime;
 	time_t lastTime;
 
+	/* Id of the CPU core this thread last ran on (set by _threads_schedule) */
+	unsigned int cpuId;
+
 	cpu_context_t *context;
 	cpu_context_t *longjmpctx;
 } thread_t;

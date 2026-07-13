@@ -35,6 +35,7 @@ typedef struct _threadinfo_t {
 	int state;
 	int vmem;
 	time_t wait;
+	int cpuId;
 
 	char name[128];
 } __attribute__((packed)) threadinfo_t;
