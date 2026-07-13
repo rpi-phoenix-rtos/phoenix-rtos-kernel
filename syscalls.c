@@ -378,28 +378,32 @@ int syscalls_priority(u8 *ustack)
 
 int syscalls_schedInfo(u8 *ustack)
 {
-	int err, policy;
+	int err, policy, pid;
 	process_t *proc;
-	pid_t pid;
 	sched_info_t *info;
+	thread_t *current = proc_current();
 
-	GETFROMSTACK(ustack, pid_t, pid, 0U);
+	GETFROMSTACK(ustack, int, pid, 0U);
 	GETFROMSTACK(ustack, int, policy, 1U);
 	GETFROMSTACK(ustack, sched_info_t *, info, 2U);
 
-	proc = proc_find(pid);
+	proc = pid != 0 ? proc_find(pid) : current->process;
 	if (proc == NULL) {
 		return -EINVAL;
 	}
 
-	if (vm_mapBelongs(proc_current()->process, info, sizeof(*info)) < 0) {
-		(void)proc_put(proc);
+	if (vm_mapBelongs(current->process, info, sizeof(*info)) < 0) {
+		if (pid != 0) {
+			(void)proc_put(proc);
+		}
 		return -EINVAL;
 	}
 
 	err = proc_schedInfo(proc, policy, info);
 
-	(void)proc_put(proc);
+	if (pid != 0) {
+		(void)proc_put(proc);
+	}
 
 	return err;
 }
