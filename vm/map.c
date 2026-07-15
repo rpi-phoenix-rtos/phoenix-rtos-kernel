@@ -1176,22 +1176,30 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 }
 
 
-static int map_belongs(const struct _process_t *proc, const void *ptr, size_t size)
+static int map_belongs(const struct _process_t *proc, const void *ptr, size_t size, vm_prot_t prot)
 {
 	if (size == 0U) {
 		return 0;
 	}
 
 #if defined(NOMMU) && defined(NOMMU_MAPBELONGS_VALIDATE_MAP)
-	return (pmap_isAllowed(proc->pmapp, ptr, size) == 0) ? -1 : 0;
+	vm_attr_t attr = 0U;
+	attr |= ((prot & PROT_READ) != 0U) ? mAttrRead : 0U;
+	attr |= ((prot & PROT_WRITE) != 0U) ? mAttrWrite : 0U;
+	attr |= ((prot & PROT_EXEC) != 0U) ? mAttrExec : 0U;
+	return (pmap_isAllowed(proc->pmapp, ptr, size, attr) == 0) ? -1 : 0;
 	/*
 	 * Disabled checking entry owner for now on NOMMU, as we can
 	 * receive memory from different maps and processes via msg
 	 * and RO elf segments may not be assigned to any process.
 	 */
+#elif defined(EXCJMP_SUPPORTED) && 0 /* FIXME: enable when all user memory accesses are wrapped with kernel fault handling */
+	if (((ptr_t)ptr > VADDR_USR_MAX) || ((ptr_t)ptr + size > VADDR_USR_MAX) || ((ptr_t)ptr + size < (ptr_t)ptr)) {
+		return -1;
+	}
+	return 0;
 #elif !defined(NOMMU)
 	map_entry_t e, *f;
-
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_8 "Structure 'e' is used only for tree searching, pointer will not be modified. We cannot change vaddr member of the map_entry_t to const." */
 	e.vaddr = (void *)ptr;
 	e.size = size;
@@ -1211,7 +1219,7 @@ static int map_belongs(const struct _process_t *proc, const void *ptr, size_t si
 
 	(void)proc_lockClear(&proc->mapp->lock);
 
-	if (f == NULL) {
+	if ((f == NULL) || ((f->prot & prot) != prot)) {
 		return -1;
 	}
 
@@ -1220,11 +1228,11 @@ static int map_belongs(const struct _process_t *proc, const void *ptr, size_t si
 }
 
 
-int vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size)
+int vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size, vm_prot_t prot)
 {
 	int ret;
 
-	ret = map_belongs(proc, ptr, size);
+	ret = map_belongs(proc, ptr, size, prot);
 	LIB_ASSERT(ret == 0, "Fault @0x%p (%zu) path: %s, pid: %d\n", ptr, size, proc->path, process_getPid(proc));
 
 	return ret;
@@ -1251,7 +1259,7 @@ void vm_mapinfo(meminfo_t *info)
 			return;
 		}
 
-		if (vm_mapBelongs(proc, emap, (size_t)emapsz * sizeof(emap[0])) < 0) {
+		if (vm_mapBelongs(proc, emap, (size_t)emapsz * sizeof(emap[0]), PROT_READ | PROT_WRITE) < 0) {
 			return;
 		}
 	}
@@ -1262,7 +1270,7 @@ void vm_mapinfo(meminfo_t *info)
 			return;
 		}
 
-		if (vm_mapBelongs(proc, ekmap, (size_t)ekmapsz * sizeof(ekmap[0])) < 0) {
+		if (vm_mapBelongs(proc, ekmap, (size_t)ekmapsz * sizeof(ekmap[0]), PROT_READ | PROT_WRITE) < 0) {
 			return;
 		}
 	}
@@ -1273,7 +1281,7 @@ void vm_mapinfo(meminfo_t *info)
 			return;
 		}
 
-		if (vm_mapBelongs(proc, smap, (size_t)smapsz * sizeof(smap[0])) < 0) {
+		if (vm_mapBelongs(proc, smap, (size_t)smapsz * sizeof(smap[0]), PROT_READ | PROT_WRITE) < 0) {
 			return;
 		}
 	}

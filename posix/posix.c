@@ -1739,6 +1739,7 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 	msg_t msg;
 	void *data = NULL;
 	size_t size = IOCPARM_LEN(request);
+	vm_prot_t prot = 0U;
 
 	err = posix_getOpenFile(fildes, &f);
 	if (err == EOK) {
@@ -1749,10 +1750,12 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 			GETFROMSTACK(ustack, size_t, size, 3);
 
 			if ((request & IOC_INOUT) != 0U) {
+				prot |= ((request & IOC_IN) != 0U) ? PROT_READ : 0U;
+				prot |= ((request & IOC_OUT) != 0U) ? PROT_WRITE : 0U;
 				if (data == NULL) {
 					err = -EFAULT;
 				}
-				else if (vm_mapBelongs(proc_current()->process, data, size) < 0) {
+				else if (vm_mapBelongs(proc_current()->process, data, size, prot) < 0) {
 					err = -EFAULT;
 				}
 				else {
@@ -2034,6 +2037,7 @@ int posix_gethostname(char *name, size_t namelen)
 {
 	TRACE("gethostname(%zu)", namelen);
 
+	/* FIXME: verify name length, both for overflow and underflow */
 	(void)hal_strncpy(name, posix_common.hostname, namelen);
 
 	return 0;
