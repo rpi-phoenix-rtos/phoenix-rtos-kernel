@@ -28,6 +28,7 @@
 #include "include/time.h"
 #include "include/perf.h"
 #include "lib/lib.h"
+#include "lib/usermem.h"
 #include "proc/proc.h"
 #include "vm/object.h"
 #include "posix/posix.h"
@@ -45,11 +46,23 @@
 void syscalls_debug(u8 *ustack)
 {
 	const char *s;
-
-	/* FIXME: pass strlen(s) from userspace */
+	char *ks;
 
 	GETFROMSTACK(ustack, const char *, s, 0U);
-	hal_consolePrint(ATTR_USER, s);
+
+	/* Ensure the string starts in process memory, as strndup also accepts strings fully-contained in kernel */
+	if (vm_mapBelongs(proc_current()->process, s, 1U, PROT_READ) < 0) {
+		return;
+	}
+
+	/* Copy the string as some implementations of hal_consolePrint take a spinlock */
+	if (usermem_strndup(s, STR_MAX, &ks) < 0) {
+		return;
+	}
+
+	hal_consolePrint(ATTR_USER, ks);
+
+	vm_kfree(ks);
 }
 
 
@@ -61,6 +74,7 @@ void syscalls_debug(u8 *ustack)
 int syscalls_sys_mmap(u8 *ustack)
 {
 	void **vaddr;
+	void *cvaddr;
 	size_t size;
 	int prot, fildes, sflags;
 	vm_flags_t flags;
@@ -83,6 +97,8 @@ int syscalls_sys_mmap(u8 *ustack)
 	if (vm_mapBelongs(proc, vaddr, sizeof(*vaddr), PROT_READ | PROT_WRITE) < 0) {
 		return -EFAULT;
 	}
+
+	USERMEM_TRY({ cvaddr = *vaddr; }, { return -EFAULT; });
 
 	if ((flags & MAP_ANONYMOUS) != 0U) {
 		if ((flags & MAP_PHYSMEM) != 0U) {
@@ -111,13 +127,17 @@ int syscalls_sys_mmap(u8 *ustack)
 
 	flags &= ~(MAP_ANONYMOUS | MAP_CONTIGUOUS | MAP_PHYSMEM);
 
-	(*vaddr) = vm_mmap(proc_current()->process->mapp, *vaddr, NULL, size, PROT_USER | (vm_prot_t)prot, o, (o == NULL) ? -1 : offs, flags);
+	cvaddr = vm_mmap(proc_current()->process->mapp, cvaddr, NULL, size, PROT_USER | (vm_prot_t)prot, o, (o == NULL) ? -1 : offs, flags);
 	(void)vm_objectPut(o);
 
-	if ((*vaddr) == NULL) {
+	if (cvaddr == NULL) {
 		/* TODO: pass specific errno from vm_mmap */
 		return -ENOMEM;
 	}
+
+	USERMEM_TRY({ *vaddr = cvaddr; }, {
+			(void)vm_munmap(proc_current()->process->mapp, cvaddr, size);
+			return -EFAULT; });
 
 	return EOK;
 }

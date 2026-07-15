@@ -1217,11 +1217,12 @@ static int map_belongs(const struct _process_t *proc, const void *ptr, size_t si
 	}
 #endif
 
-	(void)proc_lockClear(&proc->mapp->lock);
-
 	if ((f == NULL) || ((f->prot & prot) != prot)) {
+		(void)proc_lockClear(&proc->mapp->lock);
 		return -1;
 	}
+
+	(void)proc_lockClear(&proc->mapp->lock);
 
 #endif
 	return 0;

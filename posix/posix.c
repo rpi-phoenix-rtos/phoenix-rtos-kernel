@@ -24,6 +24,7 @@
 #include "include/signal.h"
 #include "include/sockdefs.h"
 
+#include "lib/usermem.h"
 #include "proc/proc.h"
 
 #include "posix_private.h"
@@ -2018,16 +2019,22 @@ int posix_uname(struct utsname *name)
 {
 	TRACE("uname()");
 
-	(void)hal_strncpy(name->sysname, "Phoenix-RTOS", sizeof(name->sysname) - 1U);
-	name->sysname[sizeof(name->sysname) - 1U] = '\0';
-	(void)hal_strncpy(name->nodename, posix_common.hostname, sizeof(name->nodename) - 1U);
-	name->nodename[sizeof(name->nodename) - 1U] = '\0';
-	(void)hal_strncpy(name->release, RELEASE, sizeof(name->release) - 1U);
-	name->release[sizeof(name->release) - 1U] = '\0';
-	(void)hal_strncpy(name->version, VERSION, sizeof(name->version) - 1U);
-	name->version[sizeof(name->version) - 1U] = '\0';
-	(void)hal_strncpy(name->machine, TARGET_FAMILY, sizeof(name->machine) - 1U);
-	name->machine[sizeof(name->machine) - 1U] = '\0';
+	USERMEM_TRY(
+			{
+				(void)hal_strncpy(name->sysname, "Phoenix-RTOS", sizeof(name->sysname) - 1U);
+				name->sysname[sizeof(name->sysname) - 1U] = '\0';
+				(void)hal_strncpy(name->nodename, posix_common.hostname, sizeof(name->nodename) - 1U);
+				name->nodename[sizeof(name->nodename) - 1U] = '\0';
+				(void)hal_strncpy(name->release, RELEASE, sizeof(name->release) - 1U);
+				name->release[sizeof(name->release) - 1U] = '\0';
+				(void)hal_strncpy(name->version, VERSION, sizeof(name->version) - 1U);
+				name->version[sizeof(name->version) - 1U] = '\0';
+				(void)hal_strncpy(name->machine, TARGET_FAMILY, sizeof(name->machine) - 1U);
+				name->machine[sizeof(name->machine) - 1U] = '\0';
+			},
+			{
+				return -EFAULT;
+			});
 
 	return 0;
 }
@@ -2733,7 +2740,7 @@ int posix_waitpid(pid_t child, int *status, unsigned int options)
 					LIST_REMOVE(&pinfo->zombies, c);
 					err = c->process;
 					if (status != NULL) {
-						*status = c->exitcode;
+						USERMEM_TRY({ *status = c->exitcode; }, { /* Treat like status == NULL */ });
 					}
 					(void)proc_lockClear(&pinfo->lock);
 

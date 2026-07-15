@@ -19,6 +19,7 @@
 #include "include/signal.h"
 #include "threads.h"
 #include "lib/lib.h"
+#include "lib/usermem.h"
 #include "posix/posix.h"
 #include "log/log.h"
 #include "resource.h"
@@ -629,7 +630,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	}
 
 	if (id != NULL) {
-		*id = proc_getTid(t);
+		USERMEM_TRY({ *id = proc_getTid(t); }, { /* Treat like id == NULL */ });
 	}
 
 	/* Prepare initial stack */
