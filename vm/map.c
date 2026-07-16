@@ -980,6 +980,123 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 }
 
 
+int vm_mapBorrow(vm_map_t *dstMap, void *dstaddr, vm_map_t *srcMap, void *srcaddr, size_t size, vm_prot_t prot)
+{
+	ptr_t offset, i;
+	map_entry_t *dstEntry, *srcEntry, f, *e;
+	size_t overlapSize, srcOverlapStart;
+	vm_flags_t orgFlags;
+	vm_prot_t orgProt;
+	vm_attr_t attr;
+	addr_t pa;
+	int err = EOK;
+
+	if (((size & (SIZE_PAGE - 1U)) != 0U) || (((ptr_t)dstaddr & (SIZE_PAGE - 1U)) != 0U) || (((ptr_t)srcaddr & (SIZE_PAGE - 1U)) != 0U)) {
+		return -EINVAL;
+	}
+
+	(void)proc_lockSet2(&dstMap->lock, &srcMap->lock);
+
+	f.vaddr = dstaddr;
+	f.size = size;
+	dstEntry = lib_treeof(map_entry_t, linkage, lib_rbFind(&dstMap->tree, &f.linkage));
+	/* Accept only the memory inside of a single vm_mapFind allocation */
+	if ((dstEntry == NULL) || ((ptr_t)dstEntry->vaddr > (ptr_t)dstaddr) || ((ptr_t)dstEntry->vaddr + dstEntry->size < (ptr_t)dstaddr + size) ||
+			(dstEntry->object != map_common.kernel) || (dstEntry->amap != NULL)) {
+		(void)proc_lockClear(&dstMap->lock);
+		(void)proc_lockClear(&srcMap->lock);
+		return -EINVAL;
+	}
+	orgFlags = dstEntry->flags;
+	orgProt = dstEntry->prot;
+
+	if (dstEntry->vaddr < dstaddr) {
+		/* Leave the prefix of dstEntry unchanged */
+		e = map_alloc();
+		if (e == NULL) {
+			(void)proc_lockClear(&dstMap->lock);
+			(void)proc_lockClear(&srcMap->lock);
+			return -EINVAL;
+		}
+		else {
+			_vm_mapEntrySplit(NULL, dstMap, dstEntry, e, (ptr_t)dstaddr - (ptr_t)dstEntry->vaddr);
+			dstEntry = e;
+		}
+	}
+
+	/* Iterate over all related source map entries and split dstEntry accordingly with shared amaps/objects */
+	offset = 0U;
+	while ((offset < size) && (err == EOK)) {
+		f.vaddr = srcaddr + offset;
+		f.size = 1;
+		srcEntry = lib_treeof(map_entry_t, linkage, lib_rbFind(&srcMap->tree, &f.linkage));
+		if ((srcEntry == NULL) || (((srcEntry->prot & prot) & ~PROT_USER) != (prot & ~PROT_USER))) {
+			err = -EINVAL;
+			break;
+		}
+
+		srcOverlapStart = (ptr_t)srcaddr + offset - (ptr_t)srcEntry->vaddr;
+		overlapSize = min(srcEntry->size - srcOverlapStart, size - offset);
+
+		if (((srcEntry->flags & MAP_NEEDSCOPY) != 0U) && ((prot & PROT_WRITE) != 0U)) {
+			/* Ensure all pages are writable to avoid breaking COW pages and lazy allocation of writable shared map entries */
+			for (i = offset; i < offset + overlapSize; i += SIZE_PAGE) {
+				err = _map_force(srcMap, srcEntry, srcaddr + i, prot);
+				if (err != EOK) {
+					break;
+				}
+			}
+		}
+
+		if (dstEntry->size > overlapSize) {
+			e = map_alloc();
+			if (e == NULL) {
+				err = -ENOMEM;
+				break;
+			}
+			_vm_mapEntrySplit(NULL, dstMap, dstEntry, e, overlapSize);
+		}
+		else {
+			e = NULL;
+		}
+		dstEntry->object = vm_objectRef(srcEntry->object);
+		dstEntry->offs = srcEntry->offs == VM_OFFS_MAX ? VM_OFFS_MAX : srcEntry->offs + srcOverlapStart;
+		dstEntry->amap = amap_ref(srcEntry->amap);
+		dstEntry->aoffs = srcEntry->aoffs + srcOverlapStart;
+		dstEntry->flags = srcEntry->flags;
+		dstEntry->prot = prot;
+		dstEntry->protOrig = prot;
+		amap_getanons(dstEntry->amap, dstEntry->aoffs, overlapSize);
+
+		attr = vm_protToAttr(dstEntry->prot) | vm_flagsToAttr(dstEntry->flags);
+
+		for (i = offset; i < offset + overlapSize; i += SIZE_PAGE) {
+			pa = pmap_resolve(&srcMap->pmap, srcaddr + i);
+			if (pa != 0U) {
+				err = pmap_enter(&dstMap->pmap, pa, dstaddr + i, attr, NULL);
+			}
+			if (err != EOK) {
+				break;
+			}
+		}
+		if (e != NULL) {
+			dstEntry = e;
+		}
+		offset += overlapSize;
+	}
+
+	if (err != EOK) {
+		/* Revert to state from vm_mapFind allocation */
+		(void)_vm_munmap(dstMap, dstaddr, size);
+		(void)_map_map(dstMap, dstaddr, NULL, size, orgProt, map_common.kernel, VM_OFFS_MAX, orgFlags, NULL);
+	}
+
+	(void)proc_lockClear(&dstMap->lock);
+	(void)proc_lockClear(&srcMap->lock);
+	return err;
+}
+
+
 void vm_mapDump(vm_map_t *map)
 {
 	if (map == NULL) {
