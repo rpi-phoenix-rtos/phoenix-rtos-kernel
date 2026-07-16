@@ -1051,6 +1051,29 @@ static int proc_threadWaitEx(thread_t **queue, spinlock_t *spinlock, time_t time
 }
 
 
+static int proc_threadWaitEx_WIP(thread_t **queue, spinlock_t *spinlock, time_t timeout, u8 interruptible, spinlock_ctx_t *sc_outer, spinlock_ctx_t *sc_inner)
+{
+	int err;
+	if ((interruptible != 0U) && (_proc_current()->exit != 0U)) {
+		/* Waiting in this state can lead to becoming a hanging zombie */
+		return -EINTR;
+	}
+
+	_proc_threadEnqueue(queue, timeout, interruptible);
+
+	if (*queue == NULL) {
+		return EOK;
+	}
+
+	hal_spinlockClear(spinlock, sc_inner);
+	err = hal_cpuReschedule(&threads_common.spinlock, sc_outer);
+	hal_spinlockSet(spinlock, sc_outer);
+	hal_spinlockSet(&threads_common.spinlock, sc_inner);
+
+	return err;
+}
+
+
 int proc_threadWait(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp)
 {
 	return proc_threadWaitEx(queue, spinlock, timeout, 0U, scp);
@@ -1548,21 +1571,18 @@ static int _proc_lockSet(lock_t *lock, u8 interruptible, spinlock_ctx_t *scp)
 			_proc_threadSetPriority(lock->owner, current->priority);
 		}
 
-		hal_spinlockClear(&threads_common.spinlock, &sc);
-
 		do {
 			/* _proc_lockUnlock will give us a lock by it's own */
-			if (proc_threadWaitEx(&lock->queue, &lock->spinlock, 0, interruptible, scp) == -EINTR) {
+			if (proc_threadWaitEx_WIP(&lock->queue, &lock->spinlock, 0, interruptible, scp, &sc) == -EINTR) {
 				/* Can happen when thread_destroy is called on lock owner and current */
 				if (lock->owner == NULL) {
+					hal_spinlockClear(&threads_common.spinlock, &sc);
 					ret = -EINTR;
 					_trace_eventLockSetExit(lock, tid, ret);
 					return ret;
 				}
 				/* Don't return EINTR if we got lock anyway */
 				if (lock->owner != current) {
-					hal_spinlockSet(&threads_common.spinlock, &sc);
-
 					/* Recalculate lock owner priority (it might have been inherited from the current thread) */
 					_proc_threadSetPriority(lock->owner, _proc_threadGetPriority(lock->owner));
 
@@ -1579,10 +1599,8 @@ static int _proc_lockSet(lock_t *lock, u8 interruptible, spinlock_ctx_t *scp)
 		lock->depth = 1;
 		ret = EOK;
 	}
-	else {
-		hal_spinlockClear(&threads_common.spinlock, &sc);
-	}
 
+	hal_spinlockClear(&threads_common.spinlock, &sc);
 	_trace_eventLockSetExit(lock, tid, ret);
 	return ret;
 }
