@@ -20,11 +20,14 @@
 #include "hal/spinlock.h"
 #include "hal/interrupts.h"
 #include "hal/list.h"
+#include "hal/pmap.h"
 #include "config.h"
 
 #include "proc/userintr.h"
 
 #include "perf/trace-events.h"
+
+#include "include/errno.h"
 
 #define SIZE_INTERRUPTS 95U
 #define SPI_FIRST_IRQID 32U
@@ -79,10 +82,6 @@ static const u8 spiConf[] = {
 void _hal_interruptsInitPerCPU(void);
 
 int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);
-
-/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Provided by toolchain" */
-extern unsigned int _end;
-
 
 /* parasoft-begin-suppress MISRAC2012-RULE_2_2 MISRAC2012-RULE_8_4 "Function is used externally within assembler code" */
 int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
@@ -175,7 +174,7 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	spinlock_ctx_t sc;
 
 	if (h == NULL || h->f == NULL || h->n >= SIZE_INTERRUPTS) {
-		return -1;
+		return -EINVAL;
 	}
 
 	hal_spinlockSet(&interrupts_common.spinlock[h->n], &sc);
@@ -240,7 +239,7 @@ void _hal_interruptsInit(void)
 		hal_spinlockCreate(&interrupts_common.spinlock[i], "interrupts");
 	}
 
-	interrupts_common.gic = (void *)(((u32)&_end + (5U * SIZE_PAGE) - 1U) & ~(SIZE_PAGE - 1U));
+	interrupts_common.gic = _pmap_halMapDevice(hal_cpuGetCBAR(), 0, 2U * SIZE_PAGE);
 
 	/* Initialize Distributor of the gic
 	 * enable_secure = 0 */

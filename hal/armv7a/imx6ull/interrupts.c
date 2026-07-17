@@ -16,10 +16,13 @@
 #include "hal/cpu.h"
 #include "hal/interrupts.h"
 #include "hal/list.h"
+#include "hal/pmap.h"
 #include "config.h"
 
 #include "proc/userintr.h"
 #include "perf/trace-events.h"
+
+#include "include/errno.h"
 
 #define SIZE_INTERRUPTS 159U
 
@@ -47,10 +50,6 @@ static struct {
 
 
 int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);
-
-/* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Provided by toolchain" */
-extern unsigned int _end;
-
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_2_2 MISRAC2012-RULE_8_4 "Function is used externally within assembler code" */
 int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
@@ -142,7 +141,7 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 	spinlock_ctx_t sc;
 
 	if (h == NULL || h->f == NULL || h->n >= SIZE_INTERRUPTS) {
-		return -1;
+		return -EINVAL;
 	}
 
 	hal_spinlockSet(&interrupts.spinlock[h->n], &sc);
@@ -206,7 +205,7 @@ void _hal_interruptsInit(void)
 		hal_spinlockCreate(&interrupts.spinlock[i], "interrupts");
 	}
 
-	interrupts.gic = (void *)(((u32)&_end + (5U * SIZE_PAGE) - 1U) & ~(SIZE_PAGE - 1U));
+	interrupts.gic = _pmap_halMapDevice(hal_cpuGetCBAR(), 0, 4U * SIZE_PAGE);
 
 	*(interrupts.gic + ctlr) &= ~1U;
 

@@ -1214,6 +1214,10 @@ int proc_join(int tid, time_t timeout)
 	spinlock_ctx_t sc;
 	time_t now, abstimeout;
 
+	if (timeout < 0) {
+		return -EINVAL;
+	}
+
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 
 	now = _proc_gettimeRaw();
@@ -1247,10 +1251,18 @@ int proc_join(int tid, time_t timeout)
 			}
 			else {
 				err = _proc_threadWait(&process->reaper, abstimeout, &sc);
-				firstGhost = process->ghosts;
-				ghost = firstGhost;
+				if (err == 0) {
+					firstGhost = process->ghosts;
+					ghost = firstGhost;
+				}
 			}
 		} while (err != -ETIME && err != -EINTR);
+
+		/* the loop could have ended without a match (e.g. on timeout) with
+		 * ghost still pointing to a list element - don't reap it */
+		if (found == 0) {
+			ghost = NULL;
+		}
 	}
 	else {
 		/* compatibility with existing code */
@@ -1582,7 +1594,7 @@ static int _proc_lockSet(lock_t *lock, u8 interruptible, spinlock_ctx_t *scp)
 {
 	thread_t *current;
 	spinlock_ctx_t sc;
-	int ret = EOK, tid;
+	int ret = EOK, err = EOK, tid;
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 
@@ -1609,11 +1621,10 @@ static int _proc_lockSet(lock_t *lock, u8 interruptible, spinlock_ctx_t *scp)
 			_proc_threadSetPriority(lock->owner, current->priority);
 		}
 
-		hal_spinlockClear(&threads_common.spinlock, &sc);
-
-		do {
+		for (;;) {
 			/* _proc_lockUnlock will give us a lock by it's own */
-			if (proc_threadWaitEx(&lock->queue, &lock->spinlock, 0, interruptible, scp) == -EINTR) {
+			if ((interruptible != 0U) && ((current->exit != 0U) || (err == -EINTR))) {
+				hal_spinlockClear(&threads_common.spinlock, &sc);
 				/* Can happen when thread_destroy is called on lock owner and current */
 				if (lock->owner == NULL) {
 					ret = -EINTR;
@@ -1634,7 +1645,18 @@ static int _proc_lockSet(lock_t *lock, u8 interruptible, spinlock_ctx_t *scp)
 					return ret;
 				}
 			}
-		} while (lock->owner != current);
+			else {
+				_proc_threadEnqueue(&lock->queue, 0, interruptible);
+				hal_spinlockClear(&lock->spinlock, &sc);
+				err = hal_cpuReschedule(&threads_common.spinlock, scp);
+				hal_spinlockSet(&lock->spinlock, scp);
+			}
+
+			if (lock->owner == current) {
+				break;
+			}
+			hal_spinlockSet(&threads_common.spinlock, &sc);
+		}
 
 		/* we acquired the lock */
 		lock->depth = 1;
@@ -2031,18 +2053,20 @@ int proc_threadsIter(int n, proc_threadsListCb_t cb, void *arg)
 		}
 		else
 #endif
-				if (map != NULL) {
-			(void)proc_lockSet(&map->lock);
-			entry = lib_treeof(map_entry_t, linkage, lib_rbMinimum(map->tree.root));
+		{
+			if (map != NULL) {
+				(void)proc_lockSet(&map->lock);
+				entry = lib_treeof(map_entry_t, linkage, lib_rbMinimum(map->tree.root));
 
-			while (entry != NULL) {
-				tinfo.vmem += (int)entry->size;
-				entry = lib_treeof(map_entry_t, linkage, lib_rbNext(&entry->linkage));
+				while (entry != NULL) {
+					tinfo.vmem += (int)entry->size;
+					entry = lib_treeof(map_entry_t, linkage, lib_rbNext(&entry->linkage));
+				}
+				(void)proc_lockClear(&map->lock);
 			}
-			(void)proc_lockClear(&map->lock);
-		}
-		else {
-			/* No action required */
+			else {
+				/* No action required */
+			}
 		}
 
 		cb(arg, i, &tinfo);
@@ -2081,6 +2105,26 @@ static void proc_threadsListCb(void *arg, int i, threadinfo_t *tinfo)
 int proc_threadsList(int n, threadinfo_t *info)
 {
 	return proc_threadsIter(n, proc_threadsListCb, info);
+}
+
+
+int proc_schedInfo(process_t *proc, int policy, sched_info_t *info)
+{
+	LIB_ASSERT(proc != NULL, "null proc");
+
+	if (policy < SCHED_FIFO || SCHED_OTHER < policy) {
+		return -EINVAL;
+	}
+
+	if (policy != SCHED_RR) {
+		return -ENOSYS;
+	}
+
+	info->interval = SYSTICK_INTERVAL;
+	info->minPriority = 0;
+	info->maxPriority = (int)MAX_PRIO;
+
+	return EOK;
 }
 
 

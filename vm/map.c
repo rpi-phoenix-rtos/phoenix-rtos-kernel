@@ -1176,37 +1176,46 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 }
 
 
-static int _vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size)
+static int map_belongs(const struct _process_t *proc, const void *ptr, size_t size)
 {
-/* Disabled for now on NOMMU, as we can now receive memory
- * from different maps and processes via msg */
-#ifndef NOMMU
-	map_entry_t e, *f;
-
 	if (size == 0U) {
 		return 0;
 	}
+
+#if defined(NOMMU) && defined(NOMMU_MAPBELONGS_VALIDATE_MAP)
+	return (pmap_isAllowed(proc->pmapp, ptr, size) == 0) ? -1 : 0;
+	/*
+	 * Disabled checking entry owner for now on NOMMU, as we can
+	 * receive memory from different maps and processes via msg
+	 * and RO elf segments may not be assigned to any process.
+	 */
+#elif !defined(NOMMU)
+	map_entry_t e, *f;
+
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_8 "Structure 'e' is used only for tree searching, pointer will not be modified. We cannot change vaddr member of the map_entry_t to const." */
 	e.vaddr = (void *)ptr;
 	e.size = size;
 
+	(void)proc_lockSet(&proc->mapp->lock);
 	f = lib_treeof(map_entry_t, linkage, lib_rbFind(&proc->mapp->tree, &e.linkage));
 	if ((f == NULL) && (proc->imapp != NULL)) {
 		f = lib_treeof(map_entry_t, linkage, lib_rbFind(&proc->imapp->tree, &e.linkage));
 	}
 
+#if 0 /* NOMMU */
+	if (f->process != proc) {
+		(void)proc_lockClear(&proc->mapp->lock);
+		return -1;
+	}
+#endif
+
+	(void)proc_lockClear(&proc->mapp->lock);
+
 	if (f == NULL) {
 		return -1;
 	}
 
-#ifdef NOMMU
-	if (f->process != proc) {
-		return -1;
-	}
 #endif
-
-#endif
-
 	return 0;
 }
 
@@ -1215,10 +1224,7 @@ int vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size)
 {
 	int ret;
 
-	(void)proc_lockSet(&proc->mapp->lock);
-	ret = _vm_mapBelongs(proc, ptr, size);
-	(void)proc_lockClear(&proc->mapp->lock);
-
+	ret = map_belongs(proc, ptr, size);
 	LIB_ASSERT(ret == 0, "Fault @0x%p (%zu) path: %s, pid: %d\n", ptr, size, proc->path, process_getPid(proc));
 
 	return ret;
@@ -1232,10 +1238,45 @@ void vm_mapinfo(meminfo_t *info)
 	vm_map_t *map;
 	const syspage_map_t *spMap;
 	int size;
-	process_t *process;
+	process_t *process, *proc = proc_current()->process;
 	size_t i;
 	size_t total, free;
+	entryinfo_t *emap = info->entry.map, *ekmap = info->entry.kmap;
+	mapinfo_t *smap = info->maps.map;
+	int emapsz = info->entry.mapsz, ekmapsz = info->entry.kmapsz, smapsz = info->maps.mapsz;
 
+	if (emapsz != -1) {
+		/* emapsz * sizeof(emap[0]) would overflow */
+		if (emapsz < -1 || ((size_t)emapsz > (size_t)-1 / sizeof(emap[0]))) {
+			return;
+		}
+
+		if (vm_mapBelongs(proc, emap, (size_t)emapsz * sizeof(emap[0])) < 0) {
+			return;
+		}
+	}
+
+	if (ekmapsz != -1) {
+		/* ekmapsz * sizeof(ekmap[0]) would overflow */
+		if (ekmapsz < -1 || (size_t)ekmapsz > ((size_t)-1 / sizeof(ekmap[0]))) {
+			return;
+		}
+
+		if (vm_mapBelongs(proc, ekmap, (size_t)ekmapsz * sizeof(ekmap[0])) < 0) {
+			return;
+		}
+	}
+
+	if (smapsz != -1) {
+		/* smapsz * sizeof(smap[0]) would overflow */
+		if (smapsz < -1 || (size_t)smapsz > ((size_t)-1 / sizeof(smap[0]))) {
+			return;
+		}
+
+		if (vm_mapBelongs(proc, smap, (size_t)smapsz * sizeof(smap[0])) < 0) {
+			return;
+		}
+	}
 
 	(void)proc_lockSet(&map_common.lock);
 	/* FIXME: potentially lossy downcasts on 64-bit targets - make total, free, sz size_t */
@@ -1244,7 +1285,7 @@ void vm_mapinfo(meminfo_t *info)
 	info->entry.sz = (unsigned int)sizeof(map_entry_t);
 	(void)proc_lockClear(&map_common.lock);
 
-	if (info->entry.mapsz != -1) {
+	if (emapsz != -1) {
 		process = proc_find((int)info->entry.pid);
 
 		if (process == NULL) {
@@ -1259,36 +1300,36 @@ void vm_mapinfo(meminfo_t *info)
 #ifndef NOMMU
 			size = 0;
 			for (n = lib_rbMinimum(map->tree.root); n != NULL; n = lib_rbNext(n)) {
-				if (info->entry.map != NULL && info->entry.mapsz > size) {
+				if (emap != NULL && emapsz > size) {
 					e = lib_treeof(map_entry_t, linkage, n);
 
-					info->entry.map[size].vaddr = e->vaddr;
-					info->entry.map[size].size = e->size;
-					info->entry.map[size].flags = e->flags;
-					info->entry.map[size].prot = e->prot;
-					info->entry.map[size].protOrig = e->protOrig;
-					info->entry.map[size].anonsz = ~0U;
+					emap[size].vaddr = e->vaddr;
+					emap[size].size = e->size;
+					emap[size].flags = e->flags;
+					emap[size].prot = e->prot;
+					emap[size].protOrig = e->protOrig;
+					emap[size].anonsz = ~0U;
 
 					if (e->amap != NULL) {
-						info->entry.map[size].anonsz = 0;
+						emap[size].anonsz = 0;
 						for (i = 0; (unsigned int)i < e->amap->size; ++i) {
 							if (e->amap->anons[i] != NULL) {
-								info->entry.map[size].anonsz += SIZE_PAGE;
+								emap[size].anonsz += SIZE_PAGE;
 							}
 						}
 					}
 
-					info->entry.map[size].offs = e->offs;
+					emap[size].offs = e->offs;
 
 					if (e->object == NULL) {
-						info->entry.map[size].object = OBJECT_ANONYMOUS;
+						emap[size].object = OBJECT_ANONYMOUS;
 					}
 					else if (e->object == VM_OBJ_PHYSMEM) {
-						info->entry.map[size].object = OBJECT_MEMORY;
+						emap[size].object = OBJECT_MEMORY;
 					}
 					else {
-						info->entry.map[size].object = OBJECT_OID;
-						info->entry.map[size].oid = e->object->oid;
+						emap[size].object = OBJECT_OID;
+						emap[size].oid = e->object->oid;
 					}
 				}
 				++size;
@@ -1298,34 +1339,34 @@ void vm_mapinfo(meminfo_t *info)
 			e = process->entries;
 
 			do {
-				if (info->entry.map != NULL && info->entry.mapsz > size) {
-					info->entry.map[size].vaddr = e->vaddr;
-					info->entry.map[size].size = e->size;
-					info->entry.map[size].flags = e->flags;
-					info->entry.map[size].prot = e->prot;
-					info->entry.map[size].protOrig = e->protOrig;
-					info->entry.map[size].anonsz = ~0x0U;
+				if (emap != NULL && emapsz > size) {
+					emap[size].vaddr = e->vaddr;
+					emap[size].size = e->size;
+					emap[size].flags = e->flags;
+					emap[size].prot = e->prot;
+					emap[size].protOrig = e->protOrig;
+					emap[size].anonsz = ~0x0U;
 
 					if (e->amap != NULL) {
-						info->entry.map[size].anonsz = 0;
+						emap[size].anonsz = 0;
 						for (i = 0; i < e->amap->size; ++i) {
 							if (e->amap->anons[i] != NULL) {
-								info->entry.map[size].anonsz += SIZE_PAGE;
+								emap[size].anonsz += SIZE_PAGE;
 							}
 						}
 					}
 
-					info->entry.map[size].offs = e->offs;
+					emap[size].offs = e->offs;
 
 					if (e->object == NULL) {
-						info->entry.map[size].object = OBJECT_ANONYMOUS;
+						emap[size].object = OBJECT_ANONYMOUS;
 					}
 					else if (e->object == VM_OBJ_PHYSMEM) {
-						info->entry.map[size].object = OBJECT_MEMORY;
+						emap[size].object = OBJECT_MEMORY;
 					}
 					else {
-						info->entry.map[size].object = OBJECT_OID;
-						info->entry.map[size].oid = e->object->oid;
+						emap[size].object = OBJECT_OID;
+						emap[size].oid = e->object->oid;
 					}
 				}
 
@@ -1344,42 +1385,42 @@ void vm_mapinfo(meminfo_t *info)
 		(void)proc_put(process);
 	}
 
-	if (info->entry.kmapsz != -1) {
+	if (ekmapsz != -1) {
 		(void)proc_lockSet(&map_common.kmap->lock);
 
 		size = 0;
 
 		for (n = lib_rbMinimum(map_common.kmap->tree.root); n != NULL; n = lib_rbNext(n)) {
-			if (info->entry.kmap != NULL && info->entry.kmapsz > size) {
+			if (ekmap != NULL && ekmapsz > size) {
 				e = lib_treeof(map_entry_t, linkage, n);
 
-				info->entry.kmap[size].vaddr = e->vaddr;
-				info->entry.kmap[size].size = e->size;
-				info->entry.kmap[size].flags = e->flags;
-				info->entry.kmap[size].prot = e->prot;
-				info->entry.kmap[size].protOrig = e->protOrig;
-				info->entry.kmap[size].anonsz = ~0x0U;
+				ekmap[size].vaddr = e->vaddr;
+				ekmap[size].size = e->size;
+				ekmap[size].flags = e->flags;
+				ekmap[size].prot = e->prot;
+				ekmap[size].protOrig = e->protOrig;
+				ekmap[size].anonsz = ~0x0U;
 
 				if (e->amap != NULL) {
-					info->entry.kmap[size].anonsz = 0x0U;
+					ekmap[size].anonsz = 0x0U;
 					for (i = 0; i < e->amap->size; ++i) {
 						if (e->amap->anons[i] != NULL) {
-							info->entry.kmap[size].anonsz += SIZE_PAGE;
+							ekmap[size].anonsz += SIZE_PAGE;
 						}
 					}
 				}
 
-				info->entry.kmap[size].offs = e->offs;
+				ekmap[size].offs = e->offs;
 
 				if (e->object == NULL) {
-					info->entry.kmap[size].object = OBJECT_ANONYMOUS;
+					ekmap[size].object = OBJECT_ANONYMOUS;
 				}
 				else if (e->object == VM_OBJ_PHYSMEM) {
-					info->entry.kmap[size].object = OBJECT_MEMORY;
+					ekmap[size].object = OBJECT_MEMORY;
 				}
 				else {
-					info->entry.kmap[size].object = OBJECT_OID;
-					info->entry.kmap[size].oid = e->object->oid;
+					ekmap[size].object = OBJECT_OID;
+					ekmap[size].oid = e->object->oid;
 				}
 			}
 			++size;
@@ -1389,54 +1430,58 @@ void vm_mapinfo(meminfo_t *info)
 		info->entry.kmapsz = size;
 	}
 
-	if (info->maps.mapsz != -1) {
+	if (smapsz != -1) {
 		info->maps.total = 0;
 		info->maps.free = 0;
 
 		for (size = 0; (unsigned int)size < map_common.mapssz; ++size) {
 			map = vm_getSharedMap(size);
 			if (map == NULL) {
-				if (size < info->maps.mapsz) {
+				if (size < smapsz) {
 					/* Store info that the map doesn't exist */
-					info->maps.map[size].id = size;
-					info->maps.map[size].free = 0;
-					info->maps.map[size].alloc = 0;
-					info->maps.map[size].pstart = 0;
-					info->maps.map[size].pend = 0;
-					info->maps.map[size].vstart = 0;
-					info->maps.map[size].vend = 0;
+					smap[size].id = size;
+					smap[size].free = 0;
+					smap[size].alloc = 0;
+					smap[size].pstart = 0;
+					smap[size].pend = 0;
+					smap[size].vstart = 0;
+					smap[size].vend = 0;
 				}
 				continue;
 			}
 
 			total = (ptr_t)map->stop - (ptr_t)map->start;
-			if (map->tree.root == NULL) {
-				free = total; /* Map is empty */
+			free = total;
+
+			(void)proc_lockSet(&map->lock);
+
+			e = lib_treeof(map_entry_t, linkage, lib_rbMinimum(map->tree.root));
+			while (e != NULL) {
+				free -= e->size;
+				e = lib_treeof(map_entry_t, linkage, lib_rbNext(&e->linkage));
 			}
-			else {
-				e = lib_treeof(map_entry_t, linkage, map->tree.root);
-				free = e->lmaxgap + e->rmaxgap;
-			}
+
+			(void)proc_lockClear(&map->lock);
 
 			/* All maps together */
 			info->maps.total += total;
 			info->maps.free += free;
 
-			if (size < info->maps.mapsz) {
-				info->maps.map[size].id = size;
-				info->maps.map[size].free = free;
-				info->maps.map[size].alloc = total - free;
-				info->maps.map[size].pstart = (addr_t)map->pmap.start;
-				info->maps.map[size].pend = (addr_t)map->pmap.end;
-				info->maps.map[size].vstart = (ptr_t)map->start;
-				info->maps.map[size].vend = (ptr_t)map->stop;
+			if (size < smapsz) {
+				smap[size].id = size;
+				smap[size].free = free;
+				smap[size].alloc = total - free;
+				smap[size].pstart = (addr_t)map->pmap.start;
+				smap[size].pend = (addr_t)map->pmap.end;
+				smap[size].vstart = (ptr_t)map->start;
+				smap[size].vend = (ptr_t)map->stop;
 				spMap = syspage_mapIdResolve((unsigned int)size);
 				if ((spMap != NULL) && (spMap->name != NULL)) {
-					(void)hal_strncpy(info->maps.map[size].name, spMap->name, sizeof(info->maps.map[size].name));
-					info->maps.map[size].name[sizeof(info->maps.map[size].name) - 1U] = '\0';
+					(void)hal_strncpy(smap[size].name, spMap->name, sizeof(smap[size].name));
+					smap[size].name[sizeof(smap[size].name) - 1U] = '\0';
 				}
 				else {
-					info->maps.map[size].name[0] = '\0';
+					smap[size].name[0] = '\0';
 				}
 			}
 		}

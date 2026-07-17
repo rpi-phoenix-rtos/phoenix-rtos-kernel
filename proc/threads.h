@@ -20,6 +20,7 @@
 #include "hal/hal.h"
 #include "lib/lib.h"
 #include "include/sysinfo.h"
+#include "include/sched.h"
 #include "process.h"
 #include "lock.h"
 
@@ -156,6 +157,9 @@ int proc_threadBroadcast(thread_t **queue);
 void proc_threadBroadcastYield(thread_t **queue);
 
 
+int proc_schedInfo(process_t *proc, int policy, sched_info_t *info);
+
+
 thread_t *threads_findThread(int tid);
 
 
@@ -171,7 +175,7 @@ void proc_gettime(time_t *raw, time_t *offs);
 int proc_settime(time_t offs);
 
 
-void proc_longjmp(cpu_context_t *ctx);
+__attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx);
 
 
 void proc_threadsDump(u8 priority);

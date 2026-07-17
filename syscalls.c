@@ -21,6 +21,7 @@
 #include "include/errno.h"
 #include "include/sysinfo.h"
 #include "include/mman.h"
+#include "include/sched.h"
 #include "include/syscalls.h"
 #include "include/threads.h"
 #include "include/utsname.h"
@@ -374,6 +375,35 @@ int syscalls_priority(u8 *ustack)
 }
 
 
+int syscalls_schedInfo(u8 *ustack)
+{
+	int err, policy;
+	process_t *proc;
+	pid_t pid;
+	sched_info_t *info;
+
+	GETFROMSTACK(ustack, pid_t, pid, 0U);
+	GETFROMSTACK(ustack, int, policy, 1U);
+	GETFROMSTACK(ustack, sched_info_t *, info, 2U);
+
+	proc = proc_find(pid);
+	if (proc == NULL) {
+		return -EINVAL;
+	}
+
+	if (vm_mapBelongs(proc_current()->process, info, sizeof(*info)) < 0) {
+		(void)proc_put(proc);
+		return -EINVAL;
+	}
+
+	err = proc_schedInfo(proc, policy, info);
+
+	(void)proc_put(proc);
+
+	return err;
+}
+
+
 /*
  * System state info
  */
@@ -413,7 +443,6 @@ void syscalls_meminfo(u8 *ustack)
 
 	GETFROMSTACK(ustack, meminfo_t *, info, 0U);
 
-	/* TODO: Check subfields too */
 	if (vm_mapBelongs(proc, info, sizeof(*info)) >= 0) {
 		vm_meminfo(info);
 	}
@@ -485,12 +514,12 @@ int syscalls_sys_perf_start(u8 *ustack)
 	GETFROMSTACK(ustack, void *, arg, 2U);
 	GETFROMSTACK(ustack, size_t, sz, 3U);
 
-	if (mode < 0 || mode >= (int)perf_mode_count) {
-		return -ENOSYS;
-	}
-
 	if (arg != NULL && vm_mapBelongs(proc, arg, sz) < 0) {
 		return -EFAULT;
+	}
+
+	if (mode < 0 || mode >= (int)perf_mode_count) {
+		return -ENOSYS;
 	}
 
 	return perf_start((perf_mode_t)mode, flags, arg, sz);
@@ -509,12 +538,12 @@ int syscalls_sys_perf_read(u8 *ustack)
 	GETFROMSTACK(ustack, size_t, sz, 2U);
 	GETFROMSTACK(ustack, int, chan, 3U);
 
-	if (mode < 0 || mode >= (int)perf_mode_count) {
-		return -ENOSYS;
-	}
-
 	if (vm_mapBelongs(proc, buffer, sz) < 0) {
 		return -EFAULT;
+	}
+
+	if (mode < 0 || mode >= (int)perf_mode_count) {
+		return -ENOSYS;
 	}
 
 	return perf_read((perf_mode_t)mode, buffer, sz, chan);
@@ -704,6 +733,10 @@ int syscalls_interrupt(u8 *ustack)
 	GETFROMSTACK(ustack, void *, data, 2U);
 	GETFROMSTACK(ustack, handle_t, cond, 3U);
 	GETFROMSTACK(ustack, handle_t *, handle, 4U);
+
+	if ((f == NULL) || (vm_mapBelongs(proc, f, 1) < 0)) {
+		return -EINVAL;
+	}
 
 	if ((handle != NULL) && (vm_mapBelongs(proc, handle, sizeof(*handle)) < 0)) {
 		return -EFAULT;
@@ -1109,8 +1142,6 @@ void syscalls_sigreturn(u8 *ustack)
 	}
 
 	proc_longjmp(ctx);
-
-	__builtin_unreachable();
 }
 
 /* POSIX compatibility syscalls */
@@ -1815,7 +1846,13 @@ int syscalls_sys_poll(u8 *ustack)
 	GETFROMSTACK(ustack, nfds_t, nfds, 1U);
 	GETFROMSTACK(ustack, int, timeout_ms, 2U);
 
-	if (vm_mapBelongs(proc, fds, sizeof(*fds) * nfds) < 0) {
+	/* parasoft-suppress-next-line MISRAC2012-RULE_14_3-ac "Check needed on NOMMU + nfds_t type can change." */
+	if (nfds > (size_t)-1 / sizeof(*fds)) {
+		/* nfds * sizeof(*fds) would overflow */
+		return -EINVAL;
+	}
+
+	if (vm_mapBelongs(proc, fds, nfds * sizeof(*fds)) < 0) {
 		return -EFAULT;
 	}
 
@@ -1832,7 +1869,7 @@ int syscalls_sys_futimens(u8 *ustack)
 	GETFROMSTACK(ustack, int, fildes, 0U);
 	GETFROMSTACK(ustack, const struct timespec *, times, 1U);
 
-	if ((times != NULL) && (vm_mapBelongs(proc, times, sizeof(*times)) < 0)) {
+	if ((times != NULL) && (vm_mapBelongs(proc, times, 2U * sizeof(*times)) < 0)) {
 		return -EFAULT;
 	}
 
@@ -1941,12 +1978,13 @@ int syscalls_notimplemented(void)
 const void *const syscalls[] = { SYSCALLS(SYSCALLS_NAME) };
 
 
-void *syscalls_dispatch(int n, u8 *ustack, cpu_context_t *ctx)
+void *syscalls_dispatch(unsigned int n, u8 *ustack, cpu_context_t *ctx)
 {
 	void *retval;
 	thread_t *thread;
 
-	if (n >= (int)(sizeof(syscalls) / sizeof(syscalls[0]))) {
+	if (n >= sizeof(syscalls) / sizeof(syscalls[0])) {
+		threads_setupUserReturn((void *)-EINVAL, ctx);
 		return (void *)-EINVAL;
 	}
 

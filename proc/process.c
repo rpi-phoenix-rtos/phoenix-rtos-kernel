@@ -1549,9 +1549,6 @@ static void process_vforkThread(void *arg)
 
 	/* Start execution from parent suspend point */
 	proc_longjmp(parent->context);
-
-	/* This part of code left unexecuted */
-	return;
 }
 
 

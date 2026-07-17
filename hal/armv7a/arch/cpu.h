@@ -17,9 +17,10 @@
 #define _PH_HAL_ARMV7A_CPU_H_
 
 #include "hal/types.h"
+#include "include/page.h"
 #include "config.h"
 
-#define SIZE_PAGE 0x1000U
+#define SIZE_PAGE _PAGE_SIZE
 #define SIZE_PDIR 0x2000U
 
 #ifndef SIZE_KSTACK
@@ -248,6 +249,16 @@ MAYBE_UNUSED static inline void hal_cpuAtomicInc(volatile u32 *dst)
 		: "r1", "r2", "memory"
 	);
 	/* clang-format on */
+}
+
+
+/* Read Configuration Base Address Register - contents are implementation-defined, typically base address of GIC */
+/* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
+static inline u32 hal_cpuGetCBAR(void)
+{
+	u32 ret;
+	__asm__ volatile("mrc p15, 4, %0, c15, c0, 0" : "=r"(ret));
+	return ret;
 }
 
 

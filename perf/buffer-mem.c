@@ -30,6 +30,10 @@
 #endif
 
 
+_Static_assert((TRACE_EVENT_CHANNEL_BUFSIZE & (SIZE_PAGE - 1U)) == 0U, "TRACE_EVENT_CHANNEL_BUFSIZE must be page aligned");
+_Static_assert((TRACE_META_CHANNEL_BUFSIZE & (SIZE_PAGE - 1U)) == 0U, "TRACE_META_CHANNEL_BUFSIZE must be page aligned");
+
+
 typedef struct {
 	cbuffer_t buffer;
 	page_t *pages;
@@ -142,8 +146,8 @@ ssize_t _trace_bufferWrite(u8 chan, const void *data, size_t sz)
 
 int _trace_bufferWaitUntilAvail(u8 chan, size_t sz)
 {
-	/* overwrite intentionally to prevent deadlock */
-	return 0;
+	/* not supported to prevent deadlock */
+	return -ENOSYS;
 }
 
 
