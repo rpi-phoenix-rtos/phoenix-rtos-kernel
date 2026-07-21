@@ -18,6 +18,7 @@
 
 #include "hal/hal.h"
 #include "proc/proc.h"
+#include "proc/threads.h"
 #include "syspage.h"
 
 
@@ -69,9 +70,7 @@ static void test_proc_indthr(void *arg)
 
 static void test_proc_busythr(void *arg)
 {
-	for (;;) {
-		hal_cpuHalt();
-	}
+	threads_halt();
 
 	return;
 }

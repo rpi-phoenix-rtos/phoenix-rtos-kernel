@@ -828,8 +828,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		process_dumpException(n, ctx);
 
 		if (thread->process == NULL) {
-			hal_cpuDisableInterrupts();
-			hal_cpuHalt();
+			threads_halt();
 		}
 
 		(void)threads_sigpost(thread->process, thread, signal_segv);
