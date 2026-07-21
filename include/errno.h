@@ -72,5 +72,6 @@
 #define ECONNREFUSED    111
 #define EALREADY        114
 #define EINPROGRESS     115
+#define EOWNERDEAD      130
 
 #endif

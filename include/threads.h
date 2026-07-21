@@ -24,9 +24,16 @@
 #define PH_LOCK_RECURSIVE  1
 #define PH_LOCK_ERRORCHECK 2
 
+#define PH_LOCK_PROTO_INHERIT     0
+#define PH_LOCK_PROTO_NOINHERIT   1
+#define PH_LOCK_PROTO_PRIOCEILING 2
+
 
 struct lockAttr {
-	int type;
+	unsigned char type;
+	unsigned char protocol;
+	unsigned char robust;
+	unsigned char prioceiling;
 };
 
 

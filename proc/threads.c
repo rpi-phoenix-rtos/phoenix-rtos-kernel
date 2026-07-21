@@ -36,7 +36,7 @@ enum { event_scheduling, event_enqueued, event_waking, event_preempted };
 #define UNLOCK_FORCE      1
 
 
-const struct lockAttr proc_lockAttrDefault = { .type = PH_LOCK_NORMAL };
+const struct lockAttr proc_lockAttrDefault = { .type = PH_LOCK_NORMAL, .protocol = PH_LOCK_PROTO_INHERIT, .robust = 0 };
 
 /* Special empty queue value used to wakeup next enqueued thread. This is used to implement sticky conditions */
 static thread_t *const wakeupPending = (void *)-1;
@@ -45,7 +45,7 @@ static struct {
 	vm_map_t *kmap;
 	spinlock_t spinlock;
 	lock_t lock;
-	thread_t *ready[8];
+	thread_t *ready[MAX_PRIO + 1];
 	thread_t **current;
 	time_t utcoffs;
 
@@ -71,9 +71,7 @@ static struct {
 } threads_common;
 
 
-_Static_assert(sizeof(threads_common.ready) / sizeof(threads_common.ready[0]) <= (u8)-1, "queue size must fit into priority type");
-
-#define MAX_PRIO ((u8)(sizeof(threads_common.ready) / sizeof(threads_common.ready[0])) - 1U)
+_Static_assert(MAX_PRIO <= (u8)-1, "MAX_PRIO must fit into priority type");
 
 
 static thread_t *_proc_current(void);
@@ -639,7 +637,11 @@ static u8 _proc_lockGetPriority(lock_t *lock)
 	u8 priority = MAX_PRIO;
 	thread_t *thread = lock->queue;
 
-	if (thread != NULL) {
+	if (lock->attr.protocol == PH_LOCK_PROTO_PRIOCEILING) {
+		return lock->attr.prioceiling;
+	}
+
+	if (lock->attr.protocol == PH_LOCK_PROTO_INHERIT && thread != NULL) {
 		do {
 			if (thread->priority < priority) {
 				priority = thread->priority;
@@ -1498,6 +1500,12 @@ static int _proc_lockTry(thread_t *current, lock_t *lock)
 
 	lock->owner = current;
 	lock->depth = 1;
+	if (lock->inconsistent != 0 && lock->attr.robust != 0) {
+		return -EOWNERDEAD;
+	}
+	if (lock->attr.protocol == PH_LOCK_PROTO_PRIOCEILING) {
+		_proc_threadSetPriority(current, _proc_threadGetPriority(current));
+	}
 
 	return EOK;
 }
@@ -1663,6 +1671,10 @@ static int _proc_lockUnlock(lock_t *lock, int doForceUnlock)
 	LIB_ASSERT(LIST_BELONGS(&owner->locks, lock) != 0, "lock: %s, owner pid: %d, owner tid: %d, lock is not on the list",
 			lock->name, (owner->process != NULL) ? process_getPid(owner->process) : 0, proc_getTid(owner));
 
+	if (doForceUnlock == UNLOCK_FORCE) {
+		lock->inconsistent = 1;
+	}
+
 	if (doForceUnlock == UNLOCK_TRY) {
 		if ((lock->attr.type == PH_LOCK_ERRORCHECK) || (lock->attr.type == PH_LOCK_RECURSIVE)) {
 			if (lock->owner != current) {
@@ -1825,6 +1837,71 @@ int proc_lockWait(thread_t **queue, lock_t *lock, time_t timeout)
 }
 
 
+int proc_lockConsistent(lock_t *lock)
+{
+	spinlock_ctx_t sc;
+	int err = EOK;
+
+	if (hal_started() == 0) {
+		return -EINVAL;
+	}
+
+	hal_spinlockSet(&lock->spinlock, &sc);
+
+	if (lock->owner == proc_current()) {
+		if (lock->attr.robust != 0 && lock->inconsistent != 0) {
+			lock->inconsistent = 0;
+		}
+		else {
+			err = -EINVAL;
+		}
+	}
+	else {
+		err = -EPERM;
+	}
+
+	hal_spinlockClear(&lock->spinlock, &sc);
+
+	return err;
+}
+
+
+/* prioceiling == -1 retrieves current priority ceiling for the lock */
+int proc_lockPrioCeiling(lock_t *lock, int prioceiling)
+{
+	spinlock_ctx_t sc;
+	int err;
+
+	if (hal_started() == 0) {
+		return -EINVAL;
+	}
+
+	hal_spinlockSet(&lock->spinlock, &sc);
+
+	if (lock->attr.protocol != PH_LOCK_PROTO_PRIOCEILING) {
+		err = -EINVAL;
+	}
+	else if (prioceiling < -1 || prioceiling > MAX_PRIO) {
+		err = -EINVAL;
+	}
+	else {
+		err = lock->attr.prioceiling;
+		if (prioceiling >= 0) {
+			if (lock->owner == NULL || lock->owner == proc_current()) {
+				lock->attr.prioceiling = prioceiling;
+			}
+			else {
+				err = -EPERM;
+			}
+		}
+	}
+
+	hal_spinlockClear(&lock->spinlock, &sc);
+
+	return err;
+}
+
+
 int proc_lockDone(lock_t *lock)
 {
 	proc_lockForceUnlock(lock, UNLOCK_DONT_YIELD);
@@ -1840,6 +1917,7 @@ int proc_lockInit(lock_t *lock, const struct lockAttr *attr, const char *name)
 	lock->queue = NULL;
 	lock->name = name;
 	lock->epoch = -1;
+	lock->inconsistent = 0;
 
 	hal_memcpy(&lock->attr, attr, sizeof(struct lockAttr));
 

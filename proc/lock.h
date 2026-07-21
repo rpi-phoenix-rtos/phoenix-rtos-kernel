@@ -32,6 +32,8 @@ typedef struct _lock_t {
 	unsigned int depth; /* Used with recursive locks */
 
 	int epoch; /* Current trace epoch - used for tracking lock name emission */
+
+	unsigned char inconsistent;
 } lock_t;
 
 
@@ -58,6 +60,12 @@ int proc_lockSetInterruptible(lock_t *lock);
 
 
 int proc_lockInit(lock_t *lock, const struct lockAttr *attr, const char *name);
+
+
+int proc_lockConsistent(lock_t *lock);
+
+
+int proc_lockPrioCeiling(lock_t *lock, int prioceiling);
 
 
 int proc_lockDone(lock_t *lock);

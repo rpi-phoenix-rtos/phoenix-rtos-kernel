@@ -24,6 +24,8 @@
 #include "process.h"
 #include "lock.h"
 
+#define MAX_PRIO 7
+
 #define MAX_TID        MAX_ID
 #define THREAD_END     1U
 #define THREAD_END_NOW 2U

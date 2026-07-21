@@ -39,6 +39,8 @@
 	ID(phMutexLock) \
 	ID(mutexTry) \
 	ID(mutexUnlock) \
+	ID(mutexConsistent) \
+	ID(mutexPrioCeiling) \
 	ID(phCondCreate) \
 	ID(phCondWait) \
 	ID(condSignal) \
