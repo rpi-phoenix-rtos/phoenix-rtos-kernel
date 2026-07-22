@@ -31,6 +31,11 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\" -DRELEASE=\"$(RELEASE)\" -DTARGET_FAMILY=\"
 # uncomment to enable stack canary checking
 # CPPFLAGS += -DSTACK_CANARY
 
+ifeq ($(DEBUG_HARDER),1)
+  CPPFLAGS += -DDEBUG_HARDER
+endif
+
+
 EXTERNAL_HEADERS_DIR := ./include
 EXTERNAL_HEADERS := $(shell find $(EXTERNAL_HEADERS_DIR) -name \*.h)
 
