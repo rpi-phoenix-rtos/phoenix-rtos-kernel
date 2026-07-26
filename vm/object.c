@@ -227,9 +227,29 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 	/* Real file bytes within the window; the last page may be partial. */
 	span = ((u64)osize - offs < (u64)want * SIZE_PAGE) ? (size_t)((u64)osize - offs) : (want * SIZE_PAGE);
 
-	if (proc_open(oid, 0) < 0) {
-		vm_kfree(buf);
-		return -EIO;
+	/* NFS exec-over-NFS -EIO fix. This cold cluster open is faulted on the exec demand-page force
+	 * path; a single transient proc_open blip here used to fabricate -EIO and abort the whole
+	 * ~17 MB exec ("exec ... failed (err=-5)", ~1/10 nfsroot boots). Meanwhile the sibling
+	 * proc_read below already tolerates transients (nfs_ops.c retries 25x). Two coupled fixes for
+	 * that asymmetry:
+	 *   (4a) never fabricate -EIO — propagate proc_open's REAL errno (mirrors the 2026-07-12
+	 *        vm_objectPage precedent), so a genuine error stays truthful and diagnosable.
+	 *   (4b) bounded backed-off re-drive of THIS one open, matching the read path's resilience —
+	 *        NOT a blanket retry bump. Each failed attempt logs the true errno so it is captured
+	 *        even when a later retry then succeeds.
+	 * Inert on the SD deliverable (SD proc_open does not fail -> loop never entered). */
+	r = proc_open(oid, 0);
+	if (r < 0) {
+		int tries;
+		for (tries = 0; (tries < 8) && (r < 0); tries++) {
+			lib_printf("object_fetchCluster: proc_open try %d rc=%d off=%llu\n", tries, r, (unsigned long long)offs);
+			proc_threadSleep((tries < 6) ? (time_t)(10000u << tries) : (time_t)640000u); /* 10..640ms */
+			r = proc_open(oid, 0);
+		}
+		if (r < 0) {
+			vm_kfree(buf);
+			return r; /* propagate the REAL error; never fabricate -EIO */
+		}
 	}
 
 	/* Single bulk read for the whole window, looping over short reads (a backing store
