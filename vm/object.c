@@ -240,10 +240,27 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 	 * Inert on the SD deliverable (SD proc_open does not fail -> loop never entered). */
 	r = proc_open(oid, 0);
 	if (r < 0) {
-		int tries;
-		for (tries = 0; (tries < 8) && (r < 0); tries++) {
+		/* The exec's FIRST cold open right after the NFS-root takeover can hit the NFSv4 client's
+		 * OPEN-state-establishment window: the mount's GETATTR/FSINFO do not establish OPEN state,
+		 * so the first OPEN transiently gets a server "try again" status that libnfs surfaces (via
+		 * its catch-all NFS4 mapping, nfs4.c:188) as -ERANGE(-34); it clears within a few seconds
+		 * (a manual re-run always succeeds). Observed on HW: the earlier 8-try/~1.9s re-drive was
+		 * too short and the exec still aborted with the real -34. Extend to a ~10 s DEADLINE with
+		 * ramped backoff: the loop exits the instant the window clears (typically ~2-3 s, not a
+		 * fixed wait), so it recovers the exec instead of failing. Bounded and targeted at THIS one
+		 * uncovered open (the sibling proc_read already retries in nfs_ops.c) — not a blanket retry.
+		 * Each attempt logs the real errno. Inert on SD (proc_open never fails there). */
+		const time_t deadline_us = 10000000; /* 10 s cap */
+		time_t waited = 0, back = 10000;      /* 10 ms initial backoff, ramped to 500 ms */
+		int tries = 0;
+		while ((r < 0) && (waited < deadline_us)) {
 			lib_printf("object_fetchCluster: proc_open try %d rc=%d off=%llu\n", tries, r, (unsigned long long)offs);
-			proc_threadSleep((tries < 6) ? (time_t)(10000u << tries) : (time_t)640000u); /* 10..640ms */
+			proc_threadSleep(back);
+			waited += back;
+			if (back < 500000) {
+				back <<= 1;
+			}
+			tries++;
 			r = proc_open(oid, 0);
 		}
 		if (r < 0) {
