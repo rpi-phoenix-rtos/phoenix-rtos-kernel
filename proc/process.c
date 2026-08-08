@@ -583,7 +583,15 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 				return -ENOMEM;
 			}
 
-			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + memsz) - ((ptr_t)vaddr + filesz));
+			/* Zero ONLY the .bss tail that shares the last file-backed page (COW'd
+			 * from the file, so its bytes past p_filesz are garbage). The rest of
+			 * .bss lives in the anonymous mapping above, which the VM demand-zeroes
+			 * per page on first fault (amap.c). Eagerly memset-ing the whole .bss
+			 * here touched every page at exec time -- for a large .bss (e.g. a 26 MB
+			 * game binary = ~14k pages) that is a long exec window under map->lock
+			 * that intermittently hung over flaky netboot NFS. Demand-zeroing the
+			 * anon .bss (like Linux) makes exec fast + robust. */
+			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + filesz) - ((ptr_t)vaddr + filesz));
 		}
 		phdr++;
 	}
@@ -675,7 +683,15 @@ static int process_load64(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 				return -ENOMEM;
 			}
 
-			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + memsz) - ((ptr_t)vaddr + filesz));
+			/* Zero ONLY the .bss tail that shares the last file-backed page (COW'd
+			 * from the file, so its bytes past p_filesz are garbage). The rest of
+			 * .bss lives in the anonymous mapping above, which the VM demand-zeroes
+			 * per page on first fault (amap.c). Eagerly memset-ing the whole .bss
+			 * here touched every page at exec time -- for a large .bss (e.g. a 26 MB
+			 * game binary = ~14k pages) that is a long exec window under map->lock
+			 * that intermittently hung over flaky netboot NFS. Demand-zeroing the
+			 * anon .bss (like Linux) makes exec fast + robust. */
+			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + filesz) - ((ptr_t)vaddr + filesz));
 		}
 		phdr++;
 	}
