@@ -2391,7 +2391,7 @@ int posix_futimens(int fildes, const struct timespec *times)
 }
 
 
-static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix)
+static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix, unsigned int block_ms)
 {
 	msg_t msg;
 	int ready = 0;
@@ -2412,7 +2412,13 @@ static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix)
 		events = (unsigned short)fds[i].events;
 		revents = (unsigned short)fds[i].revents;
 
-		msg.i.attr.val = (long long)events;
+		/* Low 16 bits = event mask; high bits optionally carry a block timeout
+		 * (ms) so a poll-status server MAY block until readiness instead of the
+		 * caller spin-polling. Only posix_poll's single-ftInetSocket fast path
+		 * passes block_ms > 0 (and only the lwip socket server decodes it); every
+		 * other path passes 0, i.e. a bare mask (unchanged legacy snapshot). The
+		 * AF_UNIX branch below uses the raw `events`, never this packed value. */
+		msg.i.attr.val = (long long)events | ((long long)block_ms << 16);
 
 		if (posix_getOpenFile(fds[i].fd, &f) < 0) {
 			err = (int)POLLNVAL;
@@ -2468,7 +2474,9 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 	unsigned int i, n;
 	int ready;
 	int hasUnix = 0;
-	time_t timeout, now, cur;
+	int singleInet = 0;
+	open_file_t *pf;
+	time_t timeout, now, cur, t0, t1;
 
 	n = 0U;
 
@@ -2486,6 +2494,26 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		return 0;
 	}
 
+	/* Fast-path gate: a poll on exactly ONE inet socket lets the socket server
+	 * block until readiness (see do_poll_iteration's block_ms) instead of the
+	 * kernel spin-polling every POLL_INTERVAL. Restricted to a single ftInetSocket
+	 * fd so only the lwip socket server (which decodes the packed timeout) is
+	 * affected; multi-fd and non-inet polls keep the legacy timed re-poll. */
+	if (n == 1U) {
+		for (i = 0U; i < nfds; ++i) {
+			if (fds[i].fd < 0) {
+				continue;
+			}
+			if (posix_getOpenFile(fds[i].fd, &pf) == 0) {
+				if (pf->type == ftInetSocket) {
+					singleInet = 1;
+				}
+				(void)posix_fileDeref(pf);
+			}
+			break;
+		}
+	}
+
 	if (timeout_ms >= 0) {
 		proc_gettime(&timeout, NULL);
 		timeout += (timeout_ms == 0) ? 1 : timeout_ms * 1000LL;
@@ -2494,7 +2522,7 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		timeout = 0;
 	}
 
-	ready = do_poll_iteration(fds, nfds, &hasUnix);
+	ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
 	while (ready == 0) {
 		proc_gettime(&cur, NULL);
 		if (timeout != 0) {
@@ -2523,12 +2551,27 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 			if (unix_pollWait(cur + now) == -EINTR) {
 				return -EINTR;
 			}
+			ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
+		}
+		else if (singleInet != 0) {
+			/* Single inet socket: let the socket server block until readiness
+			 * (up to `now`) — it returns the instant data arrives, instead of the
+			 * kernel sleeping the whole interval blind. Belt: if it returns
+			 * not-ready having blocked less than `now` (e.g. a server that ignores
+			 * the packed timeout), sleep the remainder so this can never busy-loop. */
+			proc_gettime(&t0, NULL);
+			ready = do_poll_iteration(fds, nfds, &hasUnix, (unsigned int)(now / 1000));
+			if (ready == 0) {
+				proc_gettime(&t1, NULL);
+				if ((t1 - t0) < now) {
+					(void)proc_threadSleep(now - (t1 - t0));
+				}
+			}
 		}
 		else {
 			(void)proc_threadSleep(now);
+			ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
 		}
-
-		ready = do_poll_iteration(fds, nfds, &hasUnix);
 	}
 
 	return ready;
