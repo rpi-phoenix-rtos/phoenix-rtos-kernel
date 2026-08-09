@@ -251,10 +251,9 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 		 * uncovered open (the sibling proc_read already retries in nfs_ops.c) — not a blanket retry.
 		 * Each attempt logs the real errno. Inert on SD (proc_open never fails there). */
 		const time_t deadline_us = 10000000; /* 10 s cap */
-		time_t waited = 0, back = 10000;      /* 10 ms initial backoff, ramped to 500 ms */
+		time_t waited = 0, back = 10000;      /* 10 ms initial backoff, doubled while < 500 ms (so the final step reaches 640 ms), then held */
 		int tries = 0;
 		while ((r < 0) && (waited < deadline_us)) {
-			lib_printf("object_fetchCluster: proc_open try %d rc=%d off=%llu\n", tries, r, (unsigned long long)offs);
 			proc_threadSleep(back);
 			waited += back;
 			if (back < 500000) {
@@ -263,6 +262,9 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 			tries++;
 			r = proc_open(oid, 0);
 		}
+		/* One summary line for the (rare) recovery, rather than per-iteration spam. */
+		lib_printf("object_fetchCluster: NFS OPEN re-drive off=%llu tries=%d waited=%llums rc=%d\n",
+			(unsigned long long)offs, tries, (unsigned long long)(waited / 1000), r);
 		if (r < 0) {
 			vm_kfree(buf);
 			return r; /* propagate the REAL error; never fabricate -EIO */
