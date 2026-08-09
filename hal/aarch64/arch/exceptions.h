@@ -50,7 +50,7 @@
 #define EXC_BKPT_AA32               0x38U
 #define EXC_BRK_AA64                0x3cU
 
-#define SIZE_CTXDUMP 1024U /* Size of dumped context string */
+#define SIZE_CTXDUMP 1024U /* Size of dumped context string (registers only) */
 
 
 typedef struct _exc_context_t {

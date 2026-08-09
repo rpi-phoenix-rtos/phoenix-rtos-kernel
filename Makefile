@@ -26,6 +26,13 @@ MAKEFLAGS += --no-print-directory
 include ../phoenix-rtos-build/Makefile.common
 
 CFLAGS += -I. -ffreestanding
+
+# Keep frame pointers in the kernel (overrides the target's -fomit-frame-pointer)
+# so the aarch64 exception handler can produce a call-stack backtrace by walking
+# the AAPCS64 x29 chain. Kernel-only: userspace ports keep -fomit-frame-pointer.
+ifneq (,$(filter aarch64%,$(TARGET_FAMILY)))
+  CFLAGS += -fno-omit-frame-pointer
+endif
 CPPFLAGS += -DVERSION=\"$(VERSION)\" -DRELEASE=\"$(RELEASE)\" -DTARGET_FAMILY=\"$(TARGET_FAMILY)\"
 
 # uncomment to enable stack canary checking

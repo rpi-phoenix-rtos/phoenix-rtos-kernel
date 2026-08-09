@@ -174,12 +174,74 @@ void hal_exceptionsDumpContext(char *buff, exc_context_t *ctx, unsigned int n)
 }
 
 
+/* Print a call-stack backtrace for a kernel exception. Resolve the printed
+ * addresses offline with `aarch64-phoenix-addr2line -e phoenix-<target>.elf <addr>`.
+ *
+ * Deliberately a SEPARATE step from hal_exceptionsDumpContext, called by the
+ * kernel fault handlers only AFTER the register dump has already been printed:
+ * this walk dereferences the faulting stack, and on a stack-overflow /
+ * stack-corruption crash a frame pointer can point into an unmapped page, so
+ * the walk itself may take a nested fault. Ordering it after the register print
+ * means such a nested fault costs only the backtrace, never the registers.
+ *
+ * pc and lr are printed first. lr matters because a crash in a LEAF function has
+ * no stack frame of its own, so its caller lives only in lr, not on the stack;
+ * walking x29 alone would silently skip it. (For a NON-leaf fault lr is stale -
+ * it points into the faulting function's last callee return - hence it is
+ * labelled, not presented as a true frame.) The remaining lines walk the AAPCS64
+ * frame-pointer chain (the kernel is built -fno-omit-frame-pointer): x29 points
+ * at [saved x29, saved x30], i.e. [fp]=caller fp, [fp+8]=return address.
+ *
+ * The walk only ever dereferences fp values that are 16-byte aligned, ascend
+ * monotonically, and lie inside a 16 KiB window anchored on the first frame
+ * pointer (itself validated as within 64 KiB of sp), and is depth-capped. That
+ * rejects a corrupt fp by the bound rather than faulting - but note it cannot
+ * prove the pages are mapped, which is the residual reason this runs last. */
+static void hal_exceptionsBacktrace(exc_context_t *ctx)
+{
+	char buff[512];
+	size_t i = 0;
+	const unsigned long sp = ctx->cpuCtx.sp;
+	unsigned long fp = ctx->cpuCtx.x[29];
+	unsigned long spdiff = (fp > sp) ? (fp - sp) : (sp - fp);
+	unsigned long lo = fp & ~0xfUL;
+	unsigned long hi = lo + 0x4000UL; /* walk at most 16 KiB up toward the stack base */
+	unsigned int depth;
+
+	(void)hal_strcpy(&buff[i], "backtrace:");
+	i += hal_strlen("backtrace:");
+	i += hal_i2s("\n  pc=", &buff[i], ctx->cpuCtx.pc, 16U, 1U);
+	i += hal_i2s("\n  lr=", &buff[i], ctx->cpuCtx.x[30], 16U, 1U);
+
+	if ((fp != 0UL) && ((fp & 0xfUL) == 0UL) && (spdiff < 0x10000UL)) {
+		for (depth = 0U; depth < 16U; depth++) {
+			unsigned long nextfp, ret;
+			if ((fp < lo) || (fp >= hi) || ((fp & 0xfUL) != 0UL)) {
+				break;
+			}
+			nextfp = *(volatile unsigned long *)(addr_t)fp;
+			ret = *(volatile unsigned long *)(addr_t)(fp + 8UL);
+			i += hal_i2s("\n  ", &buff[i], ret, 16U, 1U);
+			if (nextfp <= fp) {
+				break; /* must ascend the stack */
+			}
+			fp = nextfp;
+		}
+	}
+
+	buff[i++] = '\n';
+	buff[i] = '\0';
+	hal_consolePrint(ATTR_BOLD, buff);
+}
+
+
 static void exceptions_defaultHandler(unsigned int n, exc_context_t *ctx)
 {
 	char buff[SIZE_CTXDUMP];
 
 	hal_exceptionsDumpContext(buff, ctx, n);
 	hal_consolePrint(ATTR_BOLD, buff);
+	hal_exceptionsBacktrace(ctx);
 
 #ifdef NDEBUG
 	hal_cpuReboot();
@@ -212,6 +274,7 @@ static void exceptions_serrorHandler(unsigned int n, exc_context_t *ctx)
 	hal_exceptionsDumpContext(buff, ctx, n);
 	hal_consolePrint(ATTR_BOLD, "\nasynchronous SError taken - halting (decode ESR.{EA,AET,DFSC,IDS}):\n");
 	hal_consolePrint(ATTR_BOLD, buff);
+	hal_exceptionsBacktrace(ctx);
 
 	for (;;) {
 		hal_cpuHalt();
@@ -260,6 +323,7 @@ static void exceptions_watchpointHandler(unsigned int n, exc_context_t *ctx)
 		hal_exceptionsDumpContext(buff, ctx, n);
 		hal_consolePrint(ATTR_BOLD, "\nwatchpoint hit - halting (pc=writer, far=watched addr):\n");
 		hal_consolePrint(ATTR_BOLD, buff);
+		hal_exceptionsBacktrace(ctx);
 		for (;;) {
 			hal_cpuHalt();
 		}
