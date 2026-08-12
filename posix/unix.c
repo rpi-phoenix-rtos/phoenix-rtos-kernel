@@ -8,9 +8,7 @@
  * Copyright 2018, 2020, 2025 Phoenix Systems
  * Author: Jan Sikorski, Pawel Pisarczyk, Ziemowit Leszczynski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "include/errno.h"
@@ -548,7 +546,7 @@ int unix_bind(unsigned int socket, const struct sockaddr *address, socklen_t add
 			lib_splitname(path, &name, &dir);
 
 			if (proc_lookup(dir, NULL, &odir) < 0) {
-				err = -ENOTDIR;
+				err = -ENOENT;
 				break;
 			}
 
@@ -567,6 +565,9 @@ int unix_bind(unsigned int socket, const struct sockaddr *address, socklen_t add
 			err = proc_create(odir.port, 2 /* otDev */, S_IFSOCK, dev, odir, name, &dev);
 
 			if (err != 0) {
+				if (err == -EEXIST) {
+					err = -EADDRINUSE;
+				}
 				if (s->type == SOCK_DGRAM) {
 					_cbuffer_init(&s->buffer, NULL, 0);
 					vm_kfree(v);
@@ -1149,6 +1150,11 @@ int unix_shutdown(unsigned int socket, int how)
 	s = unixsock_get(socket);
 	if (s == NULL) {
 		return -ENOTSOCK;
+	}
+
+	if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
+		unixsock_put(s);
+		return -EINVAL;
 	}
 
 	unixsock_put(s);

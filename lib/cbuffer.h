@@ -8,15 +8,18 @@
  * Copyright 2019 Phoenix Systems
  * Author: Jan Sikorski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #ifndef _PH_LIB_CBUFFER_H_
 #define _PH_LIB_CBUFFER_H_
 
+#include "hal/types.h"
+
 #include "attrs.h"
+#include "assert.h"
+#include "utils.h"
+
 
 typedef struct {
 	size_t sz, r, w;
@@ -25,7 +28,7 @@ typedef struct {
 } cbuffer_t;
 
 
-static inline size_t _cbuffer_free(cbuffer_t *buf)
+static inline size_t _cbuffer_free(const cbuffer_t *buf)
 {
 	if (buf->w == buf->r) {
 		return (buf->full != 0U) ? 0U : buf->sz;
@@ -34,7 +37,7 @@ static inline size_t _cbuffer_free(cbuffer_t *buf)
 }
 
 
-static inline size_t _cbuffer_avail(cbuffer_t *buf)
+static inline size_t _cbuffer_avail(const cbuffer_t *buf)
 {
 	return buf->sz - _cbuffer_free(buf);
 }

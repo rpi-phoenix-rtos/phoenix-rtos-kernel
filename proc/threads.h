@@ -9,9 +9,7 @@
  * Copyright 2001, 2006 Pawel Pisarczyk
  * Author: Pawel Pisarczyk, Jacek Popko
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #ifndef _PH_PROC_THREADS_H_
@@ -191,6 +189,9 @@ int threads_sigsuspend(unsigned int mask);
 
 
 void threads_setupUserReturn(void *retval, cpu_context_t *ctx);
+
+
+__attribute__((noreturn)) void threads_halt(void);
 
 
 #endif

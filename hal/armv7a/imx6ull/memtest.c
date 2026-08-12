@@ -8,9 +8,7 @@
  * Copyright 2015, 2018 Phoenix Systems
  * Author: Jakub Sejdak, Aleksander Kaminski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 
@@ -300,5 +298,7 @@ void test_ddr(void)
 	test_ddrAll();
 #endif
 
-	hal_cpuHalt();
+	for (;;) {
+		hal_cpuHalt();
+	}
 }

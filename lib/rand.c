@@ -8,12 +8,10 @@
  * Copyright 2012, 2016 Phoenix Systems
  * Author: Pawel Kolodziej
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "lib/rand.h"
+#include "rand.h"
 
 
 int lib_rand(unsigned int *seedp)

@@ -8,9 +8,7 @@
  * Copyright 2017 Phoenix Systems
  * Author: Jakub Sejdak
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 /* parasoft-begin-suppress ALL "tests don't need to comply with MISRA" */
@@ -19,6 +17,7 @@
 #include "lib/lib.h"
 #include "vm/vm.h"
 #include "proc/proc.h"
+#include "proc/threads.h"
 
 
 static int test_rbCheckEx(rbnode_t *node, int level)
@@ -155,7 +154,7 @@ static void test_rbGenerateTest(int level, int insert, int vector[], int selecte
 					}
 
 					lib_printf("\n");
-					hal_cpuHalt();
+					threads_halt();
 				}
 
 				if (rb_processVector(0, &tree, vector) < 0) {
@@ -165,7 +164,7 @@ static void test_rbGenerateTest(int level, int insert, int vector[], int selecte
 					}
 
 					lib_printf("\n");
-					hal_cpuHalt();
+					threads_halt();
 				}
 			}
 		}

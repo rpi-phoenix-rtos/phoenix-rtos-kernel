@@ -8,9 +8,7 @@
  * Copyright 2014, 2017 Phoenix Systems
  * Author: Jacek Popko, Pawel Pisarczyk, Aleksander Kaminski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/cpu.h"
@@ -38,9 +36,7 @@ void hal_cpuLowPower(time_t us, spinlock_t *spinlock, spinlock_ctx_t *sc)
 
 	hal_spinlockSet(&cpu_common.busySp, &scp);
 	if (cpu_common.busy == 0) {
-		/* Don't increment jiffies if sleep was unsuccessful */
-		us = _stm32_pwrEnterLPStop(us);
-		timer_jiffiesAdd(us);
+		_stm32_pwrEnterLPStop(us);
 		hal_spinlockClear(&cpu_common.busySp, &scp);
 	}
 	else {

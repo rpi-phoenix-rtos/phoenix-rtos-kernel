@@ -8,9 +8,7 @@
  * Copyright 2014, 2018 Phoenix Systems
  * Author: Jacek Popko, Pawel Pisarczyk, Aleksander Kaminski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "armv7a.h"
@@ -98,7 +96,7 @@ static const char *const marksets[4] = { "BBBBBBBBBBBBBBBB", "KYCPMSHKKKKKKKKK",
 
 
 /* clang-format off */
-static const u16 attrMap[] = {
+static const u16 attrMap[PGHD_MASK + 1U] = {
 	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR | TT2S_EXECNEVER | TT2S_READONLY,
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY,
 	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR                  | TT2S_READONLY,
@@ -107,14 +105,14 @@ static const u16 attrMap[] = {
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER,
 	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR,
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV,
-	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR                  | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                    | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR | TT2S_EXECNEVER                 | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER                 | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR                                  | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                                    | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
+	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR                  | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                    | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR | TT2S_EXECNEVER                 | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER                 | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_CACHING_ATTR                                  | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                                    | TT2S_PL0ACCESS,
 	TT2S_COMMON_ATTR | TT2S_NOTCACHED    | TT2S_EXECNEVER | TT2S_READONLY,
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY,
 	TT2S_COMMON_ATTR | TT2S_NOTCACHED                     | TT2S_READONLY,
@@ -123,14 +121,14 @@ static const u16 attrMap[] = {
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER,
 	TT2S_COMMON_ATTR | TT2S_NOTCACHED,
 	TT2S_COMMON_ATTR | TT2S_SHARED_DEV,
-	TT2S_COMMON_ATTR | TT2S_NOTCACHED    | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_NOTCACHED                     | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                    | TT2S_READONLY | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_NOTCACHED    | TT2S_EXECNEVER                 | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER                 | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_NOTCACHED                                     | TT2S_PL0ACCESS | TT2S_NOTGLOBAL,
-	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                                    | TT2S_PL0ACCESS | TT2S_NOTGLOBAL
+	TT2S_COMMON_ATTR | TT2S_NOTCACHED    | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_NOTCACHED                     | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                    | TT2S_READONLY | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_NOTCACHED    | TT2S_EXECNEVER                 | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV   | TT2S_EXECNEVER                 | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_NOTCACHED                                     | TT2S_PL0ACCESS,
+	TT2S_COMMON_ATTR | TT2S_SHARED_DEV                                    | TT2S_PL0ACCESS,
 };
 /* clang-format on */
 
@@ -270,11 +268,14 @@ void pmap_switch(pmap_t *pmap)
 static void _pmap_writeEntry(ptr_t *ptable, void *va, addr_t pa, vm_attr_t attr, unsigned char asid)
 {
 	unsigned int pti = ID_PTABLE((ptr_t)va);
+	u32 hwAttr;
 
 	hal_cpuCleanDataCache((ptr_t)&ptable[pti], (ptr_t)&ptable[pti] + sizeof(ptr_t));
 	ptr_t oldEntry = ptable[pti];
 	if ((attr & PGHD_PRESENT) != 0U) {
-		ptable[pti] = (pa & ~0xfffU) | attrMap[attr & 0x1fU];
+		hwAttr = attrMap[attr & PGHD_MASK];
+		hwAttr |= ((ptr_t)va < VADDR_USR_MAX) ? TT2S_NOTGLOBAL : 0U;
+		ptable[pti] = (pa & ~0xfffU) | hwAttr;
 	}
 	else {
 		ptable[pti] = 0;
@@ -398,7 +399,7 @@ int pmap_remove(pmap_t *pmap, void *vstart, void *vend)
 		}
 
 		/* Map page table corresponding to vaddr */
-		if (pmap_common.kptab[ID_PTABLE(pmap_common.sptab)] != ((addr & ~0xfffU) | attrMap[SCRATCH_ATTRS])) {
+		if (pmap_common.kptab[ID_PTABLE(pmap_common.sptab)] != ((addr & ~0xfffU) | attrMap[SCRATCH_ATTRS & PGHD_MASK])) {
 			_pmap_mapScratch(addr, asid);
 		}
 

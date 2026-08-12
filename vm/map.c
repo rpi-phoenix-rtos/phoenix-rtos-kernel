@@ -8,9 +8,7 @@
  * Copyright 2016 Phoenix Systems
  * Author: Pawel Pisarczyk, Jan Sikorski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/hal.h"
@@ -369,11 +367,11 @@ static void *_map_map(vm_map_t *map, void *vaddr, process_t *proc, size_t size, 
 
 		if (o == NULL) {
 			/* Try to use existing amap */
-			if (next != NULL && next->amap != NULL && e->vaddr >= (next->vaddr - next->aoffs)) {
+			if (next != NULL && next->amap != NULL && e->vaddr >= (next->vaddr - next->aoffs) && (next->flags & MAP_NEEDSCOPY) == 0U) {
 				e->amap = amap_ref(next->amap);
 				e->aoffs = next->aoffs - ((ptr_t)next->vaddr - (ptr_t)e->vaddr);
 			}
-			else if (prev != NULL && prev->amap != NULL && (SIZE_PAGE * prev->amap->size - prev->aoffs + (size_t)prev->vaddr) >= ((size_t)e->vaddr + size)) {
+			else if (prev != NULL && prev->amap != NULL && (SIZE_PAGE * prev->amap->size - prev->aoffs + (size_t)prev->vaddr) >= ((size_t)e->vaddr + size) && (prev->flags & MAP_NEEDSCOPY) == 0U) {
 				e->amap = amap_ref(prev->amap);
 				e->aoffs = prev->aoffs + ((ptr_t)e->vaddr - (ptr_t)prev->vaddr);
 			}
@@ -827,10 +825,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	if (vm_mapForce(map, paddr, prot) != 0) {
 		process_dumpException(n, ctx);
 
-		if (thread->process == NULL) {
-			hal_cpuDisableInterrupts();
-			hal_cpuHalt();
-		}
+		LIB_ASSERT_ALWAYS(thread->process != NULL, "exception in kernel");
 
 		(void)threads_sigpost(thread->process, thread, signal_segv);
 	}
@@ -859,7 +854,7 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 	addr_t pa;
 	vm_attr_t attr;
 	int needscopyNonLazy;
-	map_entry_t *e, *buf = NULL, *prev;
+	map_entry_t *e, *buf = NULL, *prev, *head, *tail;
 	map_entry_t t;
 
 	if (((((ptr_t)vaddr) & (SIZE_PAGE - 1U)) != 0U) || (len == 0U) || ((len & (SIZE_PAGE - 1U)) != 0U)) {
@@ -906,72 +901,89 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 		}
 	}
 
-	if (result == EOK) {
-		t.vaddr = vaddr;
-		prev = NULL;
-		lenLeft = len;
-		do {
-			e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &t.linkage));
+	if (result != EOK) {
+		(void)proc_lockClear(&map->lock);
+		return result;
+	}
 
-			if (prev == NULL) {
-				/* First entry */
-				if (e->vaddr < t.vaddr) {
-					/* Split */
-					prev = e;
+	t.vaddr = vaddr;
+	prev = NULL;
+	lenLeft = len;
+	do {
+		e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &t.linkage));
 
-					e = buf;
-					buf = buf->next;
+		currSize = e->size;
+		currVaddr = t.vaddr;
 
-					_vm_mapEntrySplit(p, map, prev, e, (ptr_t)t.vaddr - (ptr_t)prev->vaddr);
-				}
-			}
-			else if ((prev->protOrig == e->protOrig) && (prev->object == e->object) && (prev->flags == e->flags)) {
-				/* Merge */
-				prev->rmaxgap = e->rmaxgap;
-				prev->size += e->size;
+		if (e->vaddr < currVaddr) {
+			/* Split */
+			head = e;
 
-				_entry_put(map, e);
+			e = buf;
+			buf = buf->next;
 
-				map_augment(&prev->linkage);
-				e = prev;
+			_vm_mapEntrySplit(p, map, head, e, (ptr_t)currVaddr - (ptr_t)head->vaddr);
+
+			currSize = e->size;
+		}
+
+		if (lenLeft < currSize) {
+			tail = buf;
+			buf = buf->next; /* Avoid freeing the split entry in final cleanup */
+			_vm_mapEntrySplit(p, map, e, tail, lenLeft + ((ptr_t)currVaddr - (ptr_t)e->vaddr));
+			currSize = lenLeft;
+		}
+
+		if ((prev != NULL) && (prev->protOrig == e->protOrig) && (prev->flags == e->flags) &&
+				(prev->object == e->object) && ((prev->object == NULL) || (e->offs == (prev->offs + prev->size))) &&
+				(prev->amap == e->amap) && ((e->amap == NULL) || (e->aoffs == (prev->aoffs + prev->size)))) {
+			/* Merge */
+			prev->rmaxgap = e->rmaxgap;
+			prev->size += e->size;
+
+			_entry_put(map, e);
+
+			map_augment(&prev->linkage);
+			e = prev;
+		}
+
+		e->prot = prot;
+
+		attr = (vm_protToAttr(e->prot) | vm_flagsToAttr(e->flags));
+		needscopyNonLazy = 0;
+		/* If an entry needs copy, enter it as a readonly to copy it on first access. */
+		if (((e->flags & MAP_NEEDSCOPY) != 0U) && ((prot & PROT_WRITE) != 0U)) {
+			if ((p == NULL) || (p->lazy == 0U)) {
+				needscopyNonLazy = 1;
 			}
 			else {
-				/* No action required */
+				attr &= ~PGHD_WRITE;
 			}
-
-
-			if (lenLeft < e->size) {
-				_vm_mapEntrySplit(p, map, e, buf, lenLeft);
-			}
-
-			e->prot = prot;
-
-			attr = (vm_protToAttr(e->prot) | vm_flagsToAttr(e->flags));
-			needscopyNonLazy = 0;
-			/* If an entry needs copy, enter it as a readonly to copy it on first access. */
-			if ((e->flags & MAP_NEEDSCOPY) != 0U) {
-				if ((p == NULL) || (p->lazy == 0U)) {
-					needscopyNonLazy = 1;
-				}
-				else {
-					attr &= ~PGHD_WRITE;
+		}
+		for (currVaddr = t.vaddr; currVaddr < (e->vaddr + e->size); currVaddr += SIZE_PAGE) {
+			if (needscopyNonLazy == 0) {
+				pa = pmap_resolve(&map->pmap, currVaddr);
+				if (pa != 0U) {
+					result = pmap_enter(&map->pmap, pa, currVaddr, attr, NULL);
 				}
 			}
-			for (currVaddr = e->vaddr; currVaddr < (e->vaddr + e->size); currVaddr += SIZE_PAGE) {
-				if (needscopyNonLazy == 0) {
-					pa = pmap_resolve(&map->pmap, currVaddr);
-					if (pa != 0U) {
-						result = pmap_enter(&map->pmap, pa, currVaddr, attr, NULL);
-					}
-				}
-				else {
-					result = _map_force(map, e, currVaddr, prot);
-				}
+			else {
+				result = _map_force(map, e, currVaddr, prot);
 			}
+			if (result != EOK) {
+				break;
+			}
+		}
 
-			lenLeft -= e->size;
-			prev = e;
-		} while ((lenLeft != 0U) && (result == EOK));
+		t.vaddr += currSize;
+		lenLeft -= currSize;
+		prev = e;
+	} while ((lenLeft != 0U) && (result == EOK));
+
+	while (buf != NULL) {
+		e = buf;
+		buf = buf->next;
+		map_free(e);
 	}
 
 	(void)proc_lockClear(&map->lock);
@@ -1144,7 +1156,7 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 		_vm_mapEntryCopy(f, e, 1);
 		(void)_map_add(proc, dst, f);
 
-		if (((e->protOrig & PROT_WRITE) != 0U) && ((e->flags & MAP_DEVICE) == 0U)) {
+		if ((e->flags & MAP_DEVICE) == 0U) {
 			e->flags |= MAP_NEEDSCOPY;
 			f->flags |= MAP_NEEDSCOPY;
 

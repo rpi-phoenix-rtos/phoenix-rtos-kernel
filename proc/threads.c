@@ -9,9 +9,7 @@
  * Copyright 2001, 2005-2006 Pawel Pisarczyk
  * Author: Pawel Pisarczyk, Jacek Popko, Jan Sikorski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/hal.h"
@@ -307,6 +305,23 @@ static int threads_wakeupintr(unsigned int n, cpu_context_t *context, void *arg)
 static void proc_lockForceUnlock(lock_t *lock, int doYield);
 
 
+__attribute__((noreturn)) void threads_halt(void)
+{
+	spinlock_ctx_t sc;
+
+	/*
+	 * Take the threads spinlock and not release it - this is an attempt to stop other cores in SMP from
+	 * continuing to execute code (they should eventually hang trying to run the scheduler).
+	 */
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	for (;;) {
+		hal_cpuHalt();
+	}
+
+	__builtin_unreachable();
+}
+
+
 static void thread_destroy(thread_t *thread)
 {
 	process_t *process;
@@ -343,7 +358,7 @@ thread_t *threads_findThread(int tid)
 	thread_t *t;
 
 	(void)proc_lockSet(&threads_common.lock);
-	t = lib_idtreeof(thread_t, idlinkage, lib_idtreeFind(&threads_common.id, tid));
+	t = lib_treeof(thread_t, idlinkage, lib_idtreeFind(&threads_common.id, tid));
 	if (t != NULL) {
 		++t->refs;
 	}
@@ -637,21 +652,15 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	t->priority = priority;
 	t->cpuTime = 0;
 	t->cpuId = 0;
+	proc_gettime(&t->readyTime, NULL);
 	t->maxWait = 0;
-	proc_gettime(&t->startTime, NULL);
-	t->lastTime = t->startTime;
+	t->startTime = t->readyTime;
+	t->lastTime = t->readyTime;
 	t->longjmpctx = NULL;
-
-	if (thread_alloc(t) < 0) {
-		vm_kfree(t->kstack);
-		vm_kfree(t);
-		return -ENOMEM;
-	}
 
 	if (process != NULL && (process->tls.tdata_sz != 0U || process->tls.tbss_sz != 0U)) {
 		err = process_tlsInit(&t->tls, &process->tls, process->mapp);
 		if (err != EOK) {
-			lib_idtreeRemove(&threads_common.id, &t->idlinkage);
 			vm_kfree(t->kstack);
 			vm_kfree(t);
 			return err;
@@ -663,6 +672,15 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 		t->tls.tbss_sz = 0;
 		t->tls.tls_sz = 0;
 		t->tls.arm_m_tls = 0;
+	}
+
+	if (thread_alloc(t) < 0) {
+		if (t->tls.tls_sz != 0U) {
+			(void)process_tlsDestroy(&t->tls, process->mapp);
+		}
+		vm_kfree(t->kstack);
+		vm_kfree(t);
+		return -ENOMEM;
 	}
 
 	if (id != NULL) {
@@ -2072,7 +2090,7 @@ int proc_threadsIter(int n, proc_threadsListCb_t cb, void *arg)
 		cb(arg, i, &tinfo);
 
 		++i;
-		t = lib_idtreeof(thread_t, idlinkage, lib_idtreeNext(&t->idlinkage.linkage));
+		t = lib_treeof(thread_t, idlinkage, lib_idtreeNext(&t->idlinkage.linkage));
 	}
 
 	(void)proc_lockClear(&threads_common.lock);

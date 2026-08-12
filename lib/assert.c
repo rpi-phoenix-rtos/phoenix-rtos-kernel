@@ -8,9 +8,7 @@
  * Copyright 2023 Phoenix Systems
  * Author: Aleksander Kaminski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 /* parasoft-begin-suppress MISRAC2012-RULE_17_1 "stdarg.h required for custom functions that are like printf" */
@@ -19,9 +17,10 @@
 #include "printf.h"
 #include "log/log.h"
 #include "hal/hal.h"
+#include "proc/threads.h"
 
 
-void lib_assertPanic(const char *func, int line, const char *fmt, ...)
+__attribute__((noreturn)) void lib_assertPanic(const char *func, int line, const char *fmt, ...)
 {
 	va_list ap;
 
@@ -38,8 +37,6 @@ void lib_assertPanic(const char *func, int line, const char *fmt, ...)
 #ifdef NDEBUG
 	hal_cpuReboot();
 #else
-	for (;;) {
-		hal_cpuHalt();
-	}
+	threads_halt();
 #endif
 }

@@ -8,14 +8,13 @@
  * Copyright 2018 Phoenix Systems
  * Author: Jan Sikorski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/hal.h"
-#include "lib.h"
 #include "vm/vm.h"
+
+#include "cbuffer.h"
 
 
 void _cbuffer_init(cbuffer_t *buf, void *data, size_t sz)

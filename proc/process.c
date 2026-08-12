@@ -9,9 +9,7 @@
  * Copyright 2001, 2006-2007 Pawel Pisarczyk
  * Author: Pawel Pisarczyk, Pawel Kolodziej, Pawel Krezolek, Aleksander Kaminski, Jan Sikorski, Krystian Wasik
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/hal.h"
@@ -71,7 +69,7 @@ process_t *proc_find(int pid)
 	process_t *p;
 
 	(void)proc_lockSet(&process_common.lock);
-	p = lib_idtreeof(process_t, idlinkage, lib_idtreeFind(&process_common.id, pid));
+	p = lib_treeof(process_t, idlinkage, lib_idtreeFind(&process_common.id, pid));
 	if (p != NULL) {
 		p->refs++;
 	}
@@ -288,9 +286,7 @@ static void process_exception(unsigned int n, exc_context_t *ctx)
 
 	process_dumpException(n, ctx);
 
-	if (thread->process == NULL) {
-		hal_cpuHalt();
-	}
+	LIB_ASSERT_ALWAYS(thread->process != NULL, "exception in kernel");
 
 	(void)threads_sigpost(thread->process, thread, signal_kill);
 
@@ -307,9 +303,7 @@ static void process_illegal(unsigned int n, exc_context_t *ctx)
 	thread_t *thread = proc_current();
 	process_t *process = thread->process;
 
-	if (process == NULL) {
-		hal_cpuHalt();
-	}
+	LIB_ASSERT_ALWAYS(process != NULL, "exception in kernel");
 
 	(void)threads_sigpost(process, thread, signal_illegal);
 }
@@ -1818,7 +1812,7 @@ static int process_execve(thread_t *current)
 	/* Close cloexec file descriptors */
 	(void)posix_exec();
 
-	trace_eventSyscallExit((int)syscall_exec, proc_getTid(current));
+	trace_eventSyscallExit((unsigned int)syscall_exec, proc_getTid(current));
 	process_exec(current, spawn);
 
 	/* Not reached */
@@ -1924,7 +1918,7 @@ int proc_sigpost(int pid, int sig)
 	int err = -EINVAL;
 
 	(void)proc_lockSet(&process_common.lock);
-	p = lib_idtreeof(process_t, idlinkage, lib_idtreeFind(&process_common.id, pid));
+	p = lib_treeof(process_t, idlinkage, lib_idtreeFind(&process_common.id, pid));
 	if (p != NULL) {
 		err = threads_sigpost(p, NULL, sig);
 	}

@@ -8,9 +8,7 @@
  * Copyright 2020 Phoenix Systems
  * Author: Aleksander Kaminski, Pawel Pisarczyk
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/armv7m/stm32/stm32.h"
@@ -21,6 +19,7 @@
 #include "hal/hal.h"
 #include "include/errno.h"
 
+#include "hal/arm/rtt.h"
 #include "hal/arm/scs.h"
 
 #include <board_config.h>
@@ -480,7 +479,7 @@ void _stm32_pwrSetCPUVolt(u8 range)
 
 
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
-time_t _stm32_pwrEnterLPStop(time_t us)
+void _stm32_pwrEnterLPStop(time_t us)
 {
 	unsigned int t;
 	int restoreMsi = 0;
@@ -522,8 +521,6 @@ time_t _stm32_pwrEnterLPStop(time_t us)
 	if (stm32_common.cpuclk <= 6U * 1000U * 1000U) {
 		_stm32_pwrSetCPUVolt(2U);
 	}
-
-	return 0;
 }
 
 
@@ -774,6 +771,7 @@ void _stm32_init(void)
 	stm32_common.flash = (void *)0x40022000U;
 
 	_hal_scsInit();
+	(void)_hal_rttInit();
 
 	/* Enable System configuration controller */
 	(void)_stm32_rccSetDevClock(pctl_syscfg, 1U);

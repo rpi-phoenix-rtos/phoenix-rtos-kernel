@@ -8,14 +8,12 @@
  * Copyright 2018, 2023 Phoenix Systems
  * Author: Jan Sikorski, Aleksander Kaminski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/hal.h"
 #include "vm/kmalloc.h"
-#include "lib/strutil.h"
+#include "strutil.h"
 
 static char *lib_strrchr(char *s, char c)
 {

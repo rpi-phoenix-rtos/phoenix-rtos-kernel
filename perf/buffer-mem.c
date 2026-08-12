@@ -8,12 +8,13 @@
  * Copyright 2025 Phoenix Systems
  * Author: Adam Greloch
  *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 
 #include "include/perf.h"
 #include "include/errno.h"
+#include "lib/lib.h"
 #include "vm/vm.h"
 
 #include "buffer.h"

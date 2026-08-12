@@ -8,9 +8,7 @@
  * Copyright 2012, 2017, 2021, 2025 Phoenix Systems
  * Author: Jakub Sejdak, Aleksander Kaminski, Jacek Maksymowicz
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "hal/armv8m/stm32/n6/config.h"
@@ -63,21 +61,6 @@ static int _timer_irqHandler(unsigned int n, cpu_context_t *ctx, void *arg)
 	}
 
 	return 0;
-}
-
-
-void timer_jiffiesAdd(time_t t)
-{
-	spinlock_ctx_t sc;
-
-	hal_spinlockSet(&timer_common.sp, &sc);
-	if (timer_common.frequency == (1000UL * 1000UL)) {
-		timer_common.ticks += (u64)t;
-	}
-	else {
-		timer_common.ticks += ((u64)t * timer_common.frequency) / (1000UL * 1000UL);
-	}
-	hal_spinlockClear(&timer_common.sp, &sc);
 }
 
 

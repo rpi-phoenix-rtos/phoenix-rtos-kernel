@@ -9,9 +9,7 @@
  * Copyright 2007 Pawel Pisarczyk
  * Author: Pawel Pisarczyk, Aleksander Kaminski, Jan Sikorski
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 /* parasoft-begin-suppress MISRAC2012-RULE_8_4-a "Compatible function declaration is not possible for syscalls" */
@@ -83,6 +81,11 @@ int syscalls_sys_mmap(u8 *ustack)
 		return -EFAULT;
 	}
 
+	if ((flags & (MAP_DEVICE | MAP_PHYSMEM)) == MAP_DEVICE) {
+		/* MAP_DEVICE without MAP_PHYSMEM can lead to undefined behavior within vm subsystem */
+		return -EINVAL;
+	}
+
 	if ((flags & MAP_ANONYMOUS) != 0U) {
 		if ((flags & MAP_PHYSMEM) != 0U) {
 			o = VM_OBJ_PHYSMEM;
@@ -108,7 +111,7 @@ int syscalls_sys_mmap(u8 *ustack)
 		}
 	}
 
-	flags &= ~(MAP_ANONYMOUS | MAP_CONTIGUOUS | MAP_PHYSMEM);
+	flags &= ~(MAP_ANONYMOUS | MAP_CONTIGUOUS | MAP_PHYSMEM | MAP_NEEDSCOPY);
 
 	(*vaddr) = vm_mmap(proc_current()->process->mapp, *vaddr, NULL, size, PROT_USER | (vm_prot_t)prot, o, (o == NULL) ? -1 : offs, flags);
 	(void)vm_objectPut(o);
@@ -734,7 +737,8 @@ int syscalls_interrupt(u8 *ustack)
 	GETFROMSTACK(ustack, handle_t, cond, 3U);
 	GETFROMSTACK(ustack, handle_t *, handle, 4U);
 
-	if ((f == NULL) || (vm_mapBelongs(proc, f, 1) < 0)) {
+	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1-a-2 "We want to check if at least start of memory occupied by the function is accessible to user." */
+	if ((f == NULL) || (vm_mapBelongs(proc, (const void *)f, 1) < 0)) {
 		return -EINVAL;
 	}
 
