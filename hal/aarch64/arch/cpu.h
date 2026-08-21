@@ -28,7 +28,15 @@
 #endif
 
 #ifndef SIZE_USTACK
-#define SIZE_USTACK (8U * SIZE_PAGE)
+/* Main-thread user stack. The aarch64 default was 8 pages (32 KiB) which is too
+ * small for a full POSIX userland: coreutils cksum/od (and likely other programs)
+ * overflow it and SIGSEGV, and because there is no auto-stack-growth the kernel
+ * then double-faults pushing the signal frame below the exhausted SP. The RPi4 is
+ * a 4 GB "full userland" target and this stack is demand-paged (vm_mmap MAP_NONE),
+ * so a generous reservation only costs the pages actually touched. Raised to 1 MiB
+ * (cf. Linux's 8 MiB main-thread default). See coreutils-difftest RESULTS.md +
+ * memory project_coreutils_cksum_od_dataabort. pthread stacks are sized separately. */
+#define SIZE_USTACK (256U * SIZE_PAGE)
 #endif
 
 #define MODE_nAARCH64 0x10U
