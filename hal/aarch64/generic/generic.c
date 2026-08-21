@@ -78,6 +78,13 @@ int hal_platformctl(void *ptr)
 			}
 			break;
 
+		case pctl_cpucount:
+			if (data->action == pctl_get) {
+				data->task.cpucount.count = hal_cpuGetCount();
+				ret = 0;
+			}
+			break;
+
 		default:
 			/* No action required */
 			break;

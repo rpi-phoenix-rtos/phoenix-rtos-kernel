@@ -21,7 +21,7 @@
 
 typedef struct {
 	enum { pctl_set = 0, pctl_get } action;
-	enum { pctl_reboot = 0, pctl_graphmode, pctl_watchpoint } type;
+	enum { pctl_reboot = 0, pctl_graphmode, pctl_watchpoint, pctl_cpucount } type;
 
 	union {
 		struct {
@@ -53,6 +53,13 @@ typedef struct {
 			unsigned long trapLo;
 			unsigned long trapHi;
 		} watchpoint;
+
+		/* pctl_get: number of CPUs the kernel is running (SMP core count),
+		 * for sysconf(_SC_NPROCESSORS_ONLN/CONF). Smaller than `watchpoint`,
+		 * so the union size (and the packed struct ABI) is unchanged. */
+		struct {
+			unsigned int count;
+		} cpucount;
 	} task;
 } __attribute__((packed)) platformctl_t;
 
