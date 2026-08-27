@@ -16,6 +16,15 @@
 
 /* clang-format off */
 /* parasoft-begin-suppress MISRAC2012-RULE_20_7-a "ID can not be put in parentheses as it is a macro" */
+/*
+ * RPi4 port deviation: upstream inserts mutexConsistent/mutexPrioCeiling
+ * mid-list (after mutexUnlock), which shifts the syscall numbers of every call
+ * below it. This port ships a large base of PREBUILT static binaries in the
+ * hand-maintained netboot NFS root (games/X11/python, not rebuilt each cycle)
+ * that would then invoke the wrong syscall. So those two entries are kept LAST
+ * in the list below instead, keeping all existing syscall numbers stable while
+ * still exposing the new calls. Keep them last across future upstream merges.
+ */
 #define SYSCALLS(ID) \
 	ID(debug) \
 	ID(sys_mmap) \
@@ -37,8 +46,6 @@
 	ID(phMutexLock) \
 	ID(mutexTry) \
 	ID(mutexUnlock) \
-	ID(mutexConsistent) \
-	ID(mutexPrioCeiling) \
 	ID(phCondCreate) \
 	ID(phCondWait) \
 	ID(condSignal) \
@@ -131,7 +138,9 @@
 	ID(sys_uname) \
 	ID(schedInfo) \
 	ID(schedGet) \
-	ID(schedSet)
+	ID(schedSet) \
+	ID(mutexConsistent) \
+	ID(mutexPrioCeiling)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */
