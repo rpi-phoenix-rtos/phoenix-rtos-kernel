@@ -822,6 +822,17 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		map = map_common.kmap;
 	}
 
+	/* PROT_USER must reflect WHERE the fault is (the user map), not which EL took
+	 * it. hal_exceptionsFaultType only sets PROT_USER for EL0 aborts, so a kernel
+	 * (EL1) syscall user-copy that faults on a user page — e.g. AF_UNIX recv writing
+	 * a just-forked COW buffer — otherwise installs it EL0-inaccessible, and the
+	 * process's own EL0 access then re-maps it RO: an EL1 page-fault storm that never
+	 * converges. Adding the USER bit for a user-map fault fixes it without touching
+	 * COW (a read still maps RO, so a later write still breaks COW as before). */
+	if ((thread->process != NULL) && (map == thread->process->mapp)) {
+		prot |= PROT_USER;
+	}
+
 	if (vm_mapForce(map, paddr, prot) != 0) {
 		process_dumpException(n, ctx);
 
