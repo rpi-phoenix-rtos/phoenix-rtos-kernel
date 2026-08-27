@@ -27,6 +27,16 @@ static struct {
 } console_common;
 
 
+/* CROSS-BOARD PORTABILITY NOTE (upstream review item "B5"): the early-console
+ * path below hardcodes the UART at the fixed VA alias 0xffffffffffe00000,
+ * because it must print before hal_consoleInit() has discovered the real base
+ * from the DTB. On the Raspberry Pi 4B this alias IS the DTB-discovered pl011
+ * base, so it is correct here and intentionally left as-is. But when porting to
+ * ANOTHER aarch64 board (Pi 5, Pi Zero 2 W, other BCM/non-BCM SoCs) whose
+ * console is not mapped at this alias, this early-print path must be made to use
+ * the discovered/board-specific base (conditionalized on early-vs-initialized),
+ * or early boot output will go to the wrong address. See docs/KNOWN-ISSUES.md
+ * ("Early-console alias — cross-board port"). Do not "fix" it for the Pi 4. */
 static void _hal_consoleEarlyPutch(char c)
 {
 	volatile u32 *uart = (volatile u32 *)0xffffffffffe00000ull;
