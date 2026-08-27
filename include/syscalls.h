@@ -37,6 +37,8 @@
 	ID(phMutexLock) \
 	ID(mutexTry) \
 	ID(mutexUnlock) \
+	ID(mutexConsistent) \
+	ID(mutexPrioCeiling) \
 	ID(phCondCreate) \
 	ID(phCondWait) \
 	ID(condSignal) \
@@ -127,7 +129,9 @@
 	\
 	ID(sys_statvfs) \
 	ID(sys_uname) \
-	ID(schedInfo)
+	ID(schedInfo) \
+	ID(schedGet) \
+	ID(schedSet)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */

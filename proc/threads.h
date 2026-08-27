@@ -22,6 +22,14 @@
 #include "process.h"
 #include "lock.h"
 
+#ifdef DEBUG_THREADS
+#define LIB_ASSERT_THREADS(condition, fmt, ...) LIB_ASSERT_ALWAYS((condition), (fmt), ##__VA_ARGS__)
+#else
+#define LIB_ASSERT_THREADS(condition, fmt, ...)
+#endif
+
+#define MAX_PRIO 7U /* Maximum priority value, of the lowest criticality (prio=0 is of the HIGHEST) */
+
 #define MAX_TID        MAX_ID
 #define THREAD_END     1U
 #define THREAD_END_NOW 2U
@@ -101,7 +109,7 @@ void threads_canaryInit(thread_t *t, void *ustack);
 int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority, size_t kstacksz, void *stack, size_t stacksz, unsigned int sigmask, void *arg);
 
 
-int proc_threadPriority(int signedPriority);
+int proc_threadPriority(thread_t *t, int signedPriority);
 
 
 __attribute__((noreturn)) void proc_threadEnd(void);
@@ -143,6 +151,9 @@ int proc_threadWait(thread_t **queue, spinlock_t *spinlock, time_t timeout, spin
 int proc_threadWaitInterruptible(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp);
 
 
+int proc_threadWaitExclusive(thread_t **queue, time_t timeout);
+
+
 int proc_threadWakeup(thread_t **queue);
 
 
@@ -155,10 +166,19 @@ int proc_threadBroadcast(thread_t **queue);
 void proc_threadBroadcastYield(thread_t **queue);
 
 
-int proc_schedInfo(process_t *proc, int policy, sched_info_t *info);
+int proc_schedInfo(int policy, sched_info_t *info);
+
+
+int proc_schedGet(thread_t *t, sched_params_t *params);
+
+
+int proc_schedSet(thread_t *t, int policy, sched_params_t *params);
 
 
 thread_t *threads_findThread(int tid);
+
+
+int proc_firstThreadTid(process_t *proc);
 
 
 void threads_put(thread_t *thread);
