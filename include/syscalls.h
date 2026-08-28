@@ -17,13 +17,19 @@
 /* clang-format off */
 /* parasoft-begin-suppress MISRAC2012-RULE_20_7-a "ID can not be put in parentheses as it is a macro" */
 /*
+ * TODO(TD-21): revert this deviation to upstream syscall ordering.
  * RPi4 port deviation: upstream inserts mutexConsistent/mutexPrioCeiling
  * mid-list (after mutexUnlock), which shifts the syscall numbers of every call
  * below it. This port ships a large base of PREBUILT static binaries in the
  * hand-maintained netboot NFS root (games/X11/python, not rebuilt each cycle)
  * that would then invoke the wrong syscall. So those two entries are kept LAST
  * in the list below instead, keeping all existing syscall numbers stable while
- * still exposing the new calls. Keep them last across future upstream merges.
+ * still exposing the new calls.
+ * Owner directive (2026-08-28): this permanent divergence from upstream is not
+ * wanted — it must be reverted to the upstream mid-list order and ALL binaries
+ * (netboot NFS root + image) rebuilt against the new table. Deferred to the
+ * next scheduled full rebuild (do it then, not standalone). See TD-21 in
+ * docs/inprogress/TEMPORARY-FIXES-AND-FUTURE-CLEANUP.md.
  */
 #define SYSCALLS(ID) \
 	ID(debug) \
