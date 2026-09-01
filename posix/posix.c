@@ -69,12 +69,39 @@ typedef struct _event_t {
 } event_t;
 
 
+/* POSIX advisory record lock (fcntl F_GETLK/F_SETLK/F_SETLKW).
+ * Byte range is [start, end); end == FLOCK_EOF means "to end of file"
+ * (l_len == 0). Owner is the posix pid, so locks are not inherited across
+ * fork but survive exec, per POSIX. */
+#define FLOCK_EOF ((off_t)(((u64)~0ULL) >> 1)) /* max positive off_t */
+
+typedef struct _flock_t {
+	struct _flock_t *next, *prev;
+	oid_t oid;   /* file identity (port, id) */
+	pid_t pid;   /* owning posix pid */
+	off_t start; /* inclusive */
+	off_t end;   /* exclusive; FLOCK_EOF => to EOF */
+	short type;  /* F_RDLCK | F_WRLCK */
+} flock_t;
+
+
 static struct {
 	rbtree_t pid;
 	lock_t lock;
 	id_t fresh;
 	char hostname[HOST_NAME_MAX + 1U];
+	flock_t *fileLocks;   /* global list of held record locks */
+	lock_t fileLocksLock; /* guards fileLocks */
 } posix_common;
+
+
+/* Drop all record locks the process holds on one file (called on any close of
+ * an fd referring to the file — POSIX release-on-close semantics). */
+static void posix_lockReleaseFile(oid_t oid, pid_t pid);
+
+
+/* Drop all record locks owned by a process (called on process exit). */
+static void posix_lockReleaseProc(pid_t pid);
 
 
 static process_info_t *_pinfo_find(int pid)
@@ -487,6 +514,9 @@ static int posix_exit(process_info_t *p, int code)
 
 	p->exitcode = code;
 
+	/* Release every record lock the process held (POSIX release-on-exit). */
+	posix_lockReleaseProc(p->process);
+
 	(void)proc_lockSet(&p->lock);
 	for (fd = 0; fd < p->fdsz; ++fd) {
 		if (p->fds[fd].file != NULL) {
@@ -782,6 +812,12 @@ int posix_close(int fildes)
 		f = p->fds[fildes].file;
 		p->fds[fildes].file = NULL;
 		(void)proc_lockClear(&p->lock);
+
+		/* POSIX: closing any fd on a file drops all of this process's record
+		 * locks on that file. Only regular files can hold record locks. */
+		if (f->type == ftRegular) {
+			posix_lockReleaseFile(f->oid, process_getPid(proc_current()->process));
+		}
 
 		pinfo_put(p);
 		return posix_fileDeref(f);
@@ -1690,6 +1726,309 @@ static int posix_fcntlGetFl(int fd)
 }
 
 
+static int flock_overlap(off_t s1, off_t e1, off_t s2, off_t e2)
+{
+	return (s1 < e2) && (s2 < e1);
+}
+
+
+static int flock_oidSame(const oid_t *a, const oid_t *b)
+{
+	return (a->port == b->port) && (a->id == b->id);
+}
+
+
+/* Find the first held lock that would conflict with a [start,end) lock of the
+ * given type requested by `pid` on `oid`. A conflict is an overlap owned by a
+ * different pid where at least one side is a write lock. Caller holds
+ * fileLocksLock. */
+static flock_t *_posix_lockConflict(oid_t oid, pid_t pid, off_t start, off_t end, short type)
+{
+	flock_t *it = posix_common.fileLocks;
+
+	if (it == NULL) {
+		return NULL;
+	}
+
+	do {
+		if (flock_oidSame(&it->oid, &oid) && (it->pid != pid) &&
+				flock_overlap(start, end, it->start, it->end) &&
+				((type == F_WRLCK) || (it->type == F_WRLCK))) {
+			return it;
+		}
+		it = it->next;
+	} while (it != posix_common.fileLocks);
+
+	return NULL;
+}
+
+
+/* Remove/split all locks owned by (pid,oid) within [start,end). At most one
+ * held lock can straddle both ends (locks of one owner never overlap), so at
+ * most one split — for which `spare` is consumed; *spareUsed reports whether.
+ * Caller holds fileLocksLock. */
+static void _posix_lockClearRange(oid_t oid, pid_t pid, off_t start, off_t end, flock_t *spare, int *spareUsed)
+{
+	flock_t *l, *it;
+	int leftKeep, rightKeep;
+
+	*spareUsed = 0;
+
+	for (;;) {
+		l = NULL;
+		it = posix_common.fileLocks;
+		if (it != NULL) {
+			do {
+				if (flock_oidSame(&it->oid, &oid) && (it->pid == pid) &&
+						flock_overlap(start, end, it->start, it->end)) {
+					l = it;
+					break;
+				}
+				it = it->next;
+			} while (it != posix_common.fileLocks);
+		}
+
+		if (l == NULL) {
+			break;
+		}
+
+		leftKeep = (l->start < start) ? 1 : 0;
+		rightKeep = (l->end > end) ? 1 : 0;
+
+		if ((leftKeep != 0) && (rightKeep != 0)) {
+			/* [start,end) is fully inside l: shrink l to the left piece and
+			 * add the right piece. Nothing else can overlap [start,end). */
+			spare->oid = oid;
+			spare->pid = pid;
+			spare->type = l->type;
+			spare->start = end;
+			spare->end = l->end;
+			l->end = start;
+			LIST_ADD(&posix_common.fileLocks, spare);
+			*spareUsed = 1;
+			break;
+		}
+		else if (leftKeep != 0) {
+			l->end = start;
+		}
+		else if (rightKeep != 0) {
+			l->start = end;
+		}
+		else {
+			LIST_REMOVE(&posix_common.fileLocks, l);
+			vm_kfree(l);
+		}
+	}
+}
+
+
+static void posix_lockReleaseFile(oid_t oid, pid_t pid)
+{
+	int spareUsed;
+
+	(void)proc_lockSet(&posix_common.fileLocksLock);
+	/* full range: end == FLOCK_EOF so no lock can straddle the right edge and
+	 * no split is possible -> spare unused. */
+	_posix_lockClearRange(oid, pid, 0, FLOCK_EOF, NULL, &spareUsed);
+	(void)proc_lockClear(&posix_common.fileLocksLock);
+}
+
+
+static void posix_lockReleaseProc(pid_t pid)
+{
+	flock_t *it, *next;
+
+	(void)proc_lockSet(&posix_common.fileLocksLock);
+	it = posix_common.fileLocks;
+	while (it != NULL) {
+		next = it->next;
+		if (it->pid == pid) {
+			LIST_REMOVE(&posix_common.fileLocks, it);
+			vm_kfree(it);
+			/* list head may have moved / emptied; restart the scan */
+			it = posix_common.fileLocks;
+			continue;
+		}
+		if (next == posix_common.fileLocks) {
+			break;
+		}
+		it = next;
+	}
+	(void)proc_lockClear(&posix_common.fileLocksLock);
+}
+
+
+static int posix_fcntlLock(int fd, unsigned int cmd, struct flock *ulock)
+{
+	open_file_t *f;
+	struct flock lock;
+	oid_t oid;
+	pid_t pid;
+	off_t start, end, fsize;
+	flock_t *spare1, *spare2, *conflict;
+	short type;
+	int err, spareUsed;
+
+	if (vm_mapBelongs(proc_current()->process, ulock, sizeof(*ulock)) < 0) {
+		return -EFAULT;
+	}
+	hal_memcpy(&lock, ulock, sizeof(lock));
+
+	type = lock.l_type;
+	if ((type != F_RDLCK) && (type != F_WRLCK) && (type != F_UNLCK)) {
+		return -EINVAL;
+	}
+	if ((cmd == (unsigned int)F_GETLK) && (type == F_UNLCK)) {
+		return -EINVAL;
+	}
+
+	err = posix_getOpenFile(fd, &f);
+	if (err < 0) {
+		return err;
+	}
+
+	if (!F_SEEKABLE(f->type)) {
+		(void)posix_fileDeref(f);
+		return -EINVAL;
+	}
+
+	switch (lock.l_whence) {
+		case SEEK_SET:
+			start = 0;
+			break;
+
+		case SEEK_CUR:
+			(void)proc_lockSet(&f->lock);
+			start = f->offset;
+			(void)proc_lockClear(&f->lock);
+			break;
+
+		case SEEK_END:
+			fsize = proc_size(f->oid);
+			if (fsize < 0) {
+				(void)posix_fileDeref(f);
+				return (int)fsize;
+			}
+			start = fsize;
+			break;
+
+		default:
+			(void)posix_fileDeref(f);
+			return -EINVAL;
+	}
+
+	oid = f->oid;
+	(void)posix_fileDeref(f);
+
+	/* resolve the requested range to an absolute [start,end) */
+	start += lock.l_start;
+	if (start < 0) {
+		return -EINVAL;
+	}
+
+	if (lock.l_len > 0) {
+		end = start + lock.l_len;
+		if (end < start) {
+			return -EINVAL; /* overflow */
+		}
+	}
+	else if (lock.l_len == 0) {
+		end = FLOCK_EOF; /* lock to end of file */
+	}
+	else {
+		/* negative length: the range extends below l_start */
+		end = start;
+		start = start + lock.l_len;
+		if (start < 0) {
+			return -EINVAL;
+		}
+	}
+
+	pid = process_getPid(proc_current()->process);
+
+	if (cmd == (unsigned int)F_GETLK) {
+		(void)proc_lockSet(&posix_common.fileLocksLock);
+		conflict = _posix_lockConflict(oid, pid, start, end, type);
+		if (conflict != NULL) {
+			lock.l_type = conflict->type;
+			lock.l_whence = SEEK_SET;
+			lock.l_start = conflict->start;
+			lock.l_len = (conflict->end == FLOCK_EOF) ? 0 : (conflict->end - conflict->start);
+			lock.l_pid = conflict->pid;
+		}
+		else {
+			lock.l_type = F_UNLCK;
+		}
+		(void)proc_lockClear(&posix_common.fileLocksLock);
+
+		hal_memcpy(ulock, &lock, sizeof(lock));
+		return EOK;
+	}
+
+	if (type == F_UNLCK) {
+		spare1 = vm_kmalloc(sizeof(flock_t));
+		if (spare1 == NULL) {
+			return -ENOLCK;
+		}
+		(void)proc_lockSet(&posix_common.fileLocksLock);
+		_posix_lockClearRange(oid, pid, start, end, spare1, &spareUsed);
+		(void)proc_lockClear(&posix_common.fileLocksLock);
+		if (spareUsed == 0) {
+			vm_kfree(spare1);
+		}
+		return EOK;
+	}
+
+	/* F_SETLK / F_SETLKW acquiring a read/write lock: up to two records are
+	 * needed (one for a possible split while clearing our own overlaps, one for
+	 * the new lock). Allocate both up front so the mutation cannot fail
+	 * half-way. */
+	spare1 = vm_kmalloc(sizeof(flock_t));
+	spare2 = vm_kmalloc(sizeof(flock_t));
+	if ((spare1 == NULL) || (spare2 == NULL)) {
+		if (spare1 != NULL) {
+			vm_kfree(spare1);
+		}
+		if (spare2 != NULL) {
+			vm_kfree(spare2);
+		}
+		return -ENOLCK;
+	}
+
+	for (;;) {
+		(void)proc_lockSet(&posix_common.fileLocksLock);
+		conflict = _posix_lockConflict(oid, pid, start, end, type);
+		if (conflict == NULL) {
+			_posix_lockClearRange(oid, pid, start, end, spare1, &spareUsed);
+			spare2->oid = oid;
+			spare2->pid = pid;
+			spare2->start = start;
+			spare2->end = end;
+			spare2->type = type;
+			LIST_ADD(&posix_common.fileLocks, spare2);
+			(void)proc_lockClear(&posix_common.fileLocksLock);
+			if (spareUsed == 0) {
+				vm_kfree(spare1);
+			}
+			return EOK;
+		}
+		(void)proc_lockClear(&posix_common.fileLocksLock);
+
+		if (cmd != (unsigned int)F_SETLKW) {
+			vm_kfree(spare1);
+			vm_kfree(spare2);
+			return -EAGAIN;
+		}
+
+		/* F_SETLKW blocks until the conflict clears.
+		 * TODO(fcntl-lock): replace this bounded poll with a wait queue woken
+		 * by the unlock path, and make it interruptible (return -EINTR on a
+		 * pending signal). v1 is a correct-but-crude 20 ms retry. */
+		(void)proc_threadSleep(20000);
+	}
+}
+
+
 int posix_fcntl(int fd, unsigned int cmd, u8 *ustack)
 {
 	TRACE("fcntl(%d, %u)", fd, cmd);
@@ -1724,10 +2063,12 @@ int posix_fcntl(int fd, unsigned int cmd, u8 *ustack)
 
 		case F_GETLK:
 		case F_SETLK:
-		case F_SETLKW:
-			/* TODO: implement */
-			err = EOK;
+		case F_SETLKW: {
+			struct flock *lockp;
+			GETFROMSTACK(ustack, struct flock *, lockp, 2U);
+			err = posix_fcntlLock(fd, cmd, lockp);
 			break;
+		}
 		case F_GETOWN:
 		case F_SETOWN:
 		default:
@@ -2996,8 +3337,10 @@ pid_t posix_getppid(pid_t pid)
 void posix_init(void)
 {
 	(void)proc_lockInit(&posix_common.lock, &proc_lockAttrDefault, "posix.common");
+	(void)proc_lockInit(&posix_common.fileLocksLock, &proc_lockAttrDefault, "posix.filelocks");
 	lib_rbInit(&posix_common.pid, pinfo_cmp, NULL);
 	unix_sockets_init();
 	posix_common.fresh = 0;
+	posix_common.fileLocks = NULL;
 	hal_memset(posix_common.hostname, 0, sizeof(posix_common.hostname));
 }

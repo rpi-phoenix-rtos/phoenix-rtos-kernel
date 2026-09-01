@@ -15,6 +15,9 @@
 #define _PH_POSIX_FCNTL_H_
 
 
+#include "types.h"
+
+
 #define FD_CLOEXEC 0x1U
 
 #define O_RDONLY   0x00001U
@@ -58,6 +61,21 @@ enum { F_DUPFD = 0, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL, F_SETFL,
 #define F_SETLKW        F_SETLKW
 
 /* clang-format on */
+
+
+/* Record-lock types for struct flock.l_type (F_GETLK/F_SETLK/F_SETLKW).
+ * NOTE the Phoenix ordering (F_RDLCK=0, F_UNLCK=1, F_WRLCK=2) differs from
+ * Linux; portable code must use the names, never the numeric values. */
+enum { F_RDLCK, F_UNLCK, F_WRLCK };
+
+
+struct flock {
+	short l_type;
+	short l_whence;
+	off_t l_start;
+	off_t l_len;
+	pid_t l_pid;
+};
 
 
 #endif
