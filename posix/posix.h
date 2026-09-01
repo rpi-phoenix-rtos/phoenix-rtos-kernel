@@ -32,6 +32,9 @@
 int posix_open(const char *filename, int oflag, u8 *ustack);
 
 
+int posix_fdpath(int fd, char *buf, size_t size);
+
+
 int posix_close(int fildes);
 
 

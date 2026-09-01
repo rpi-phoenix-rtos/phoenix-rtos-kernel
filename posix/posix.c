@@ -136,6 +136,9 @@ int posix_fileDeref(open_file_t *f)
 			} while (err == -EINTR);
 		}
 
+		if (f->path != NULL) {
+			vm_kfree(f->path);
+		}
 		(void)proc_lockDone(&f->lock);
 		vm_kfree(f);
 	}
@@ -182,6 +185,45 @@ int posix_getOpenFile(int fd, open_file_t **f)
 
 	pinfo_put(p);
 	return 0;
+}
+
+
+/* Copy the canonical path captured for fd at open time into buf (NUL-terminated).
+ * Returns the length (excluding NUL) on success, or -EBADF (no such fd), -ENOENT
+ * (fd has no recorded path, e.g. a socket/pipe), -ERANGE (buf too small), -EINVAL.
+ * f->path is immutable after open and the ref taken by posix_getOpenFile keeps the
+ * open_file_t alive, so the read needs no extra lock. Backs libphoenix fchdir(). */
+int posix_fdpath(int fd, char *buf, size_t size)
+{
+	open_file_t *f;
+	size_t len;
+	int err;
+
+	if ((buf == NULL) || (size == 0U)) {
+		return -EINVAL;
+	}
+
+	err = posix_getOpenFile(fd, &f);
+	if (err < 0) {
+		return err;
+	}
+
+	if (f->path == NULL) {
+		err = -ENOENT;
+	}
+	else {
+		len = hal_strlen(f->path);
+		if (len >= size) {
+			err = -ERANGE;
+		}
+		else {
+			hal_memcpy(buf, f->path, len + 1U);
+			err = (int)len;
+		}
+	}
+
+	(void)posix_fileDeref(f);
+	return err;
 }
 
 
@@ -600,6 +642,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			break;
 		}
 
+		f->path = NULL; /* vm_kmalloc does not zero; set before any error path */
 		p->fds[fd].file = f;
 		(void)proc_lockInit(&f->lock, &proc_lockAttrDefault, "posix.file");
 		(void)proc_lockClear(&p->lock);
@@ -677,6 +720,18 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			}
 
 			f->status = (unsigned int)oflag & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
+
+			/* Record the canonical path (libphoenix resolves it before sys_open) so
+			 * fchdir()/the *at family can recover a fd's directory. Shared across
+			 * dup() via the refcounted open_file_t. Best-effort: on OOM leave NULL
+			 * (fchdir then fails cleanly rather than acting on a stale cwd). */
+			{
+				size_t plen = hal_strlen(filename);
+				f->path = vm_kmalloc(plen + 1U);
+				if (f->path != NULL) {
+					hal_memcpy(f->path, filename, plen + 1U);
+				}
+			}
 
 			pinfo_put(p);
 			return fd;

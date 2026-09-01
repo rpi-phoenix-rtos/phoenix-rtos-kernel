@@ -146,7 +146,8 @@
 	ID(schedGet) \
 	ID(schedSet) \
 	ID(mutexConsistent) \
-	ID(mutexPrioCeiling)
+	ID(mutexPrioCeiling) \
+	ID(sys_fdpath)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */

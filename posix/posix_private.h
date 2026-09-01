@@ -89,6 +89,7 @@ typedef struct {
 	unsigned int status;
 	lock_t lock;
 	int type;
+	char *path; /* canonical abs path captured at open (for fchdir); NULL if none */
 } open_file_t;
 
 

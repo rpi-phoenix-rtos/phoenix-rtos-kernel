@@ -1293,6 +1293,20 @@ int syscalls_sys_open(u8 *ustack)
 }
 
 
+int syscalls_sys_fdpath(u8 *ustack)
+{
+	int fd;
+	char *buf;
+	size_t size;
+
+	GETFROMSTACK(ustack, int, fd, 0U);
+	GETFROMSTACK(ustack, char *, buf, 1U);
+	GETFROMSTACK(ustack, size_t, size, 2U);
+
+	return posix_fdpath(fd, buf, size);
+}
+
+
 int syscalls_sys_close(u8 *ustack)
 {
 	int fildes;
