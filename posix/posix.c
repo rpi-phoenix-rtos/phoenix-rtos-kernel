@@ -683,8 +683,13 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		 * published before it is filled in. That makes it reachable by every
 		 * other thread of this process while its fields are still garbage, so:
 		 *
-		 *  - zero it, giving deterministic fields (oid = {0,0}, type, status)
-		 *    instead of whatever the recycled block held, and
+		 *  - zero it, giving deterministic fields instead of whatever the
+		 *    recycled block held, and point oid at a port that cannot exist:
+		 *    a zeroed oid is NOT harmless, because port ids come from an
+		 *    idtree that starts at 0, so port 0 is a real, live port and a
+		 *    racer's read/write would address it. proc_portGet() fails for an
+		 *    unknown id, so an all-ones port makes such a call return -EINVAL;
+		 *    and
 		 *  - take TWO references: one owned by the fd slot, one owned by this
 		 *    thread for the duration of the construction.
 		 *
@@ -695,6 +700,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		 * exit-time sweep over all fds) between here and the tail below
 		 * decremented an uninitialised refs and could free f under us. */
 		hal_memset(f, 0, sizeof(open_file_t));
+		f->oid.port = (u32)-1;
 		f->refs = 2;
 
 		p->fds[fd].file = f;
@@ -729,7 +735,14 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			}
 
 			(void)proc_lockSet(&p->lock);
-			p->fds[fd].flags = ((unsigned int)oflag & O_CLOEXEC) != 0U ? FD_CLOEXEC : 0U;
+			/* Only if this descriptor is still ours. A concurrent close()
+			 * clears the slot, and another thread's open() can then reallocate
+			 * the same fd number (_posix_allocfd looks for file == NULL) -- an
+			 * unguarded write would set or clear FD_CLOEXEC on that thread's
+			 * descriptor instead of ours. */
+			if (p->fds[fd].file == f) {
+				p->fds[fd].flags = ((unsigned int)oflag & O_CLOEXEC) != 0U ? FD_CLOEXEC : 0U;
+			}
 			(void)proc_lockClear(&p->lock);
 
 			if (err == 0) {
