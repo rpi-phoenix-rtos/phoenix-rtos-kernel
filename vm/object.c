@@ -285,6 +285,20 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 			 * zero-fill covers the gap rather than spinning. */
 			break;
 		}
+		if ((size_t)r > (span - total)) {
+			/* A backing store must never report more bytes than it was asked
+			 * for. Trusting it would push `total` past the window, and the
+			 * per-page copy below decides how much to copy from `total` -- so
+			 * every page would be copied in full out of a buffer whose tail was
+			 * never written, handing the process uninitialised KERNEL HEAP. On
+			 * this port that means the 0xba thread-stack fill plus whatever a
+			 * recycled kernel stack left behind, written straight into a
+			 * demand-paged .data page. Clamp, and say so, because a store that
+			 * does this is itself broken. */
+			lib_printf("vm: object read over-reported %u > %u bytes (port %u), clamping\n",
+				(unsigned int)r, (unsigned int)(span - total), (unsigned int)oid.port);
+			r = (int)(span - total);
+		}
 		total += (size_t)r;
 	}
 

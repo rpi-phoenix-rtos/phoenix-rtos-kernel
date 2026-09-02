@@ -134,6 +134,10 @@ static void _log_msgRespond(log_reader_t *r, ssize_t err)
 	log_rmsg_t *rmsg;
 	msg_t msg;
 
+	/* Zero it: o.raw is never filled here, and proc_respond copies all 64
+	 * bytes of it back to the reader -- uninitialised kernel stack otherwise. */
+	hal_memset(&msg, 0, sizeof(msg));
+
 	rmsg = r->msgs;
 	LIST_REMOVE(&r->msgs, rmsg);
 

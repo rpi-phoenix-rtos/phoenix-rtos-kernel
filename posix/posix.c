@@ -2411,6 +2411,15 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 		}
 
 		if (err == EOK) {
+			/* Zero before packing: ioctl_pack fills i.raw's header and the
+			 * request payload but never touches o.raw, and
+			 * ioctl_processResponse copies o.raw back into the caller's buffer
+			 * for any IOC_OUT request. A server that answers without writing
+			 * o.raw -- log_devctl does exactly that for TCGETS, which is what
+			 * isatty() sends -- therefore returned this thread's own
+			 * uninitialised kernel stack to userspace. Every other
+			 * kernel-stack msg_t in this file is zeroed; this one was not. */
+			hal_memset(&msg, 0, sizeof(msg));
 			ioctl_pack(&msg, request, data, size, &f->oid);
 
 			err = proc_send(f->oid.port, &msg);
