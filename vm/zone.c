@@ -112,6 +112,21 @@ void _vm_zfree(vm_zone_t *zone, void *block)
 		return;
 	}
 
+	/* Reject a pointer that is inside the zone but not at a block boundary. The
+	 * free list is threaded through the blocks themselves, so linking a
+	 * misaligned "block" writes the list head into the middle of a neighbour and
+	 * hands that address out later -- silent heap corruption that only surfaces
+	 * at some unrelated allocation. Refusing costs one modulo on the free path
+	 * and turns a mis-computed or interior pointer into a leak instead.
+	 *
+	 * Range was already checked above; this closes the other half. See
+	 * docs/misc/2026-09-02-kernel-heap-corruption-workorder.md for the crash
+	 * that motivated it (a free block whose link had been replaced by a path
+	 * string, faulting the next _vm_zalloc). */
+	if ((((ptr_t)block - (ptr_t)zone->vaddr) % zone->blocksz) != 0) {
+		return;
+	}
+
 	*((void **)block) = zone->first;
 	zone->first = block;
 	zone->used--;
