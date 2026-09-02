@@ -806,34 +806,45 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	/* clang-format on */
 #endif
 
+	/* Dump straight away -- interrupts still off, and WITHOUT dereferencing
+	 * anything first -- but only for a fault the kernel is not expected to
+	 * resolve: a kernel-PC fault on a KERNEL-map address.
+	 *
+	 * Both halves of that matter. The upfront dump exists for the case where
+	 * the kernel is already broken, so it must not be preceded by any deref: if
+	 * thread or scheduler structures are ever the victim (the corruption in
+	 * docs/misc/2026-09-02-kernel-heap-corruption-workorder.md writes into
+	 * kernel heap blocks), touching proc_current()->process here would fault
+	 * again, re-enter this handler and recurse with no output at all -- a
+	 * silent hang. Hence the test is on vaddr via pmap_belongs (a pure inline
+	 * range check, no lock) rather than on the selected map.
+	 *
+	 * And a kernel-PC fault on a USER address is the ordinary user-copy case: a
+	 * syscall touching a user page that is not present yet, or is COW (AF_UNIX
+	 * recv writing a just-forked buffer -- see the PROT_USER note below). Those
+	 * resolve a few lines down and the syscall proceeds. Dumping them printed a
+	 * full "Exception #37: Data Abort (EL1)" register dump on a PASSING test:
+	 * test-libc-unix-socket emitted two while reporting 25/0, and
+	 * uart-summary.sh then flagged faults on a green run. Anything that turns
+	 * out to be unresolvable -- including a kernel thread touching user space,
+	 * which falls through here -- is dumped by the vm_mapForce failure path
+	 * below, exactly as every EL0 fault already is. */
+	if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) &&
+			(pmap_belongs(&map_common.kmap->pmap, vaddr) != 0)) {
+		process_dumpException(n, ctx);
+	}
+
+	hal_cpuEnableInterrupts();
+
 	thread = proc_current();
 
-	if (thread->process != NULL && (pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
+	if ((thread != NULL) && (thread->process != NULL) &&
+			(pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
 		map = thread->process->mapp;
 	}
 	else {
 		map = map_common.kmap;
 	}
-
-	/* Dump straight away -- still with interrupts off, so a genuinely broken
-	 * kernel cannot deadlock on a spinlock before it has said anything -- but
-	 * ONLY for a fault the kernel is not expected to resolve: a kernel-PC fault
-	 * on the KERNEL map.
-	 *
-	 * A kernel-PC fault on a USER map is the ordinary user-copy case: a syscall
-	 * touching a user page that is not present yet, or is COW (AF_UNIX recv
-	 * writing a just-forked buffer -- see the PROT_USER note below). Those are
-	 * resolved a few lines down and the syscall proceeds. Dumping them here
-	 * printed a full "Exception #37: Data Abort (EL1)" register dump on a
-	 * PASSING test: test-libc-unix-socket emitted two while reporting 25/0, and
-	 * uart-summary.sh then flagged faults on a green run. If such a fault turns
-	 * out to be unresolvable after all, the vm_mapForce failure path below
-	 * dumps it -- which is already how every EL0 fault is reported. */
-	if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) && (map == map_common.kmap)) {
-		process_dumpException(n, ctx);
-	}
-
-	hal_cpuEnableInterrupts();
 
 	/* PROT_USER must reflect WHERE the fault is (the user map), not which EL took
 	 * it. hal_exceptionsFaultType only sets PROT_USER for EL0 aborts, so a kernel
@@ -842,7 +853,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * process's own EL0 access then re-maps it RO: an EL1 page-fault storm that never
 	 * converges. Adding the USER bit for a user-map fault fixes it without touching
 	 * COW (a read still maps RO, so a later write still breaks COW as before). */
-	if ((thread->process != NULL) && (map == thread->process->mapp)) {
+	if ((thread != NULL) && (thread->process != NULL) && (map == thread->process->mapp)) {
 		prot |= PROT_USER;
 	}
 
