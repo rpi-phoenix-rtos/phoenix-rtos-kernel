@@ -70,6 +70,14 @@ typedef struct _unixsock_t {
 	/* For other types: list of sockets requesting a connection. */
 	struct _unixsock_t *connecting;
 
+	/* The listener whose `connecting` list currently holds this socket, or NULL.
+	 * Guarded by unix_common.lock (the list itself is guarded by the listener's
+	 * spinlock). Without it, a socket closed while queued was freed with the
+	 * listener still pointing at it and unix_accept4 walked a freed node -- the
+	 * use-after-free the -ETIME path in unix_connect already warns about, which
+	 * nothing prevented on the non-blocking or close-while-connecting paths. */
+	struct _unixsock_t *listener;
+
 	thread_t *queue;
 	thread_t *writeq;
 } unixsock_t;
@@ -234,6 +242,7 @@ static unixsock_t *unixsock_alloc(unsigned int *id, unsigned int type, int nonbl
 	r->remote = NULL;
 	r->connected = NULL;
 	r->connecting = NULL;
+	r->listener = NULL;
 	r->queue = NULL;
 	r->writeq = NULL;
 	r->state = 0;
@@ -284,6 +293,7 @@ static unixsock_t *unixsock_get_remote(unixsock_t *s)
 static void unixsock_put(unixsock_t *s)
 {
 	unixsock_t *r;
+	spinlock_ctx_t sc;
 
 	(void)proc_lockSet(&unix_common.lock);
 	s->refs--;
@@ -311,7 +321,42 @@ static void unixsock_put(unixsock_t *s)
 			}
 		}
 		else {
-			/* FIXME: handle connecting socket */
+			/* We are being freed while still queued on a listener: unlink,
+			 * or the listener would keep pointing at this block and
+			 * unix_accept4 would walk it. Both teardown directions run under
+			 * unix_common.lock, so they cannot race each other; the list itself
+			 * needs the listener's spinlock (mutex -> spinlock, the allowed
+			 * order). */
+			if (s->listener != NULL) {
+				hal_spinlockSet(&s->listener->spinlock, &sc);
+				if (LIST_BELONGS(&s->listener->connecting, s) != 0) {
+					LIST_REMOVE(&s->listener->connecting, s);
+				}
+				hal_spinlockClear(&s->listener->spinlock, &sc);
+				s->listener = NULL;
+			}
+
+			/* And the other direction: we are a listener with sockets still
+			 * queued. Detach them and clear their back-pointers so their own
+			 * teardown does not reach into this freed block, then tell each one
+			 * the listener is gone so a blocking connect() stops waiting. */
+			hal_spinlockSet(&s->spinlock, &sc);
+			r = s->connecting;
+			s->connecting = NULL;
+			hal_spinlockClear(&s->spinlock, &sc);
+
+			while (r != NULL) {
+				unixsock_t *q = r;
+
+				LIST_REMOVE(&r, q);
+				q->listener = NULL;
+
+				hal_spinlockSet(&q->spinlock, &sc);
+				q->state |= US_PEER_CLOSED;
+				q->state &= ~US_CONNECTING;
+				(void)proc_threadWakeup(&q->queue);
+				hal_spinlockClear(&q->spinlock, &sc);
+			}
 		}
 
 		(void)proc_lockClear(&unix_common.lock);
@@ -477,20 +522,40 @@ int unix_accept4(unsigned int socket, struct sockaddr *address, socklen_t *addre
 
 		_cbuffer_init(&new->buffer, v, new->buffsz);
 
-		hal_spinlockSet(&s->spinlock, &sc);
-		s->state |= US_ACCEPTING;
+		/* Wait for a connection request, then take unix_common.lock BEFORE
+		 * unlinking it and hold it until we are done with the peer. Nothing
+		 * holds a reference on a socket taken off the connecting list, so
+		 * without this it could be freed by a concurrent close on another core
+		 * while this thread was still writing its fields and calling
+		 * proc_threadWakeup(&r->queue) on it -- unixsock_put takes the same
+		 * lock, so holding it makes that free wait. The lock cannot be held
+		 * across the wait itself: proc_threadWait sleeps, and the connector
+		 * needs this lock to make progress. */
+		for (;;) {
+			hal_spinlockSet(&s->spinlock, &sc);
+			s->state |= US_ACCEPTING;
+			while (s->connecting == NULL) {
+				(void)proc_threadWait(&s->queue, &s->spinlock, 0, &sc);
+			}
+			hal_spinlockClear(&s->spinlock, &sc);
 
-		while (s->connecting == NULL) {
-			(void)proc_threadWait(&s->queue, &s->spinlock, 0, &sc);
+			(void)proc_lockSet(&unix_common.lock);
+			hal_spinlockSet(&s->spinlock, &sc);
+			r = s->connecting;
+			if (r != NULL) {
+				LIST_REMOVE(&s->connecting, r);
+				r->listener = NULL;
+				s->state &= ~US_ACCEPTING;
+			}
+			hal_spinlockClear(&s->spinlock, &sc);
+
+			if (r != NULL) {
+				break;
+			}
+
+			/* Another accepter took it first; wait again. */
+			(void)proc_lockClear(&unix_common.lock);
 		}
-		r = s->connecting;
-
-		LIST_REMOVE(&s->connecting, r);
-
-		s->state &= ~US_ACCEPTING;
-		hal_spinlockClear(&s->spinlock, &sc);
-
-		/* FIXME: handle connecting socket removal */
 
 		hal_spinlockSet(&r->spinlock, &sc);
 
@@ -501,6 +566,8 @@ int unix_accept4(unsigned int socket, struct sockaddr *address, socklen_t *addre
 		(void)proc_threadWakeup(&r->queue);
 		(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
 		hal_spinlockClear(&r->spinlock, &sc);
+
+		(void)proc_lockClear(&unix_common.lock);
 
 		err = (int)new->id;
 		unixsock_put(new);
@@ -711,6 +778,14 @@ int unix_connect(unsigned int socket, const struct sockaddr *address, socklen_t 
 
 			/* FIXME: handle remote socket removal */
 
+			/* Record which listener holds us, so that being freed while queued
+			 * unlinks instead of leaving a dangling node (see unixsock_put).
+			 * Set before linking, and safe because the caller holds a reference
+			 * on s for the whole call, so s cannot be freed in between. */
+			(void)proc_lockSet(&unix_common.lock);
+			s->listener = r;
+			(void)proc_lockClear(&unix_common.lock);
+
 			hal_spinlockSet(&r->spinlock, &sc);
 			LIST_ADD(&r->connecting, s);
 			(void)proc_threadWakeup(&r->queue);
@@ -757,6 +832,10 @@ int unix_connect(unsigned int socket, const struct sockaddr *address, socklen_t 
 					LIST_REMOVE(&r->connecting, s);
 				}
 				hal_spinlockClear(&r->spinlock, &sc);
+
+				(void)proc_lockSet(&unix_common.lock);
+				s->listener = NULL;
+				(void)proc_lockClear(&unix_common.lock);
 
 				if (pending != 0) {
 					err = -ETIMEDOUT;
