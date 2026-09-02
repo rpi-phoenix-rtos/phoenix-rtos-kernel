@@ -234,6 +234,7 @@ int _vm_zoneDestroy(vm_zone_t *zone)
 void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 {
 	void *block, *next;
+	int quarantine = 0;
 
 	if (zone == NULL) {
 		return NULL;
@@ -257,9 +258,15 @@ void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 	 * belonged, with no way to tell which block had held it.
 	 *
 	 * Cost is two compares and an AND (blocksz is a power of 2) on the alloc
-	 * path. On detection the list is truncated rather than followed: the zone
-	 * then fails allocations instead of handing out a wild pointer, which keeps
-	 * the kernel alive long enough to print the diagnostic. */
+	 * path. On detection the zone is QUARANTINED rather than followed: the list
+	 * is truncated AND used is forced to blocks, so the guard above rejects
+	 * every further allocation from it. Truncating alone would not do -- it
+	 * leaves first == NULL with used < blocks, so the very next call would pass
+	 * that guard and fault on *(void **)NULL, possibly before the diagnostic
+	 * had finished reaching the console. Forcing used also makes
+	 * _kmalloc_alloc retire the zone to its used list on this same call, and a
+	 * later _vm_zfree into it decrements used and relinks the freed block as a
+	 * valid one-element list, so the zone rejoins rotation consistently. */
 	next = *((void **)block);
 	if ((next != NULL) &&
 			(((ptr_t)next < (ptr_t)zone->vaddr) ||
@@ -272,10 +279,14 @@ void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 		zone_traceDump(block);
 #endif
 		next = NULL;
+		quarantine = 1;
 	}
 
 	zone->first = next;
 	zone->used++;
+	if (quarantine != 0) {
+		zone->used = zone->blocks;
+	}
 #if VM_ZONE_TRACE
 	zone_traceAdd(block, __builtin_return_address(0), 1u);
 #endif
