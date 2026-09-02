@@ -88,6 +88,75 @@ static void zone_checkPoison(vm_zone_t *zone, void *block)
 #endif
 
 
+/* ---- allocation trace ring ------------------------------------------------
+ *
+ * OFF by default; build with -DVM_ZONE_TRACE=1.
+ *
+ * Complements the poisoning above rather than repeating it. Poisoning has to
+ * memset every freed block, which measurably shifts allocation timing -- and
+ * the corruption we are chasing is a race that stopped reproducing once the
+ * memset was in place. This records two words per alloc/free into a ring and
+ * touches nothing else, so the timing is barely perturbed.
+ *
+ * The ring is dumped by the link check in _vm_zalloc, which knows WHICH block
+ * was corrupted; the recent history of that block then names the code that
+ * owned it (and, if it appears twice as a free, a double free).
+ */
+#ifndef VM_ZONE_TRACE
+#define VM_ZONE_TRACE 0
+#endif
+
+#if VM_ZONE_TRACE
+
+#define ZONE_TRACE_ENTRIES 512u
+
+static struct {
+	void *block;
+	void *caller;
+	unsigned int seq;
+	unsigned char alloc;
+} zone_trace[ZONE_TRACE_ENTRIES];
+
+static unsigned int zone_traceNext;
+
+static void zone_traceAdd(void *block, void *caller, unsigned char alloc)
+{
+	unsigned int i = zone_traceNext++;
+
+	zone_trace[i % ZONE_TRACE_ENTRIES].block = block;
+	zone_trace[i % ZONE_TRACE_ENTRIES].caller = caller;
+	zone_trace[i % ZONE_TRACE_ENTRIES].seq = i;
+	zone_trace[i % ZONE_TRACE_ENTRIES].alloc = alloc;
+}
+
+
+/* Print every recorded operation on `block` (oldest first), then the tail of
+ * the whole ring for context. */
+static void zone_traceDump(void *block)
+{
+	unsigned int i, n = (zone_traceNext < ZONE_TRACE_ENTRIES) ? zone_traceNext : ZONE_TRACE_ENTRIES;
+	unsigned int base = zone_traceNext - n;
+
+	lib_printf("vm: trace for block=%p\n", block);
+	for (i = 0; i < n; ++i) {
+		unsigned int k = (base + i) % ZONE_TRACE_ENTRIES;
+		if (zone_trace[k].block == block) {
+			lib_printf("vm:   #%u %s caller=%p\n", zone_trace[k].seq,
+				(zone_trace[k].alloc != 0u) ? "alloc" : "free ", zone_trace[k].caller);
+		}
+	}
+	lib_printf("vm: last operations (any block)\n");
+	for (i = (n > 24u) ? (n - 24u) : 0u; i < n; ++i) {
+		unsigned int k = (base + i) % ZONE_TRACE_ENTRIES;
+		lib_printf("vm:   #%u %s block=%p caller=%p\n", zone_trace[k].seq,
+			(zone_trace[k].alloc != 0u) ? "alloc" : "free ", zone_trace[k].block,
+			zone_trace[k].caller);
+	}
+}
+
+#endif
+
+
 
 
 static struct {
@@ -164,7 +233,7 @@ int _vm_zoneDestroy(vm_zone_t *zone)
 
 void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 {
-	void *block;
+	void *block, *next;
 
 	if (zone == NULL) {
 		return NULL;
@@ -178,8 +247,38 @@ void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 #if VM_ZONE_POISON
 	zone_checkPoison(zone, block);
 #endif
-	zone->first = *((void **)(zone->first));
+
+	/* Validate the free-list link BEFORE it becomes zone->first, so a block
+	 * whose link word was overwritten while free is reported here -- naming the
+	 * corrupted block -- instead of faulting the NEXT allocation, which only
+	 * ever saw the garbage and could blame an innocent caller. That is the
+	 * failure in docs/misc/2026-09-02-kernel-heap-corruption-workorder.md: the
+	 * abort took far = ASCII "/test_st", a path string sitting where a link
+	 * belonged, with no way to tell which block had held it.
+	 *
+	 * Cost is two compares and an AND (blocksz is a power of 2) on the alloc
+	 * path. On detection the list is truncated rather than followed: the zone
+	 * then fails allocations instead of handing out a wild pointer, which keeps
+	 * the kernel alive long enough to print the diagnostic. */
+	next = *((void **)block);
+	if ((next != NULL) &&
+			(((ptr_t)next < (ptr_t)zone->vaddr) ||
+					((ptr_t)next >= (ptr_t)zone->vaddr + zone->blocksz * zone->blocks) ||
+					((((ptr_t)next - (ptr_t)zone->vaddr) & (zone->blocksz - 1UL)) != 0UL))) {
+		lib_printf("vm: CORRUPT free-list link block=%p link=%p zone=[%p..%p) blocksz=%u used=%u\n",
+			block, next, zone->vaddr, (char *)zone->vaddr + zone->blocksz * zone->blocks,
+			(unsigned int)zone->blocksz, zone->used);
+#if VM_ZONE_TRACE
+		zone_traceDump(block);
+#endif
+		next = NULL;
+	}
+
+	zone->first = next;
 	zone->used++;
+#if VM_ZONE_TRACE
+	zone_traceAdd(block, __builtin_return_address(0), 1u);
+#endif
 
 	if (addr != NULL) {
 		*addr = zone->pages->addr + ((addr_t)block - (addr_t)zone->vaddr);
@@ -212,6 +311,9 @@ void _vm_zfree(vm_zone_t *zone, void *block)
 
 #if VM_ZONE_POISON
 	zone_poison(zone, block, __builtin_return_address(0));
+#endif
+#if VM_ZONE_TRACE
+	zone_traceAdd(block, __builtin_return_address(0), 0u);
 #endif
 
 	*((void **)block) = zone->first;
