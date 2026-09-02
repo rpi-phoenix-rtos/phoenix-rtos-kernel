@@ -788,6 +788,41 @@ static int _map_force(vm_map_t *map, map_entry_t *e, void *paddr, vm_prot_t prot
 
 
 #ifndef NOMMU
+/* Kernel-PC faults on a user address are ordinary and recoverable (demand
+ * paging, or COW on a just-forked buffer), so they are no longer reported
+ * individually -- see the note in map_pageFault. A STORM of them is a different
+ * thing entirely: the PROT_USER bug was an EL1 fault storm that never
+ * converged, and it was diagnosed precisely because every fault printed.
+ *
+ * So count them and speak up only once the count stops looking like normal
+ * operation. Normal is very low -- a whole test-libc-unix-socket run produced
+ * two -- so the first threshold can be high enough to never fire on healthy
+ * work while still catching a storm within a fraction of a second.
+ *
+ * The counter is deliberately not synchronised: it is a diagnostic, and losing
+ * an increment to an SMP race cannot hide a storm (a storm produces orders of
+ * magnitude more than the threshold). Keeping it lock-free matters more, since
+ * this runs in the fault path. */
+#define MAP_USERCOPY_FAULT_WARN   64u
+#define MAP_USERCOPY_FAULT_REPEAT 1024u
+
+static unsigned int map_usercopyFaults;
+
+
+static void map_usercopyFaultCount(exc_context_t *ctx, void *vaddr)
+{
+	unsigned int count = ++map_usercopyFaults;
+
+	if ((count == MAP_USERCOPY_FAULT_WARN) ||
+			((count > MAP_USERCOPY_FAULT_WARN) && ((count % MAP_USERCOPY_FAULT_REPEAT) == 0u))) {
+		lib_printf("vm: %u kernel user-copy page faults resolved so far "
+			"(last pc=%p addr=%p) -- expected in ones and twos, so this many "
+			"suggests a fault storm that is not converging\n",
+			count, (void *)hal_exceptionsPC(ctx), vaddr);
+	}
+}
+
+
 static void map_pageFault(unsigned int n, exc_context_t *ctx)
 {
 	thread_t *thread;
@@ -857,7 +892,15 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		prot |= PROT_USER;
 	}
 
-	if (vm_mapForce(map, paddr, prot) != 0) {
+	if (vm_mapForce(map, paddr, prot) == 0) {
+		/* Resolved. If this was a kernel user-copy fault -- the class no longer
+		 * reported one by one -- keep the storm canary fed. */
+		if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) &&
+				(pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
+			map_usercopyFaultCount(ctx, vaddr);
+		}
+	}
+	else {
 		process_dumpException(n, ctx);
 
 		LIB_ASSERT_ALWAYS(thread->process != NULL, "exception in kernel");
