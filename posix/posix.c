@@ -1642,6 +1642,15 @@ int posix_fstat(int fd, struct stat *buf)
 		return err;
 	}
 
+	if (f->type == ftConstructing) {
+		/* A racing fstat() on a descriptor whose open() has not returned yet.
+		 * Nothing can be reported about it, and the mostly-zeroed stat that the
+		 * socket/pipe path below would hand back -- correct for those, since
+		 * there is nothing to query -- would be silently wrong data here. */
+		(void)posix_fileDeref(f);
+		return -EBADF;
+	}
+
 	hal_memset(buf, 0, sizeof(struct stat));
 	hal_memset(&msg, 0, sizeof(msg_t));
 
