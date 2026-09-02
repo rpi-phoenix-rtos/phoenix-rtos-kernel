@@ -74,7 +74,15 @@ enum { ftRegular,
 	ftFifo,
 	ftInetSocket,
 	ftUnixSocket,
-	ftTty };
+	ftTty,
+	/* A file published in an fd slot but not yet filled in -- see the note on
+	 * files under construction in posix.c. Appended, not inserted, so the
+	 * existing values keep their numbers. Every test on f->type is either an
+	 * equality against a real type or a switch with a default, so a file in
+	 * this state is rejected everywhere rather than being mistaken for
+	 * ftRegular (value 0), which is what a zeroed struct used to leave behind
+	 * -- and is why F_SEEKABLE() accepted a half-built file. */
+	ftConstructing };
 
 
 /* FIXME: share with posixsrv */

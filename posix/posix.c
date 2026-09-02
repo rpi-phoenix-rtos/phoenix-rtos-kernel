@@ -154,7 +154,13 @@ int posix_fileDeref(open_file_t *f)
 	(void)proc_lockSet(&f->lock);
 	--f->refs;
 	if (f->refs == 0) {
-		if (f->type == ftUnixSocket) {
+		if (f->type == ftConstructing) {
+			/* Never got as far as opening anything, so there is nothing to
+			 * close -- and its oid names a port that cannot exist, so the
+			 * proc_close below would only spend an IPC to be told -EINVAL. */
+			err = EOK;
+		}
+		else if (f->type == ftUnixSocket) {
 			err = unix_close((unsigned int)f->oid.id);
 		}
 		else {
@@ -396,6 +402,7 @@ int posix_newFile(process_info_t *p, int fd, open_file_t **file)
 	 * before its owner fills the oid in gets -EINVAL rather than addressing
 	 * port 0, which is real and live (port ids come from an idtree seeded at 0). */
 	f->oid.port = POSIX_PORT_CONSTRUCTING;
+	f->type = ftConstructing;
 	f->refs = 2;
 	f->offset = 0;
 
@@ -790,6 +797,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		 * decremented an uninitialised refs and could free f under us. */
 		hal_memset(f, 0, sizeof(open_file_t));
 		f->oid.port = POSIX_PORT_CONSTRUCTING;
+		f->type = ftConstructing;
 		f->refs = 2;
 
 		p->fds[fd].file = f;
