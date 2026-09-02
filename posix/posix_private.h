@@ -63,6 +63,11 @@
 
 #define HOST_NAME_MAX 255U
 
+/* Placed in a new file's oid.port while it is being constructed. Must be a port
+ * id that can never be allocated (they come from an idtree seeded at 0) and must
+ * differ from US_PORT, which this file uses to mean "AF_UNIX socket". */
+#define POSIX_PORT_CONSTRUCTING 0xfffffffeU
+
 
 enum { ftRegular,
 	ftPipe,
@@ -126,7 +131,7 @@ int posix_fileDeref(open_file_t *f);
 int posix_getOpenFile(int fd, open_file_t **f);
 
 
-int posix_newFile(process_info_t *p, int fd);
+int posix_newFile(process_info_t *p, int fd, open_file_t **file);
 
 
 int _posix_addOpenFile(process_info_t *p, open_file_t *f, unsigned int flags);

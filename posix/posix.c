@@ -176,22 +176,90 @@ int posix_fileDeref(open_file_t *f)
 }
 
 
+/* Unrefcounted teardown of a file in an fd slot. Safe ONLY where the process is
+ * not reachable by any other thread: its single caller is posix_clone's OOM
+ * unwind, which runs before p is inserted into posix_common.pid. Files that ARE
+ * published while being built (posix_newFile) must use
+ * posix_fileConstructAbort() instead -- see the note there. */
 static void posix_putUnusedFile(process_info_t *p, int fd)
 {
 	open_file_t *f;
 
 	f = p->fds[fd].file;
 	(void)proc_lockDone(&f->lock);
-	/* Symmetry with posix_fileDeref, which frees both. NULL on every current
-	 * caller (the clone-tty OOM unwind and the socket/socketpair/accept4 error
-	 * paths) because those files come from posix_newFile, which zeroes -- but a
-	 * free of f that ignores f->path is the asymmetry that produced the
-	 * uninitialised-path double free in the first place. */
+	/* Symmetry with posix_fileDeref, which frees both: a free of f that ignores
+	 * f->path is the asymmetry that produced the uninitialised-path double free
+	 * in the first place. NULL here today, since posix_clone zeroes. */
 	if (f->path != NULL) {
 		vm_kfree(f->path);
 	}
 	vm_kfree(f);
 	p->fds[fd].file = NULL;
+}
+
+
+/* ---- files under construction -------------------------------------------
+ *
+ * posix_newFile has to publish p->fds[fd].file before its caller can fill the
+ * file in, because the slot is what reserves the descriptor -- and the callers
+ * (socket, socketpair, accept4) then run blocking work: unix_accept4 and
+ * inet_accept4 wait for a connection to arrive. So the half-built file is
+ * reachable by every other thread of the process for an unbounded time.
+ *
+ * It therefore carries TWO references, one owned by the slot and one by the
+ * thread constructing it, exactly as posix_open does. A racing close() can
+ * clear the slot and drop its reference without ever reaching zero, so it can
+ * neither free the file under the constructor nor leave it orphaned. These two
+ * helpers are the only correct ways to end that state.
+ */
+
+/* Construction failed. Drop the slot's reference only if the slot still refers
+ * to f -- a racing close may already have taken it -- then the construction
+ * reference, freeing only if that was the last. */
+static void posix_fileConstructAbort(process_info_t *p, int fd, open_file_t *f)
+{
+	int drop = 1, refs;
+
+	(void)proc_lockSet(&p->lock);
+
+	if (p->fds[fd].file == f) {
+		p->fds[fd].file = NULL;
+		drop = 2;
+	}
+
+
+	(void)proc_lockSet(&f->lock);
+	f->refs -= drop;
+	refs = f->refs;
+	(void)proc_lockClear(&f->lock);
+
+	if (refs == 0) {
+		(void)proc_lockDone(&f->lock);
+		if (f->path != NULL) {
+			vm_kfree(f->path);
+		}
+		vm_kfree(f);
+	}
+
+	(void)proc_lockClear(&p->lock);
+}
+
+
+/* Construction succeeded. Apply the descriptor flags -- only while the slot is
+ * still ours, or we would be setting FD_CLOEXEC on a descriptor a racing close
+ * plus a reallocation has handed to someone else -- then release the
+ * construction reference. Writing flags unconditionally also clears any value
+ * left over from a previous user of the slot, which _posix_allocfd does not
+ * reset. */
+static void posix_fileConstructDone(process_info_t *p, int fd, open_file_t *f, int cloexec)
+{
+	(void)proc_lockSet(&p->lock);
+	if (p->fds[fd].file == f) {
+		p->fds[fd].flags = (cloexec != 0) ? FD_CLOEXEC : 0U;
+	}
+	(void)proc_lockClear(&p->lock);
+
+	(void)posix_fileDeref(f);
 }
 
 
@@ -301,7 +369,11 @@ static int _posix_allocfd(process_info_t *p, int fd)
 }
 
 
-int posix_newFile(process_info_t *p, int fd)
+/* Allocate a descriptor and publish a zeroed open_file_t in its slot, returning
+ * the file in *file with a CONSTRUCTION REFERENCE held by the caller. The caller
+ * must finish with posix_fileConstructDone() or posix_fileConstructAbort(); see
+ * the note above those. */
+int posix_newFile(process_info_t *p, int fd, open_file_t **file)
 {
 	open_file_t *f;
 
@@ -319,13 +391,19 @@ int posix_newFile(process_info_t *p, int fd)
 		return -EMFILE;
 	}
 
-	p->fds[fd].file = f;
-
 	hal_memset(f, 0, sizeof(open_file_t));
-	f->refs = 1;
+	/* A port that can never be allocated, so a racer that reaches this file
+	 * before its owner fills the oid in gets -EINVAL rather than addressing
+	 * port 0, which is real and live (port ids come from an idtree seeded at 0). */
+	f->oid.port = POSIX_PORT_CONSTRUCTING;
+	f->refs = 2;
 	f->offset = 0;
+
+	p->fds[fd].file = f;
 	(void)proc_lockInit(&f->lock, &proc_lockAttrDefault, "posix.file");
 	(void)proc_lockClear(&p->lock);
+
+	*file = f;
 	return fd;
 }
 
@@ -695,9 +773,9 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		 *    recycled block held, and point oid at a port that cannot exist:
 		 *    a zeroed oid is NOT harmless, because port ids come from an
 		 *    idtree that starts at 0, so port 0 is a real, live port and a
-		 *    racer's read/write would address it. proc_portGet() fails for an
-		 *    unknown id, so an all-ones port makes such a call return -EINVAL;
-		 *    and
+		 *    racer's read/write would address it. POSIX_PORT_CONSTRUCTING can
+		 *    never be allocated, so proc_portGet() fails to find it and such a
+		 *    call returns -EINVAL; and
 		 *  - take TWO references: one owned by the fd slot, one owned by this
 		 *    thread for the duration of the construction.
 		 *
@@ -708,7 +786,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		 * exit-time sweep over all fds) between here and the tail below
 		 * decremented an uninitialised refs and could free f under us. */
 		hal_memset(f, 0, sizeof(open_file_t));
-		f->oid.port = (u32)-1;
+		f->oid.port = POSIX_PORT_CONSTRUCTING;
 		f->refs = 2;
 
 		p->fds[fd].file = f;
@@ -2291,6 +2369,7 @@ int posix_socket(int domain, int type, int protocol)
 	TRACE("socket(%d, %d, %d)", domain, type, protocol);
 
 	process_info_t *p;
+	open_file_t *f;
 	int err, fd;
 
 	p = pinfo_find(process_getPid(proc_current()->process));
@@ -2298,19 +2377,21 @@ int posix_socket(int domain, int type, int protocol)
 		return -1;
 	}
 
-	fd = posix_newFile(p, 0);
+	fd = posix_newFile(p, 0, &f);
 	if (fd < 0) {
 		pinfo_put(p);
 		return -EMFILE;
 	}
 
+	/* Write through f, not p->fds[fd].file: the construction reference keeps f
+	 * alive, but the SLOT can be cleared by a racing close at any point below. */
 	switch (domain) {
 		case AF_UNIX:
 			err = unix_socket(domain, (unsigned int)type, protocol);
 			if (err >= 0) {
-				p->fds[fd].file->type = ftUnixSocket;
-				p->fds[fd].file->oid.port = US_PORT;
-				p->fds[fd].file->oid.id = (unsigned int)err;
+				f->type = ftUnixSocket;
+				f->oid.port = US_PORT;
+				f->oid.id = (unsigned int)err;
 			}
 			break;
 		case AF_INET:
@@ -2319,9 +2400,9 @@ int posix_socket(int domain, int type, int protocol)
 		case AF_PACKET:
 			err = inet_socket(domain, type, protocol);
 			if (err >= 0) {
-				p->fds[fd].file->type = ftInetSocket;
-				p->fds[fd].file->oid.port = (unsigned int)err;
-				p->fds[fd].file->oid.id = 0U;
+				f->type = ftInetSocket;
+				f->oid.port = (unsigned int)err;
+				f->oid.id = 0U;
 			}
 			break;
 		default:
@@ -2330,14 +2411,12 @@ int posix_socket(int domain, int type, int protocol)
 	}
 
 	if (err < 0) {
-		posix_putUnusedFile(p, fd);
+		posix_fileConstructAbort(p, fd, f);
 		pinfo_put(p);
 		return err;
 	}
 
-	if (((unsigned int)type & SOCK_CLOEXEC) != 0U) {
-		p->fds[fd].flags = FD_CLOEXEC;
-	}
+	posix_fileConstructDone(p, fd, f, ((unsigned int)type & SOCK_CLOEXEC) != 0U);
 
 	pinfo_put(p);
 	return fd;
@@ -2349,6 +2428,7 @@ int posix_socketpair(int domain, int type, int protocol, int sv[2])
 	TRACE("socketpair(%d, %d, %d, %p)", domain, type, protocol, sv);
 
 	process_info_t *p;
+	open_file_t *f0, *f1;
 	int err, id[2];
 
 	p = pinfo_find(process_getPid(proc_current()->process));
@@ -2357,39 +2437,38 @@ int posix_socketpair(int domain, int type, int protocol, int sv[2])
 	}
 
 	if (domain != AF_UNIX) {
+		pinfo_put(p);
 		return -EAFNOSUPPORT;
 	}
 
-	sv[0] = posix_newFile(p, 0);
+	sv[0] = posix_newFile(p, 0, &f0);
 	if (sv[0] < 0) {
 		pinfo_put(p);
 		return -EMFILE;
 	}
 
-	sv[1] = posix_newFile(p, 0);
+	sv[1] = posix_newFile(p, 0, &f1);
 	if (sv[1] < 0) {
-		posix_putUnusedFile(p, sv[0]);
+		posix_fileConstructAbort(p, sv[0], f0);
 		pinfo_put(p);
 		return -EMFILE;
 	}
 
 	err = unix_socketpair(domain, (unsigned int)type, protocol, id);
 	if (err == 0) {
-		p->fds[sv[0]].file->type = ftUnixSocket;
-		p->fds[sv[1]].file->type = ftUnixSocket;
-		p->fds[sv[0]].file->oid.port = US_PORT;
-		p->fds[sv[1]].file->oid.port = US_PORT;
-		p->fds[sv[0]].file->oid.id = (id_t)id[0];
-		p->fds[sv[1]].file->oid.id = (id_t)id[1];
+		f0->type = ftUnixSocket;
+		f1->type = ftUnixSocket;
+		f0->oid.port = US_PORT;
+		f1->oid.port = US_PORT;
+		f0->oid.id = (id_t)id[0];
+		f1->oid.id = (id_t)id[1];
 
-		if (((unsigned int)type & SOCK_CLOEXEC) != 0U) {
-			p->fds[sv[0]].flags = FD_CLOEXEC;
-			p->fds[sv[1]].flags = FD_CLOEXEC;
-		}
+		posix_fileConstructDone(p, sv[0], f0, ((unsigned int)type & SOCK_CLOEXEC) != 0U);
+		posix_fileConstructDone(p, sv[1], f1, ((unsigned int)type & SOCK_CLOEXEC) != 0U);
 	}
 	else {
-		posix_putUnusedFile(p, sv[1]);
-		posix_putUnusedFile(p, sv[0]);
+		posix_fileConstructAbort(p, sv[1], f1);
+		posix_fileConstructAbort(p, sv[0], f0);
 	}
 
 	pinfo_put(p);
@@ -2402,7 +2481,7 @@ int posix_accept4(int socket, struct sockaddr *address, socklen_t *address_len, 
 	TRACE("accept4(%d, %s, %d)", socket, address == NULL ? NULL : address->sa_data, flags);
 
 	process_info_t *p;
-	open_file_t *f;
+	open_file_t *f, *nf;
 	int err, fd;
 
 	p = pinfo_find(process_getPid(proc_current()->process));
@@ -2410,7 +2489,7 @@ int posix_accept4(int socket, struct sockaddr *address, socklen_t *address_len, 
 		return -1;
 	}
 
-	fd = posix_newFile(p, 0);
+	fd = posix_newFile(p, 0, &nf);
 	if (fd < 0) {
 		pinfo_put(p);
 		return -EMFILE;
@@ -2418,21 +2497,25 @@ int posix_accept4(int socket, struct sockaddr *address, socklen_t *address_len, 
 
 	err = posix_getOpenFile(socket, &f);
 	if (err == 0) {
+		/* Both accept calls BLOCK until a connection arrives, so nf is exposed
+		 * in its half-built state for as long as that takes -- which is why it
+		 * is written through the construction reference and never through
+		 * p->fds[fd].file. */
 		switch (f->type) {
 			case ftInetSocket:
 				err = inet_accept4(f->oid.port, address, address_len, (unsigned int)flags);
 				if (err >= 0) {
-					p->fds[fd].file->type = ftInetSocket;
-					p->fds[fd].file->oid.port = (unsigned int)err;
-					p->fds[fd].file->oid.id = 0;
+					nf->type = ftInetSocket;
+					nf->oid.port = (unsigned int)err;
+					nf->oid.id = 0;
 				}
 				break;
 			case ftUnixSocket:
 				err = unix_accept4((unsigned int)f->oid.id, address, address_len, (unsigned int)flags);
 				if (err >= 0) {
-					p->fds[fd].file->type = ftUnixSocket;
-					p->fds[fd].file->oid.port = US_PORT;
-					p->fds[fd].file->oid.id = (unsigned int)err;
+					nf->type = ftUnixSocket;
+					nf->oid.port = US_PORT;
+					nf->oid.id = (unsigned int)err;
 				}
 				break;
 			default:
@@ -2444,14 +2527,12 @@ int posix_accept4(int socket, struct sockaddr *address, socklen_t *address_len, 
 	}
 
 	if (err < 0) {
-		posix_putUnusedFile(p, fd);
+		posix_fileConstructAbort(p, fd, nf);
 		pinfo_put(p);
 		return err;
 	}
 
-	if (((unsigned int)flags & SOCK_CLOEXEC) != 0U) {
-		p->fds[fd].flags = FD_CLOEXEC;
-	}
+	posix_fileConstructDone(p, fd, nf, ((unsigned int)flags & SOCK_CLOEXEC) != 0U);
 
 	pinfo_put(p);
 	return fd;
