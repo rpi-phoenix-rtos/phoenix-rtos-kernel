@@ -459,6 +459,11 @@ int posix_clone(int ppid)
 				return -ENOMEM;
 			}
 
+			/* See the note in posix_pipe: zero before use, so the
+			 * unconditional vm_kfree(f->path) in posix_fileDeref cannot free
+			 * an uninitialised pointer inherited from a recycled block. */
+			hal_memset(f, 0, sizeof(open_file_t));
+
 			(void)proc_lockInit(&f->lock, &proc_lockAttrDefault, "posix.file");
 			f->refs = 1;
 			f->offset = 0;
@@ -1138,6 +1143,19 @@ int posix_pipe(int fildes[2])
 		pinfo_put(p);
 		return -ENOMEM;
 	}
+
+	/* vm_kmalloc does not zero, and posix_fileDeref frees f->path
+	 * unconditionally when it is non-NULL. A pipe never sets a path, so
+	 * without this the close of a pipe fd frees whatever the recycled block
+	 * happens to hold in that slot -- and a block last used by a regular file
+	 * holds a real (already freed) path pointer, which is in range and
+	 * block-aligned, so both _vm_zfree guards pass and the block lands on the
+	 * free list twice. posix_newFile already zeroes for this reason; do the
+	 * same here rather than adding two more field assignments, so a field
+	 * added to open_file_t later cannot reintroduce this. Also covers f->ln,
+	 * which was likewise left uninitialised (fstat on a pipe read it). */
+	hal_memset(fo, 0, sizeof(open_file_t));
+	hal_memset(fi, 0, sizeof(open_file_t));
 
 	(void)proc_lockSet(&p->lock);
 	fildes[0] = _posix_allocfd(p, 0);
