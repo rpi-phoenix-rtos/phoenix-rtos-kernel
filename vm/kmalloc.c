@@ -95,7 +95,13 @@ static vm_zone_t *_kmalloc_free(u8 hdridx, void *p)
 		return NULL;
 	}
 
-	_vm_zfree(z, p);
+	/* A rejected free (pointer outside the zone or not block-aligned) must not
+	 * move the accounting, or allocsz/hdrblocks and the used-list drift away
+	 * from the zone's actual state. */
+	if (_vm_zfree(z, p) != EOK) {
+		return NULL;
+	}
+
 	kmalloc_common.allocsz -= z->blocksz;
 
 	idx = (u8)hal_cpuGetLastBit(z->blocksz);

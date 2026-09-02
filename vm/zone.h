@@ -43,7 +43,10 @@ int _vm_zoneDestroy(vm_zone_t *zone);
 void *_vm_zalloc(vm_zone_t *zone, addr_t *addr);
 
 
-void _vm_zfree(vm_zone_t *zone, void *block);
+/* Returns EOK if the block was returned to the zone, -EINVAL if it was
+ * rejected (outside the zone, or not at a block boundary). Callers that keep
+ * their own accounting must not adjust it on a rejected free. */
+int _vm_zfree(vm_zone_t *zone, void *block);
 
 
 void _zone_init(vm_map_t *map, vm_object_t *kernel, void **bss, void **top);

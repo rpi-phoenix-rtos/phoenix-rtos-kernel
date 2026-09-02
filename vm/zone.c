@@ -288,10 +288,10 @@ void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 }
 
 
-void _vm_zfree(vm_zone_t *zone, void *block)
+int _vm_zfree(vm_zone_t *zone, void *block)
 {
 	if (((ptr_t)block < (ptr_t)zone->vaddr) || ((ptr_t)block >= (ptr_t)zone->vaddr + zone->blocksz * zone->blocks)) {
-		return;
+		return -EINVAL;
 	}
 
 	/* Reject a pointer that is inside the zone but not at a block boundary. The
@@ -306,7 +306,7 @@ void _vm_zfree(vm_zone_t *zone, void *block)
 	 * that motivated it (a free block whose link had been replaced by a path
 	 * string, faulting the next _vm_zalloc). */
 	if ((((ptr_t)block - (ptr_t)zone->vaddr) % zone->blocksz) != 0) {
-		return;
+		return -EINVAL;
 	}
 
 #if VM_ZONE_POISON
@@ -320,7 +320,7 @@ void _vm_zfree(vm_zone_t *zone, void *block)
 	zone->first = block;
 	zone->used--;
 
-	return;
+	return EOK;
 }
 
 
