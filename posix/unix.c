@@ -875,13 +875,18 @@ int unix_getsockopt(unsigned int socket, int level, int optname, void *optval, s
 #endif
 
 #if UNIX_XTALK_TRACE
-static void unix_xtalkLog(const char *dir, unsigned int self, unsigned int peer, const void *buf, ssize_t n)
+#define UNIX_XTALK_MIN 1024 /* only large chunks: the failing read was 4088 B */
+
+static void unix_xtalkLog(const char *dir, unsigned int self, unsigned int peer, unsigned int type, const void *buf, ssize_t n)
 {
 	const unsigned char *b = (const unsigned char *)buf;
 	unsigned char h[8] = { 0 };
 	size_t i, take;
 
-	if ((n <= 0) || (b == NULL)) {
+	/* One line per transfer would flood the UART (the suite does thousands)
+	 * and perturb the very timing being investigated. The mismatch always
+	 * lands on a multi-KiB chunk, so log only those. */
+	if ((n < (ssize_t)UNIX_XTALK_MIN) || (b == NULL)) {
 		return;
 	}
 
@@ -890,12 +895,12 @@ static void unix_xtalkLog(const char *dir, unsigned int self, unsigned int peer,
 		h[i] = b[i];
 	}
 
-	lib_printf("unix: XTALK %s self=%u peer=%u n=%d head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-		dir, self, peer, (int)n, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+	lib_printf("unix: XTALK %s self=%u peer=%u type=%u n=%d head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		dir, self, peer, type, (int)n, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
 }
-#define UNIX_XTALK(dir, self, peer, buf, n) unix_xtalkLog((dir), (self), (peer), (buf), (n))
+#define UNIX_XTALK(dir, self, peer, type, buf, n) unix_xtalkLog((dir), (self), (peer), (type), (buf), (n))
 #else
-#define UNIX_XTALK(dir, self, peer, buf, n) ((void)0)
+#define UNIX_XTALK(dir, self, peer, type, buf, n) ((void)0)
 #endif
 
 
@@ -971,7 +976,7 @@ static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int fla
 			(void)proc_lockClear(&s->lock);
 
 			if (err > 0) {
-				UNIX_XTALK("recv", s->id, (s->remote != NULL) ? s->remote->id : (unsigned int)-1, buf, err);
+				UNIX_XTALK("recv", s->id, (s->remote != NULL) ? s->remote->id : (unsigned int)-1, s->type, buf, err);
 				if (peek == 0U) {
 					hal_spinlockSet(&s->spinlock, &sc);
 					(void)proc_threadWakeup(&s->writeq);
@@ -1119,7 +1124,7 @@ static ssize_t send(unsigned int socket, const void *buf, size_t len, unsigned i
 				(void)proc_lockClear(&r->lock);
 
 				if (err > 0) {
-					UNIX_XTALK("send", s->id, r->id, buf, err);
+					UNIX_XTALK("send", s->id, r->id, s->type, buf, err);
 					hal_spinlockSet(&r->spinlock, &sc);
 					(void)proc_threadWakeup(&r->queue);
 					(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
