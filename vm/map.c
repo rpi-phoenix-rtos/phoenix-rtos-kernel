@@ -806,13 +806,6 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	/* clang-format on */
 #endif
 
-	if (hal_exceptionsPC(ctx) >= VADDR_KERNEL) {
-		/* output exception ASAP to avoid being deadlocked on spinlock */
-		process_dumpException(n, ctx);
-	}
-
-	hal_cpuEnableInterrupts();
-
 	thread = proc_current();
 
 	if (thread->process != NULL && (pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
@@ -821,6 +814,26 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	else {
 		map = map_common.kmap;
 	}
+
+	/* Dump straight away -- still with interrupts off, so a genuinely broken
+	 * kernel cannot deadlock on a spinlock before it has said anything -- but
+	 * ONLY for a fault the kernel is not expected to resolve: a kernel-PC fault
+	 * on the KERNEL map.
+	 *
+	 * A kernel-PC fault on a USER map is the ordinary user-copy case: a syscall
+	 * touching a user page that is not present yet, or is COW (AF_UNIX recv
+	 * writing a just-forked buffer -- see the PROT_USER note below). Those are
+	 * resolved a few lines down and the syscall proceeds. Dumping them here
+	 * printed a full "Exception #37: Data Abort (EL1)" register dump on a
+	 * PASSING test: test-libc-unix-socket emitted two while reporting 25/0, and
+	 * uart-summary.sh then flagged faults on a green run. If such a fault turns
+	 * out to be unresolvable after all, the vm_mapForce failure path below
+	 * dumps it -- which is already how every EL0 fault is reported. */
+	if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) && (map == map_common.kmap)) {
+		process_dumpException(n, ctx);
+	}
+
+	hal_cpuEnableInterrupts();
 
 	/* PROT_USER must reflect WHERE the fault is (the user map), not which EL took
 	 * it. hal_exceptionsFaultType only sets PROT_USER for EL0 aborts, so a kernel
