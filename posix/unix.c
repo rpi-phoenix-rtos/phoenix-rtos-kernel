@@ -43,8 +43,6 @@
 typedef struct _unixsock_t {
 	rbnode_t linkage;
 	unsigned int id;
-	unsigned int lmaxgap;
-	unsigned int rmaxgap;
 
 	struct _unixsock_t *next, *prev;
 
@@ -86,6 +84,9 @@ typedef struct _unixsock_t {
 static struct {
 	rbtree_t tree;
 	lock_t lock;
+	/* Next socket id to hand out. Monotonic (wrapping) rather than
+	 * lowest-free: see unixsock_alloc. */
+	unsigned int nextId;
 	/* Readiness-woken poll() for AF_UNIX fds. Every unix-socket state change
 	 * (data queued, write space, peer close) wakes pollQueue; posix_poll waits
 	 * on it (with a timed fallback) instead of polling on a sleep loop, so X
@@ -108,119 +109,53 @@ static int unixsock_cmp(rbnode_t *n1, rbnode_t *n2)
 }
 
 
-static int unixsock_gapcmp(rbnode_t *n1, rbnode_t *n2)
-{
-	unixsock_t *r1 = lib_treeof(unixsock_t, linkage, n1);
-	unixsock_t *r2 = lib_treeof(unixsock_t, linkage, n2);
-	rbnode_t *child = NULL;
-	int ret = 1;
-
-	/* parasoft-begin-suppress MISRAC2012-DIR_4_1 "Variable pass to lib_treeof will not be NULL, so lib_treeof will not be NULL either" */
-	if (r1->lmaxgap > 0U && r1->rmaxgap > 0U) {
-		if (r2->id > r1->id) {
-			/* parasoft-end-suppress MISRAC2012-DIR_4_1 */
-			child = n1->right;
-			ret = -1;
-		}
-		else {
-			child = n1->left;
-			ret = 1;
-		}
-	}
-	else if (r1->lmaxgap > 0U) {
-		child = n1->left;
-		ret = 1;
-	}
-	else if (r1->rmaxgap > 0U) {
-		child = n1->right;
-		ret = -1;
-	}
-	else {
-		/* No action required */
-	}
-
-	if (child == NULL) {
-		return 0;
-	}
-
-	return ret;
-}
-
-
-static void unixsock_augment(rbnode_t *node)
-{
-	rbnode_t *it;
-	unixsock_t *n = lib_treeof(unixsock_t, linkage, node);
-	unixsock_t *p = n, *r, *l;
-
-	if (node->left == NULL) {
-		for (it = node; it->parent != NULL; it = it->parent) {
-			p = lib_treeof(unixsock_t, linkage, it->parent);
-			if (it->parent->right == it) {
-				break;
-			}
-		}
-
-		/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "Variable pass to lib_treeof will not be NULL, so lib_treeof will not be NULL either" */
-		n->lmaxgap = (n->id <= p->id) ? n->id : n->id - p->id - 1U;
-	}
-	else {
-		l = lib_treeof(unixsock_t, linkage, node->left);
-		/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "Variable pass to lib_treeof will not be NULL, so lib_treeof will not be NULL either" */
-		n->lmaxgap = max(l->lmaxgap, l->rmaxgap);
-	}
-
-	if (node->right == NULL) {
-		for (it = node; it->parent != NULL; it = it->parent) {
-			p = lib_treeof(unixsock_t, linkage, it->parent);
-			if (it->parent->left == it) {
-				break;
-			}
-		}
-
-		n->rmaxgap = (n->id >= p->id) ? (unsigned int)-1 - n->id - 1U : p->id - n->id - 1U;
-	}
-	else {
-		r = lib_treeof(unixsock_t, linkage, node->right);
-		n->rmaxgap = max(r->lmaxgap, r->rmaxgap);
-	}
-
-	for (it = node; it->parent != NULL; it = it->parent) {
-		n = lib_treeof(unixsock_t, linkage, it);
-		p = lib_treeof(unixsock_t, linkage, it->parent);
-
-		if (it->parent->left == it) {
-			p->lmaxgap = max(n->lmaxgap, n->rmaxgap);
-		}
-		else {
-			p->rmaxgap = max(n->lmaxgap, n->rmaxgap);
-		}
-	}
-}
-
+/* Socket ids must NOT be recycled.
+ *
+ * unix_bind() publishes a filesystem node whose identity is the pair
+ * {US_PORT, socket id}, and POSIX keeps that name alive after the socket
+ * closes -- it goes away on unlink(), not on close(). This allocator used to
+ * hand out the LOWEST free id, so a just-freed id came straight back: a stale
+ * name then silently re-pointed at a new, unrelated socket. unix_connect() and
+ * send() both resolve a path to {US_PORT, id} and call unixsock_get(id), so
+ * they were handed that other socket -- and a datagram landed in a buffer
+ * whose reader had never been sent it. That is the "AF_UNIX delivered bytes
+ * that were never sent" signature: a whole foreign chunk, at a chunk
+ * boundary, with the receiver's own memory intact.
+ *
+ * Linux cannot do this: there the name resolves to an inode whose socket
+ * pointer is cleared when the socket dies, so a stale name gives
+ * ECONNREFUSED. Allocating monotonically reproduces exactly that -- the id in
+ * a stale name never names a live socket again, unixsock_get() returns NULL,
+ * and the caller gets ECONNREFUSED instead of somebody else's socket.
+ */
+#define UNIX_ID_MAX_TRIES 4096U
 
 static unixsock_t *unixsock_alloc(unsigned int *id, unsigned int type, int nonblock)
 {
 	unixsock_t *r, t;
+	unsigned int tries;
 
 	*id = 0;
 	(void)proc_lockSet(&unix_common.lock);
-	if (unix_common.tree.root != NULL) {
-		t.id = 0;
-		r = lib_treeof(unixsock_t, linkage, lib_rbFindEx(unix_common.tree.root, &t.linkage, unixsock_gapcmp));
-		if (r != NULL) {
-			if (r->lmaxgap > 0U) {
-				*id = r->id - 1U;
-			}
-			else {
-				*id = r->id + 1U;
-			}
+
+	/* Skip 0 (not a valid id) and any id still live, which only happens after
+	 * the counter wraps. The bounded try count stops a pathological tree from
+	 * spinning under the lock; failing the allocation is the honest answer. */
+	for (tries = 0U; tries < UNIX_ID_MAX_TRIES; tries++) {
+		unix_common.nextId++;
+		if (unix_common.nextId == 0U) {
+			unix_common.nextId = 1U;
 		}
-		else {
-			(void)proc_lockClear(&unix_common.lock);
-			return NULL;
+		t.id = unix_common.nextId;
+		if (lib_rbFind(&unix_common.tree, &t.linkage) == NULL) {
+			break;
 		}
 	}
+	if (tries == UNIX_ID_MAX_TRIES) {
+		(void)proc_lockClear(&unix_common.lock);
+		return NULL;
+	}
+	*id = unix_common.nextId;
 
 	r = vm_kmalloc(sizeof(unixsock_t));
 	if (r == NULL) {
@@ -922,6 +857,48 @@ int unix_getsockopt(unsigned int socket, int level, int optname, void *optval, s
 }
 
 
+/* Cross-talk correlator for the "AF_UNIX delivered bytes that were never sent"
+ * bug (diagnostic; compile-time gated, default OFF -- build with
+ * -DUNIX_XTALK_TRACE=1 for one run).
+ *
+ * The receiver reads its OWN buffer while a sender writes into the buffer of
+ * whatever `remote` points at -- and `remote` is a weak pointer while
+ * unixsock_alloc deliberately REUSES freed socket ids. So a sender can be
+ * writing into a recycled instance's buffer. Logging every transfer as
+ * (self -> peer, length, first bytes) makes that testable: each byte a reader
+ * returns must have been written to the reader's own id. A recv whose payload
+ * matches no preceding send to that id confirms cross-talk; if every recv
+ * matches, the delivery of foreign bytes happens outside this path.
+ */
+#ifndef UNIX_XTALK_TRACE
+#define UNIX_XTALK_TRACE 0
+#endif
+
+#if UNIX_XTALK_TRACE
+static void unix_xtalkLog(const char *dir, unsigned int self, unsigned int peer, const void *buf, ssize_t n)
+{
+	const unsigned char *b = (const unsigned char *)buf;
+	unsigned char h[8] = { 0 };
+	size_t i, take;
+
+	if ((n <= 0) || (b == NULL)) {
+		return;
+	}
+
+	take = ((size_t)n < sizeof(h)) ? (size_t)n : sizeof(h);
+	for (i = 0; i < take; i++) {
+		h[i] = b[i];
+	}
+
+	lib_printf("unix: XTALK %s self=%u peer=%u n=%d head=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		dir, self, peer, (int)n, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+}
+#define UNIX_XTALK(dir, self, peer, buf, n) unix_xtalkLog((dir), (self), (peer), (buf), (n))
+#else
+#define UNIX_XTALK(dir, self, peer, buf, n) ((void)0)
+#endif
+
+
 static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int flags, struct sockaddr *src_addr, socklen_t *src_len, void *control, socklen_t *controllen)
 {
 	unixsock_t *s;
@@ -994,6 +971,7 @@ static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int fla
 			(void)proc_lockClear(&s->lock);
 
 			if (err > 0) {
+				UNIX_XTALK("recv", s->id, (s->remote != NULL) ? s->remote->id : (unsigned int)-1, buf, err);
 				if (peek == 0U) {
 					hal_spinlockSet(&s->spinlock, &sc);
 					(void)proc_threadWakeup(&s->writeq);
@@ -1059,7 +1037,13 @@ static ssize_t send(unsigned int socket, const void *buf, size_t len, unsigned i
 
 				r = unixsock_get((unsigned int)oid.id);
 				if (r == NULL) {
-					err = -ENOTSOCK;
+					/* The name resolved but no socket owns that id any more:
+					 * a socket file whose socket is gone (it outlives close()
+					 * until unlink()). That is a refused destination, not a
+					 * bad caller fd -- ENOTSOCK describes OUR socket, which is
+					 * fine. unix_connect already answers ECONNREFUSED here,
+					 * and so does Linux. */
+					err = -ECONNREFUSED;
 					break;
 				}
 
@@ -1135,6 +1119,7 @@ static ssize_t send(unsigned int socket, const void *buf, size_t len, unsigned i
 				(void)proc_lockClear(&r->lock);
 
 				if (err > 0) {
+					UNIX_XTALK("send", s->id, r->id, buf, err);
 					hal_spinlockSet(&r->spinlock, &sc);
 					(void)proc_threadWakeup(&r->queue);
 					(void)proc_threadBroadcast(&unix_common.pollQueue); /* wake ALL unix pollers */
@@ -1461,7 +1446,9 @@ int unix_pollWait(time_t deadline)
 
 void unix_sockets_init(void)
 {
-	lib_rbInit(&unix_common.tree, unixsock_cmp, unixsock_augment);
+	/* No augment callback: nothing tracks free-id gaps any more (see
+	 * unixsock_alloc -- ids are monotonic, not lowest-free). */
+	lib_rbInit(&unix_common.tree, unixsock_cmp, NULL);
 	(void)proc_lockInit(&unix_common.lock, &proc_lockAttrDefault, "unix.common");
 	hal_spinlockCreate(&unix_common.pollLock, "unix.poll");
 	unix_common.pollQueue = NULL;
