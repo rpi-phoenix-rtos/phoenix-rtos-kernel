@@ -612,6 +612,9 @@ static int posix_exit(process_info_t *p, int code)
 	for (fd = 0; fd < p->fdsz; ++fd) {
 		if (p->fds[fd].file != NULL) {
 			(void)posix_fileDeref(p->fds[fd].file);
+			/* Clear the slot: the deref may have freed the file, and this fd
+			 * table outlives the call on a zombie. */
+			p->fds[fd].file = NULL;
 		}
 	}
 	(void)proc_lockClear(&p->lock);
@@ -732,7 +735,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 	TRACE("open(%s, %d, %d)", filename, oflag);
 	oid_t ln, oid, dev, pipesrv;
 	int fd = 0, err = 0, created = 0;
-	int drop, refs;
+	int drop, refs, ours;
 	process_info_t *p;
 	open_file_t *f;
 	mode_t mode;
@@ -878,22 +881,35 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			 * (fchdir then fails cleanly rather than acting on a stale cwd). */
 			{
 				size_t plen = hal_strlen(filename);
-				f->path = vm_kmalloc(plen + 1U);
-				if (f->path != NULL) {
-					hal_memcpy(f->path, filename, plen + 1U);
+				char *path = vm_kmalloc(plen + 1U);
+				if (path != NULL) {
+					hal_memcpy(path, filename, plen + 1U);
+					/* Publish the pointer only once the buffer holds the string.
+					 * f is already reachable by other threads of this process,
+					 * so a posix_fdpath() that read f->path between the
+					 * allocation and the copy would hal_strlen() uninitialised
+					 * memory and run past the end of the block. */
+					f->path = path;
 				}
 			}
+
+			/* Did we keep the descriptor? A concurrent close() clears the
+			 * slot, and _posix_allocfd can then hand that number to a
+			 * DIFFERENT file, so returning it would point the caller at
+			 * someone else's open file. */
+			(void)proc_lockSet(&p->lock);
+			ours = (p->fds[fd].file == f) ? 1 : 0;
+			(void)proc_lockClear(&p->lock);
 
 			/* Release the construction reference. Normally this just takes
 			 * refs 2 -> 1, leaving the fd slot as the only owner. If a
 			 * concurrent close() already cleared the slot, this is the last
-			 * reference and f is closed and freed here -- the caller gets an
-			 * fd that its own race already closed, but nothing leaks and
+			 * reference and f is closed and freed here -- nothing leaks and
 			 * nothing is used after being freed. */
 			(void)posix_fileDeref(f);
 
 			pinfo_put(p);
-			return fd;
+			return (ours != 0) ? fd : -EBADF;
 		} while (0);
 
 		if (created != 0) {
