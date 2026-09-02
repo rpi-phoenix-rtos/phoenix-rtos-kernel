@@ -646,6 +646,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 	TRACE("open(%s, %d, %d)", filename, oflag);
 	oid_t ln, oid, dev, pipesrv;
 	int fd = 0, err = 0, created = 0;
+	int drop, refs;
 	process_info_t *p;
 	open_file_t *f;
 	mode_t mode;
@@ -677,7 +678,25 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 			break;
 		}
 
-		f->path = NULL; /* vm_kmalloc does not zero; set before any error path */
+		/* The fd slot is how the descriptor is RESERVED across the blocking
+		 * IPCs below (_posix_allocfd looks for file == NULL), so f has to be
+		 * published before it is filled in. That makes it reachable by every
+		 * other thread of this process while its fields are still garbage, so:
+		 *
+		 *  - zero it, giving deterministic fields (oid = {0,0}, type, status)
+		 *    instead of whatever the recycled block held, and
+		 *  - take TWO references: one owned by the fd slot, one owned by this
+		 *    thread for the duration of the construction.
+		 *
+		 * The construction reference is what makes a racing close() safe. It
+		 * clears the slot and drops the slot's reference, but cannot reach zero
+		 * and so cannot free f while we are still writing into it; our own drop
+		 * at the end of the open then frees it. Without it, a close (or an
+		 * exit-time sweep over all fds) between here and the tail below
+		 * decremented an uninitialised refs and could free f under us. */
+		hal_memset(f, 0, sizeof(open_file_t));
+		f->refs = 2;
+
 		p->fds[fd].file = f;
 		(void)proc_lockInit(&f->lock, &proc_lockAttrDefault, "posix.file");
 		(void)proc_lockClear(&p->lock);
@@ -724,8 +743,6 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 
 			hal_memcpy(&f->ln, &ln, sizeof(ln));
 
-			f->refs = 1;
-
 			/* TODO: check for other types */
 			if (oid.port == US_PORT) {
 				f->type = ftUnixSocket;
@@ -768,6 +785,14 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 				}
 			}
 
+			/* Release the construction reference. Normally this just takes
+			 * refs 2 -> 1, leaving the fd slot as the only owner. If a
+			 * concurrent close() already cleared the slot, this is the last
+			 * reference and f is closed and freed here -- the caller gets an
+			 * fd that its own race already closed, but nothing leaks and
+			 * nothing is used after being freed. */
+			(void)posix_fileDeref(f);
+
 			pinfo_put(p);
 			return fd;
 		} while (0);
@@ -779,9 +804,30 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		}
 
 		(void)proc_lockSet(&p->lock);
-		p->fds[fd].file = NULL;
-		(void)proc_lockDone(&f->lock);
-		vm_kfree(f);
+
+		/* Drop the construction reference, plus the fd slot's reference if the
+		 * slot still refers to f -- a concurrent close() may already have taken
+		 * that one. Freeing unconditionally here (as this used to) would pull
+		 * the file out from under such a racer. p->lock -> f->lock is the order
+		 * posix_getOpenFile establishes. */
+		drop = 1;
+		if (p->fds[fd].file == f) {
+			p->fds[fd].file = NULL;
+			drop = 2;
+		}
+
+		(void)proc_lockSet(&f->lock);
+		f->refs -= drop;
+		refs = f->refs;
+		(void)proc_lockClear(&f->lock);
+
+		if (refs == 0) {
+			(void)proc_lockDone(&f->lock);
+			if (f->path != NULL) {
+				vm_kfree(f->path);
+			}
+			vm_kfree(f);
+		}
 
 	} while (0);
 
