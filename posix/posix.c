@@ -580,26 +580,64 @@ int posix_clone(int ppid)
 }
 
 
+/* Sweep the fd table, releasing either every descriptor (exit) or just the
+ * FD_CLOEXEC ones (exec).
+ *
+ * The reference is dropped with p->lock RELEASED. posix_fileDeref's last-ref
+ * branch sends a blocking proc_close (and allocates a msg_t inside it), so
+ * holding the lock across it -- as both sweeps used to -- let exit and exec
+ * stall every other thread's open/close/read on this process behind an IPC to a
+ * possibly wedged server. Clearing the slot under the lock BEFORE dropping the
+ * reference is what makes that safe: whoever clears the slot owns that
+ * reference, so no one else can drop it as well.
+ *
+ * fdsz is snapshotted as an upper bound. The table only ever grows, and p->fds
+ * is re-read under the lock on every iteration, so a concurrent
+ * _posix_allocfd() reallocating it cannot be followed into freed memory;
+ * descriptors created after the snapshot are new and not this sweep's business.
+ */
+static void posix_sweepFds(process_info_t *p, int cloexecOnly)
+{
+	int fd, fdsz;
+
+	(void)proc_lockSet(&p->lock);
+	fdsz = p->fdsz;
+	(void)proc_lockClear(&p->lock);
+
+	for (fd = 0; fd < fdsz; ++fd) {
+		open_file_t *f = NULL;
+
+		(void)proc_lockSet(&p->lock);
+		if (fd < p->fdsz) {
+			f = p->fds[fd].file;
+			if ((f != NULL) && ((cloexecOnly == 0) || ((p->fds[fd].flags & FD_CLOEXEC) != 0U))) {
+				p->fds[fd].file = NULL;
+			}
+			else {
+				f = NULL;
+			}
+		}
+		(void)proc_lockClear(&p->lock);
+
+		if (f != NULL) {
+			(void)posix_fileDeref(f);
+		}
+	}
+}
+
+
 int posix_exec(void)
 {
 	TRACE("exec()");
 
 	process_info_t *p;
-	int fd;
 
 	p = pinfo_find(process_getPid(proc_current()->process));
 	if (p == NULL) {
 		return -1;
 	}
 
-	(void)proc_lockSet(&p->lock);
-	for (fd = 0; fd < p->fdsz; ++fd) {
-		if ((p->fds[fd].file != NULL) && ((p->fds[fd].flags & FD_CLOEXEC) != 0U)) {
-			(void)posix_fileDeref(p->fds[fd].file);
-			p->fds[fd].file = NULL;
-		}
-	}
-	(void)proc_lockClear(&p->lock);
+	posix_sweepFds(p, 1);
 
 	pinfo_put(p);
 	return 0;
@@ -608,23 +646,14 @@ int posix_exec(void)
 
 static int posix_exit(process_info_t *p, int code)
 {
-	int fd;
-
 	p->exitcode = code;
 
 	/* Release every record lock the process held (POSIX release-on-exit). */
 	posix_lockReleaseProc(p->process);
 
-	(void)proc_lockSet(&p->lock);
-	for (fd = 0; fd < p->fdsz; ++fd) {
-		if (p->fds[fd].file != NULL) {
-			(void)posix_fileDeref(p->fds[fd].file);
-			/* Clear the slot: the deref may have freed the file, and this fd
-			 * table outlives the call on a zombie. */
-			p->fds[fd].file = NULL;
-		}
-	}
-	(void)proc_lockClear(&p->lock);
+	/* Clears each slot before dropping its reference, so a zombie's fd table is
+	 * left with no dangling pointers. */
+	posix_sweepFds(p, 0);
 
 	return 0;
 }
