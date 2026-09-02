@@ -179,7 +179,13 @@ void *vm_kmalloc(size_t size)
 
 	(void)proc_lockSet(&kmalloc_common.lock);
 
-	if (kmalloc_common.hdrblocks == 1U) {
+	/* <= rather than ==: hdrblocks can end up over-reporting the blocks actually
+	 * available (a zone quarantined by _vm_zalloc strands its remaining free
+	 * blocks while they are still counted here). With an equality test the
+	 * count would then never hit 1 again, no header zone would ever be added,
+	 * and every later zone creation would fail -- turning a single quarantine
+	 * into "vm_kmalloc returns NULL for every new size". */
+	if (kmalloc_common.hdrblocks <= 1U) {
 		err = _kmalloc_addZone(hdridx, hdridx);
 	}
 

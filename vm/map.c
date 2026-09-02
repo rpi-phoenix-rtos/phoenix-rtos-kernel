@@ -854,7 +854,15 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * silent hang. Hence the test is on vaddr via pmap_belongs (a pure inline
 	 * range check, no lock) rather than on the selected map.
 	 *
-	 * And a kernel-PC fault on a USER address is the ordinary user-copy case: a
+	 * The address test is "kernel map OR not a reachable user address". The second
+ * half matters for the corruption this was written alongside: a fault that
+ * followed a corrupted free-list link takes far = whatever the corrupter wrote
+ * -- the recorded example is the ASCII path "/test_st" -- which is in neither
+ * map, and without that clause such a fault would fall through to the resolve
+ * path and only be reported after vm_mapForce had taken a mutex and possibly
+ * blocked. Exactly the window the up-front dump exists to skip.
+ *
+ * A kernel-PC fault on a genuine USER address is the ordinary user-copy case: a
 	 * syscall touching a user page that is not present yet, or is COW (AF_UNIX
 	 * recv writing a just-forked buffer -- see the PROT_USER note below). Those
 	 * resolve a few lines down and the syscall proceeds. Dumping them printed a
@@ -865,7 +873,8 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * which falls through here -- is dumped by the vm_mapForce failure path
 	 * below, exactly as every EL0 fault already is. */
 	if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) &&
-			(pmap_belongs(&map_common.kmap->pmap, vaddr) != 0)) {
+			((pmap_belongs(&map_common.kmap->pmap, vaddr) != 0) ||
+					((ptr_t)vaddr >= VADDR_USR_MAX))) {
 		process_dumpException(n, ctx);
 	}
 
@@ -873,8 +882,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 
 	thread = proc_current();
 
-	if ((thread != NULL) && (thread->process != NULL) &&
-			(pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
+	if ((thread->process != NULL) && (pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
 		map = thread->process->mapp;
 	}
 	else {
@@ -888,7 +896,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * process's own EL0 access then re-maps it RO: an EL1 page-fault storm that never
 	 * converges. Adding the USER bit for a user-map fault fixes it without touching
 	 * COW (a read still maps RO, so a later write still breaks COW as before). */
-	if ((thread != NULL) && (thread->process != NULL) && (map == thread->process->mapp)) {
+	if ((thread->process != NULL) && (map == thread->process->mapp)) {
 		prot |= PROT_USER;
 	}
 

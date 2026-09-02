@@ -182,10 +182,11 @@ static void posix_putUnusedFile(process_info_t *p, int fd)
 
 	f = p->fds[fd].file;
 	(void)proc_lockDone(&f->lock);
-	/* Symmetry with posix_fileDeref, which frees both. Always NULL today (the
-	 * only caller is the clone-tty OOM unwind, and those files are zeroed since
-	 * e5c5f833), but a free of f that ignores f->path is the asymmetry that
-	 * produced the uninitialised-path double free in the first place. */
+	/* Symmetry with posix_fileDeref, which frees both. NULL on every current
+	 * caller (the clone-tty OOM unwind and the socket/socketpair/accept4 error
+	 * paths) because those files come from posix_newFile, which zeroes -- but a
+	 * free of f that ignores f->path is the asymmetry that produced the
+	 * uninitialised-path double free in the first place. */
 	if (f->path != NULL) {
 		vm_kfree(f->path);
 	}

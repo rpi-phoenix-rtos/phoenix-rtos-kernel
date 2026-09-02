@@ -245,6 +245,13 @@ void *_vm_zalloc(vm_zone_t *zone, addr_t *addr)
 	}
 
 	block = zone->first;
+	if (block == NULL) {
+		/* used < blocks says there should be one. Any accounting drift (or a
+		 * quarantine below) would otherwise fault on *(void **)NULL here --
+		 * the very failure the link check exists to turn into a diagnostic. */
+		return NULL;
+	}
+
 #if VM_ZONE_POISON
 	zone_checkPoison(zone, block);
 #endif
