@@ -850,8 +850,22 @@ static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int fla
 	ssize_t err;
 	spinlock_ctx_t sc;
 	unsigned int peek;
+	socklen_t controlcap;
 
 	peek = ((flags & MSG_PEEK) != 0U) ? 1U : 0U;
+
+	/* POSIX has recvmsg() report the control length it actually delivered. Only
+	 * fdpass_unpack() below writes it, and only when data was received and this
+	 * is not a peek -- so on EOF, -EWOULDBLOCK, -ENOTCONN or MSG_PEEK the
+	 * caller was left holding its own INPUT length over a buffer nothing had
+	 * touched. A conforming caller then walks it: CMSG_FIRSTHDR sees a non-zero
+	 * length, hands back a garbage cmsghdr from (typically) uninitialised stack,
+	 * and a cmsg_len read out of that garbage drives a memcpy of arbitrary
+	 * length -- a userspace smash caused entirely by the kernel not answering. */
+	controlcap = ((control != NULL) && (controllen != NULL)) ? *controllen : 0U;
+	if ((control != NULL) && (controllen != NULL)) {
+		*controllen = 0;
+	}
 
 	s = unixsock_get(socket);
 	if (s == NULL) {
@@ -891,7 +905,10 @@ static ssize_t recv(unsigned int socket, void *buf, size_t len, unsigned int fla
 			}
 			/* TODO: peek control data */
 			if (peek == 0U) {
-				if (err > 0 && control != NULL && controllen != NULL && *controllen > 0U) {
+				if ((err > 0) && (control != NULL) && (controllen != NULL) && (controlcap > 0U)) {
+					/* Restore the capacity for fdpass_unpack, which both reads
+					 * it as the buffer size and writes back what it delivered. */
+					*controllen = controlcap;
 					(void)fdpass_unpack(&s->fdpacks, control, controllen);
 				}
 			}
