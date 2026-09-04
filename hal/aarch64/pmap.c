@@ -294,6 +294,27 @@ static void _pmap_cacheOpAfterChange(descr_t newEntry, ptr_t vaddr, unsigned int
 		return;
 	}
 
+	/* A page being mapped NON-CACHED may carry dirty lines left by a previous
+	 * owner that had it mapped cached -- _pmap_destroy() releases a process's
+	 * pages without any cache maintenance, so nothing else retires them. Those
+	 * lines can be evicted at any later moment, landing on top of whatever is
+	 * written through the new uncached mapping.
+	 *
+	 * That is not hypothetical: it corrupted GPU control lists on the RPi4 at
+	 * 64-byte granularity, in both directions, with either zeros or the previous
+	 * owner's texels -- diagnosed 2026-09-04 (see the V3D winsys, which carried a
+	 * local `dc civac` workaround at BO create). Every uncached DMA mapping in the
+	 * system has the same exposure: SD, genet, USB, WiFi.
+	 *
+	 * So clean+invalidate here, where the guarantee is actually needed. Restricted
+	 * to Normal-NC (real RAM mapped uncached); Device mappings hold no cache lines
+	 * and are left alone. Cost is one page flush per uncached mapping, and those
+	 * are rare (DMA buffers), unlike the alternative of flushing every page at
+	 * process teardown. */
+	if (ATTR_FROM_DESCR(newEntry) == MAIR_IDX_NONCACHED) {
+		hal_cpuFlushDataCache(vaddr, vaddr + SIZE_PAGE);
+	}
+
 	/* Instruction cache may contain old data */
 	if ((newEntry & (DESCR_PXN | DESCR_UXN)) == 0U) {
 		hal_cpuInvalInstrCache(vaddr, vaddr + SIZE_PAGE);
