@@ -520,6 +520,16 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 		selCtx = selected->context;
 
 		proc = selected->process;
+		if ((proc != NULL) && (process_isLive(proc) == 0)) {
+			/* selected is a real thread but its ->process has been overwritten.
+			 * Name it here rather than faulting on proc->pmapp inside
+			 * pmap_switch, which is where this lands with nothing to say who
+			 * the victim was. */
+			lib_printf("proc: thread %p (tid %d) has a corrupt process pointer %p\n",
+					(void *)selected, proc_getTid(selected), (void *)proc);
+			proc = NULL;
+		}
+
 		if ((proc != NULL) && (proc->pmapp != NULL)) {
 			/* Switch address space */
 			pmap_switch(proc->pmapp);

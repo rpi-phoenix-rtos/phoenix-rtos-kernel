@@ -119,6 +119,7 @@ static void process_destroy(process_t *p)
 		vm_kfree(ghost);
 	}
 
+	p->magic = 0U;
 	vm_kfree(p->path);
 	vm_kfree(p->argv);
 	vm_kfree(p->envp);
@@ -232,6 +233,7 @@ int proc_start(startFn_t start, void *arg, const char *path)
 
 	process->posix = 0;
 	process->borrowedMap = 0;
+	process->magic = PROCESS_MAGIC;
 
 	proc_changeMap(process, NULL, NULL, NULL);
 

@@ -826,6 +826,7 @@ static void map_usercopyFaultCount(exc_context_t *ctx, void *vaddr)
 static void map_pageFault(unsigned int n, exc_context_t *ctx)
 {
 	thread_t *thread;
+	process_t *proc;
 	vm_map_t *map;
 	void *vaddr, *paddr;
 	vm_prot_t prot;
@@ -882,8 +883,19 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 
 	thread = proc_current();
 
-	if ((thread->process != NULL) && (pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
-		map = thread->process->mapp;
+	/* thread->process has twice been found wild-written on this board (see
+	 * PROCESS_MAGIC).  Validate it ONCE here and use the checked copy for the
+	 * rest of the handler: a fault inside the page-fault handler itself is
+	 * doubly hard to read back from a register dump. */
+	proc = thread->process;
+	if ((proc != NULL) && (process_isLive(proc) == 0)) {
+		lib_printf("vm: page fault with a corrupt process pointer %p on thread %p\n",
+				(void *)proc, (void *)thread);
+		proc = NULL;
+	}
+
+	if ((proc != NULL) && (pmap_belongs(&map_common.kmap->pmap, vaddr) == 0)) {
+		map = proc->mapp;
 	}
 	else {
 		map = map_common.kmap;
@@ -896,7 +908,7 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * process's own EL0 access then re-maps it RO: an EL1 page-fault storm that never
 	 * converges. Adding the USER bit for a user-map fault fixes it without touching
 	 * COW (a read still maps RO, so a later write still breaks COW as before). */
-	if ((thread->process != NULL) && (map == thread->process->mapp)) {
+	if ((proc != NULL) && (map == proc->mapp)) {
 		prot |= PROT_USER;
 	}
 
@@ -911,9 +923,9 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	else {
 		process_dumpException(n, ctx);
 
-		LIB_ASSERT_ALWAYS(thread->process != NULL, "exception in kernel");
+		LIB_ASSERT_ALWAYS(proc != NULL, "exception in kernel");
 
-		(void)threads_sigpost(thread->process, thread, signal_segv);
+		(void)threads_sigpost(proc, thread, signal_segv);
 	}
 }
 #endif

@@ -28,6 +28,12 @@
 typedef void (*sighandlerFn_t)(void);
 
 
+/* Companion to THREAD_MAGIC: stamped into every live process_t so a thread_t
+ * whose `process` pointer has been wild-written can be spotted at the point of
+ * use instead of faulting on a garbage dereference.  Two crashes on this board
+ * (pmap_switch and map_pageFault) were both a corrupted thread_t.process. */
+#define PROCESS_MAGIC 0x50524f43U /* "PROC" */
+
 typedef struct _process_t {
 	lock_t lock;
 
@@ -71,7 +77,16 @@ typedef struct _process_t {
 
 	void *got;
 	hal_tls_t tls;
+
+	unsigned int magic; /* PROCESS_MAGIC while live; kept LAST so no existing
+	                     * field offset moves (lock_t stays at offset 0) */
 } process_t;
+
+
+static inline int process_isLive(const process_t *p)
+{
+	return ((p != NULL) && (p->magic == PROCESS_MAGIC)) ? 1 : 0;
+}
 
 
 static inline int process_getPid(const process_t *process)
