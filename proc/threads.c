@@ -334,7 +334,14 @@ static void thread_destroy(thread_t *thread)
 	while (thread->locks != NULL) {
 		proc_lockForceUnlock(thread->locks, UNLOCK_DO_YIELD);
 	}
-	vm_kfree(thread->kstack);
+	/* In the vfork window thread->kstack is the PARENT's live kernel stack
+	 * (process_vforkThread does `current->kstack = parent->kstack`) and this
+	 * thread's own stack is parked in execkstack.  Freeing thread->kstack there
+	 * pulls the stack out from under a running parent; on the cooperative paths
+	 * execkstack has already been restored to equal kstack, so this frees the
+	 * same block those paths always did -- and stops leaking execkstack. */
+	vm_kfree((thread->execkstack != NULL) ? thread->execkstack : thread->kstack);
+	thread->magic = 0U;
 
 	process = thread->process;
 	if (process != NULL) {
@@ -470,6 +477,21 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 	while (i < sizeof(threads_common.ready) / sizeof(thread_t *)) {
 		selected = threads_common.ready[i];
 		if (selected == NULL) {
+			i++;
+			continue;
+		}
+
+		if (thread_isLive(selected) == 0) {
+			/* Something that is not a thread is on this ready queue.  Do NOT
+			 * unlink it: LIST_REMOVE dereferences ->next and ->prev, which for a
+			 * foreign object are arbitrary values (that write is how this class
+			 * of corruption usually turns into a second, more confusing fault).
+			 * The whole queue is untrustworthy once a non-thread is on it, so
+			 * drop it and move to the next priority. */
+			lib_printf("proc: ready[%u] head %p is not a thread - queue dropped\n",
+					i, (void *)selected);
+			threads_common.ready[i] = NULL;
+			selected = NULL;
 			i++;
 			continue;
 		}
@@ -656,6 +678,12 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	t->wakeup = 0;
 	t->process = process;
 	t->parentkstack = NULL;
+	/* execkstack was never initialised here: it is only ever assigned on the
+	 * vfork path, so for every other thread it held vm_kmalloc garbage -- which
+	 * also silently disabled the kernel-stack canary check in _threads_schedule
+	 * (it is gated on execkstack == NULL). */
+	t->execkstack = NULL;
+	t->magic = THREAD_MAGIC;
 	t->sigmask = sigmask;
 	t->sigpend = 0;
 	t->refs = 1;
@@ -958,6 +986,11 @@ void proc_changeMap(process_t *proc, vm_map_t *map, vm_map_t *imap, pmap_t *pmap
 	proc->mapp = map;
 	proc->pmapp = pmap;
 	proc->imapp = imap;
+	/* Ownership follows the map: every caller here is installing a map this
+	 * process owns (or none at all).  The one caller that installs a BORROWED
+	 * map -- process_vforkThread -- sets the flag back to 1 right after, so
+	 * clearing it unconditionally is what keeps the two in step. */
+	proc->borrowedMap = 0;
 	hal_spinlockClear(&threads_common.spinlock, &sc);
 }
 
@@ -1187,6 +1220,16 @@ static int _proc_threadWakeup(thread_t **queue)
 	int ret = 1;
 
 	if ((*queue != NULL) && (*queue != wakeupPending)) {
+		/* The queue head is caller-supplied memory (a kmsg_t, a spawn record, a
+		 * socket, a condvar); if it has been recycled underneath us this is the
+		 * point where a non-thread would enter the ready queue.  Drop it here,
+		 * loudly, instead of scheduling it. */
+		if (thread_isLive(*queue) == 0) {
+			lib_printf("proc: wakeup on a queue head that is not a thread (queue=%p head=%p) - dropped\n",
+					(void *)queue, (void *)*queue);
+			*queue = NULL;
+			return 0;
+		}
 		_proc_threadDequeue(*queue);
 	}
 	else {

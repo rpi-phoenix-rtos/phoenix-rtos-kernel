@@ -30,6 +30,16 @@
 
 #define MAX_PRIO 7U /* Maximum priority value, of the lowest criticality (prio=0 is of the HIGHEST) */
 
+/* Stamped into every live thread_t and cleared when it is destroyed, so the two
+ * places that take a caller-supplied `thread_t **` -- the wait-queue wakeups --
+ * and the scheduler itself can tell a real thread from an arbitrary pointer.
+ * Without it a single stale or corrupted queue head is a scheduler-corruption
+ * primitive: _proc_threadWakeup accepts any non-NULL bit pattern as a thread,
+ * _proc_threadDequeue links it into threads_common.ready[], and the crash then
+ * surfaces three frames later inside pmap_switch with nothing left to say where
+ * it came from. */
+#define THREAD_MAGIC 0x54485244U /* "THRD" */
+
 #define MAX_TID        MAX_ID
 #define THREAD_END     1U
 #define THREAD_END_NOW 2U
@@ -91,7 +101,15 @@ typedef struct _thread_t {
 
 	cpu_context_t *context;
 	cpu_context_t *longjmpctx;
+
+	unsigned int magic; /* THREAD_MAGIC while this thread is live; see above */
 } thread_t;
+
+
+static inline int thread_isLive(const thread_t *t)
+{
+	return ((t != NULL) && (t->magic == THREAD_MAGIC)) ? 1 : 0;
+}
 
 
 static inline int proc_getTid(const thread_t *t)

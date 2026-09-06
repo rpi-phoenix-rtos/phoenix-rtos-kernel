@@ -48,6 +48,13 @@ typedef struct _process_t {
 	pmap_t *pmapp;
 	int exit;
 
+	/* Set while this process's mapp/imapp/pmapp point INTO ANOTHER process's
+	 * process_t -- the vfork window, where the child adopts the parent's map
+	 * until it execs or copies.  process_destroy must not destroy a map it does
+	 * not own: doing so frees every page-table page of a live parent while its
+	 * TTBR0 still walks them. */
+	unsigned int borrowedMap : 1;
+
 	unsigned int lazy : 1;
 	unsigned int lgap : 1;
 	unsigned int rgap : 1;

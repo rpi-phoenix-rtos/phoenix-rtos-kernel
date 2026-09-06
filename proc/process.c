@@ -83,6 +83,9 @@ static void process_destroy(process_t *p)
 {
 	thread_t *ghost;
 	vm_map_t *mapp = p->mapp, *imapp = p->imapp;
+	/* Snapshot alongside mapp/imapp: proc_changeMap() below clears this flag
+	 * together with the pointers, so it has to be read BEFORE that call. */
+	unsigned int borrowed = p->borrowedMap;
 
 	trace_eventProcessKill(p);
 
@@ -95,12 +98,17 @@ static void process_destroy(process_t *p)
 
 	proc_changeMap(p, NULL, NULL, NULL);
 
-	if (mapp != NULL) {
-		vm_mapDestroy(p, mapp);
-	}
+	/* A process killed inside the vfork window still points at its parent's map
+	 * (see process_t.borrowedMap).  Destroying it here would tear down a live
+	 * parent's address space. */
+	if (borrowed == 0U) {
+		if (mapp != NULL) {
+			vm_mapDestroy(p, mapp);
+		}
 
-	if (imapp != NULL) {
-		vm_mapDestroy(p, imapp);
+		if (imapp != NULL) {
+			vm_mapDestroy(p, imapp);
+		}
 	}
 
 	proc_portsDestroy(p);
@@ -223,6 +231,7 @@ int proc_start(startFn_t start, void *arg, const char *path)
 #endif
 
 	process->posix = 0;
+	process->borrowedMap = 0;
 
 	proc_changeMap(process, NULL, NULL, NULL);
 
@@ -1545,6 +1554,9 @@ static void process_vforkThread(void *arg)
 	}
 
 	proc_changeMap(current->process, parent->process->mapp, parent->process->imapp, parent->process->pmapp);
+	/* Those three pointers live inside the PARENT's process_t; they are ours to
+	 * use, never ours to destroy, until exec or process_copy gives us our own. */
+	current->process->borrowedMap = 1;
 	pmap_switch(current->process->pmapp);
 
 	current->ustack = parent->ustack;
