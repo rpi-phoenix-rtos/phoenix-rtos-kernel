@@ -72,6 +72,10 @@ typedef struct _thread_t {
 	unsigned int state : 2;
 	unsigned int exit : 2;
 	unsigned interruptible : 1;
+	/* Set on the vfork PARENT while a child is executing on its kernel stack
+	 * (process_vforkThread does `current->kstack = parent->kstack`).  The stack
+	 * must not be freed while the borrower is still running on it. */
+	unsigned int lentKstack : 1;
 
 	unsigned int sigmask;
 	unsigned int sigpend;

@@ -1458,6 +1458,8 @@ static void process_restoreParentKstack(thread_t *current, thread_t *parent)
 {
 	hal_memcpy(hal_cpuGetSP(parent->context), current->parentkstack, process_parentKstacksz(parent));
 	vm_kfree(current->parentkstack);
+	/* The borrow is over: the parent owns its stack again. */
+	parent->lentKstack = 0;
 }
 
 
@@ -1564,6 +1566,10 @@ static void process_vforkThread(void *arg)
 	current->ustack = parent->ustack;
 
 	hal_cpuDisableInterrupts();
+	/* From here until process_restoreParentKstack() we execute on the PARENT's
+	 * kernel stack; mark it so an asynchronous death of the parent cannot free
+	 * the stack out from under us. */
+	parent->lentKstack = 1;
 	current->kstack = parent->kstack;
 	_hal_cpuSetKernelStack(current->kstack + current->kstacksz);
 

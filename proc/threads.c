@@ -340,8 +340,19 @@ static void thread_destroy(thread_t *thread)
 	 * pulls the stack out from under a running parent; on the cooperative paths
 	 * execkstack has already been restored to equal kstack, so this frees the
 	 * same block those paths always did -- and stops leaking execkstack. */
-	vm_kfree((thread->execkstack != NULL) ? thread->execkstack : thread->kstack);
-	thread->magic = 0U;
+	if (thread->lentKstack != 0U) {
+		/* A vfork child is still running on this thread's kernel stack.  Freeing
+		 * it here is how `/dev/vcmbox` -- an 11-byte name copied into a stack
+		 * buffer by proc_portLookup -- ended up written across a recycled
+		 * thread_t's `process` field on this board.  Leak the 8 KiB instead: the
+		 * borrower has no way to hand it back once we are gone, and a leak is
+		 * cheap next to writing into live kernel objects. */
+		thread->magic = 0U;
+	}
+	else {
+		vm_kfree((thread->execkstack != NULL) ? thread->execkstack : thread->kstack);
+		thread->magic = 0U;
+	}
 
 	process = thread->process;
 	if (process != NULL) {
@@ -693,6 +704,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority,
 	 * also silently disabled the kernel-stack canary check in _threads_schedule
 	 * (it is gated on execkstack == NULL). */
 	t->execkstack = NULL;
+	t->lentKstack = 0;
 	t->magic = THREAD_MAGIC;
 	t->sigmask = sigmask;
 	t->sigpend = 0;
