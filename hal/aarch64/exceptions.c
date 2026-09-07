@@ -125,6 +125,9 @@ static const char *exceptionClassStr(unsigned int excClass)
 }
 
 
+static void exceptions_dumpUserStack(exc_context_t *ctx);
+
+
 void hal_exceptionsDumpContext(char *buff, exc_context_t *ctx, unsigned int n)
 {
 	size_t i = 0;
@@ -169,6 +172,16 @@ void hal_exceptionsDumpContext(char *buff, exc_context_t *ctx, unsigned int n)
 
 	buff[i++] = '\n';
 	buff[i] = '\0';
+
+	/* Add a stack window for the fault classes where the registers alone say
+	 * only "a ret went to a corrupt address" and nothing about what corrupted
+	 * it. The two aborts are EL0-specific; PC/SP-alignment are not EL-tagged, so
+	 * a kernel one also lands here -- harmless, since the dump is a bounded read
+	 * of whichever stack sp names, and it just prints alongside the handler's
+	 * backtrace. */
+	if ((n == EXC_DATA_ABORT_EL0) || (n == EXC_INSTR_ABORT_EL0) || (n == EXC_PC_ALIGN) || (n == EXC_SP_ALIGN)) {
+		exceptions_dumpUserStack(ctx);
+	}
 }
 
 
@@ -225,6 +238,50 @@ static void hal_exceptionsBacktrace(exc_context_t *ctx)
 			}
 			fp = nextfp;
 		}
+	}
+
+	buff[i++] = '\n';
+	buff[i] = '\0';
+	hal_consolePrint(ATTR_BOLD, buff);
+}
+
+
+/* Dump a bounded window of the faulting stack.
+ *
+ * For a stack-corruption crash the bytes around sp are the evidence: when a
+ * saved return address has been overwritten, the neighbouring words show WHAT
+ * overwrote it (recognisable data -- indices, half-floats, ASCII) and HOW FAR
+ * the overflow ran, which together identify the offending buffer. The register
+ * dump alone cannot: pc == lr == the corrupt value tells you a `ret` went
+ * astray but nothing about the writer.
+ *
+ * Deliberately a FLAT read of a contiguous range, not a frame-pointer walk.
+ * Chasing a corrupted x29 is what the crash has already told us not to trust,
+ * and a nested fault taken here at EL1 would turn every userspace crash into a
+ * board reset. The range is clipped to the page sp sits in, so a read that
+ * starts on a mapped page cannot walk off it. */
+static void exceptions_dumpUserStack(exc_context_t *ctx)
+{
+	char buff[512];
+	const unsigned long sp = ctx->cpuCtx.sp;
+	unsigned long addr, end;
+	size_t i = 0;
+
+	if ((sp == 0UL) || ((sp & 7UL) != 0UL)) {
+		return;
+	}
+
+	end = (sp | (unsigned long)(SIZE_PAGE - 1U)) + 1UL; /* end of sp's page */
+	if ((end - sp) > 128UL) {
+		end = sp + 128UL;
+	}
+
+	(void)hal_strcpy(&buff[i], "stack:");
+	i += hal_strlen("stack:");
+	i += hal_i2s("\n  sp=", &buff[i], sp, 16U, 1U);
+
+	for (addr = sp; (addr + 8UL) <= end; addr += 8UL) {
+		i += hal_i2s("\n  ", &buff[i], *(volatile unsigned long *)(addr_t)addr, 16U, 1U);
 	}
 
 	buff[i++] = '\n';
