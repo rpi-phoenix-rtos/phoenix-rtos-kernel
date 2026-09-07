@@ -264,24 +264,42 @@ static void exceptions_dumpUserStack(exc_context_t *ctx)
 {
 	char buff[512];
 	const unsigned long sp = ctx->cpuCtx.sp;
-	unsigned long addr, end;
+	unsigned long addr, end, pageLo, pageHi;
 	size_t i = 0;
 
 	if ((sp == 0UL) || ((sp & 7UL) != 0UL)) {
 		return;
 	}
 
-	end = (sp | (unsigned long)(SIZE_PAGE - 1U)) + 1UL; /* end of sp's page */
-	if ((end - sp) > 128UL) {
-		end = sp + 128UL;
+	/* Span BOTH sides of sp, clipped to its page. Above sp is the tail of an
+	 * overflow (where it ran past the saved registers); below sp is the buffer
+	 * it came from. Having both bounds the overflow, and the distance between
+	 * the first and last index word gives the size of the array that ran over --
+	 * which is what identifies it. */
+	pageLo = sp & ~(unsigned long)(SIZE_PAGE - 1U);
+	pageHi = pageLo + (unsigned long)SIZE_PAGE;
+
+	addr = (sp > (pageLo + 128UL)) ? (sp - 128UL) : pageLo;
+	end = addr + 384UL;
+	if (end > pageHi) {
+		end = pageHi;
 	}
 
 	(void)hal_strcpy(&buff[i], "stack:");
 	i += hal_strlen("stack:");
 	i += hal_i2s("\n  sp=", &buff[i], sp, 16U, 1U);
+	i += hal_i2s("  from=", &buff[i], addr, 16U, 1U);
+	i += hal_i2s("  to=", &buff[i], end, 16U, 1U);
 
-	for (addr = sp; (addr + 8UL) <= end; addr += 8UL) {
-		i += hal_i2s("\n  ", &buff[i], *(volatile unsigned long *)(addr_t)addr, 16U, 1U);
+	for (; (addr + 8UL) <= end; addr += 8UL) {
+		/* Flush before the line can overrun buff; hal_i2s writes at most ~24
+		 * chars per call and the tail below needs 2 more. */
+		if (i > (sizeof(buff) - 32U)) {
+			buff[i] = '\0';
+			hal_consolePrint(ATTR_BOLD, buff);
+			i = 0;
+		}
+		i += hal_i2s((addr == sp) ? "\n *" : "\n  ", &buff[i], *(volatile unsigned long *)(addr_t)addr, 16U, 1U);
 	}
 
 	buff[i++] = '\n';
