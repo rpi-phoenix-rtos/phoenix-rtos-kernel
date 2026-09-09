@@ -56,6 +56,71 @@ static int kmalloc_zone_cmp(rbnode_t *n1, rbnode_t *n2)
 }
 
 
+/* Validate a zone's list links BEFORE LIST_REMOVE dereferences them.
+ *
+ * This is not a theoretical guard. On 2026-09-09 a zone reached _kmalloc_free
+ * with next = 0x80000001c46ccf80 where a kernel pointer must be
+ * 0xffffffffc46ccf80 -- the low 32 bits intact, the high 32 bits replaced -- and
+ * lib_listRemove's `t->next->prev = t->prev` (lib/list.c:47) took a translation
+ * fault level 0 at EL1, on a non-canonical address. The board died there.
+ *
+ * A range test is deliberately used rather than an aarch64 canonicality test
+ * ((p >> 48) != 0xffff): VADDR_KERNEL is defined by every HAL, so this keeps
+ * working on ia32/armv7a/riscv64/sparcv8leon, and requiring the link to be in
+ * KERNEL space is strictly stronger than requiring it to be canonical. It also
+ * catches a NULL link, which would fault the same way.
+ *
+ * Note what this does NOT try to be: an integrity check. It is a cheap value
+ * test on the two pointers about to be dereferenced. lib_listBelongs() is not
+ * usable here and the note that proposed it was wrong -- it discards `poff`
+ * (lib/list.c:61) and returns at lib/list.c:69 as soon as the walk reaches the
+ * node, i.e. *before* ever reading node->next, so for a zone that is genuinely
+ * on the used list (which this one was: the `t->prev->next` store on line 46
+ * committed) it returns 1 and the fault is byte-identical. Worse, its walk would
+ * itself dereference the already-poisoned predecessor link.
+ *
+ * Returns 1 if both links are plausible, 0 if either is not.
+ */
+static int kmalloc_zoneLinksSane(const vm_zone_t *z)
+{
+	if (((addr_t)z->next < (addr_t)VADDR_KERNEL) || ((addr_t)z->prev < (addr_t)VADDR_KERNEL)) {
+		return 0;
+	}
+
+	return 1;
+}
+
+
+/* Name the victim. The abort this replaces gave only a register dump, from which
+ * it took a disassembly of lib_listRemove to work out even WHICH field was
+ * corrupt (it was next; an earlier write-up said prev). Printing the zone's own
+ * state says what the block was being used for, which the register dump cannot.
+ *
+ * ⚠ lib_printf MUST NOT be used here, and this is not a style preference. Both
+ * callers hold kmalloc_common.lock (a NON-recursive mutex, taken at vm_kmalloc
+ * and vm_kfree), and lib_printf -> lib_putch -> log_write reaches
+ * vm_kmalloc(sizeof(*rmsg)) at log/log.c:300 -- so printing here would re-enter
+ * the allocator lock and hang the kernel on the exact path this guard exists to
+ * make survivable. hal_consolePrint takes only console_common.lock, which the
+ * HAL documents as a leaf lock (hal/aarch64/generic/console.c:80) and which
+ * allocates nothing, so it is safe under any kernel lock.
+ *
+ * The static buffer is safe for the same reason the guard is needed: both call
+ * sites hold kmalloc_common.lock, so they cannot interleave. */
+static char kmalloc_diagBuf[224];
+
+
+static void kmalloc_reportBadZone(const vm_zone_t *z, u8 idx)
+{
+	(void)lib_sprintf(kmalloc_diagBuf,
+			"kmalloc: zone %p has a corrupt list link -- next=%p prev=%p "
+			"(used=%u blocks=%u blocksz=%zu vaddr=%p idx=%u); zone stranded, not unlinked\n",
+			(const void *)z, (void *)z->next, (void *)z->prev, z->used, z->blocks,
+			z->blocksz, z->vaddr, (unsigned int)idx);
+	hal_consolePrint(ATTR_BOLD, kmalloc_diagBuf);
+}
+
+
 static void *_kmalloc_alloc(u8 hdridx, u8 idx)
 {
 	void *b;
@@ -70,8 +135,15 @@ static void *_kmalloc_alloc(u8 hdridx, u8 idx)
 		}
 
 		if (z->used == z->blocks) {
-			LIST_REMOVE(&kmalloc_common.sizes[idx], z);
-			LIST_ADD(&kmalloc_common.used, z);
+			/* Same guard as in _kmalloc_free: this LIST_REMOVE dereferences the
+			 * same two pointers, so it can fault the same way. */
+			if (kmalloc_zoneLinksSane(z) == 0) {
+				kmalloc_reportBadZone(z, idx);
+			}
+			else {
+				LIST_REMOVE(&kmalloc_common.sizes[idx], z);
+				LIST_ADD(&kmalloc_common.used, z);
+			}
 		}
 	}
 
@@ -111,8 +183,17 @@ static vm_zone_t *_kmalloc_free(u8 hdridx, void *p)
 
 	/* Remove zone from used list */
 	if (z->used == z->blocks - 1U) {
-		LIST_REMOVE(&kmalloc_common.used, z);
-		LIST_ADD(&kmalloc_common.sizes[idx], z);
+		if (kmalloc_zoneLinksSane(z) == 0) {
+			/* Refuse the move rather than fault. Leaving z on the used list
+			 * strands one zone (its free block is not reused); unlinking it
+			 * through a garbage pointer takes the kernel down, and skipping
+			 * only the REMOVE would leave it on two lists at once. */
+			kmalloc_reportBadZone(z, idx);
+		}
+		else {
+			LIST_REMOVE(&kmalloc_common.used, z);
+			LIST_ADD(&kmalloc_common.sizes[idx], z);
+		}
 	}
 
 	return z;
@@ -219,8 +300,15 @@ static void *_kmalloc_freeAtom(u8 hdridx, void *p)
 
 	idx = (u8)hal_cpuGetLastBit(z->blocksz);
 
-	/* Remove zone if free */
-	if ((z->used == 0U) && (z != &kmalloc_common.firstzone)) {
+	/* Remove zone if free.
+	 *
+	 * The link guard has to cover the whole block, not just the LIST_REMOVE:
+	 * destroying the zone while a list still points at it would turn a stranded
+	 * zone into a use-after-free, which is worse than the leak. */
+	if ((z->used == 0U) && (z != &kmalloc_common.firstzone) && (kmalloc_zoneLinksSane(z) == 0)) {
+		kmalloc_reportBadZone(z, idx);
+	}
+	else if ((z->used == 0U) && (z != &kmalloc_common.firstzone)) {
 		LIST_REMOVE(&kmalloc_common.sizes[idx], z);
 		(void)_vm_zoneDestroy(z);
 		lib_rbRemove(&kmalloc_common.tree, &z->linkage);
