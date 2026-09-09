@@ -26,6 +26,7 @@
 #include "syspage.h"
 #include "test/test.h"
 #include "perf/perf.h"
+#include "log/log.h"
 
 
 static struct {
@@ -133,18 +134,26 @@ int main(void)
 	_syscalls_init();
 	hal_consolePrint(ATTR_USER, "hi: syscalls-done\n");
 
-#if 0 /* Basic kernel tests */
-	/* Start tests */
+#if 0
+	/*
+	 * Basic kernel tests - should be run in separation with logging disabled
+	 * and without the main_initthr started.
+	 *
+	 * Available tests:
+	 * - test_proc_threads1
+	 * - test_proc_threads2
+	 * - test_vm_kmallocsim
+	 * - test_vm_alloc
+	 * - test_vm_kmalloc
+	 * - test_proc_exit
+	 */
+	log_disable();
 	test_proc_threads1();
-	test_vm_kmallocsim();
-	test_proc_conditional();
-	test_vm_alloc();
-	test_vm_kmalloc();
-	test_proc_exit();
-#endif
-
+	(void)main_initthr;
+#else
 	(void)proc_start(main_initthr, NULL, (const char *)"init");
 	hal_consolePrint(ATTR_USER, "hi: proc-start-done\n");
+#endif
 
 	/* SMP-D-5: publish primary-ready flag. Secondaries spin-wait on
 	 * this in _other_core_virtual before invoking the per-CPU C

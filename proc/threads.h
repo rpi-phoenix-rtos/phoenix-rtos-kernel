@@ -22,13 +22,27 @@
 #include "process.h"
 #include "lock.h"
 
+#include <board_config.h>
+
 #ifdef DEBUG_THREADS
 #define LIB_ASSERT_THREADS(condition, fmt, ...) LIB_ASSERT_ALWAYS((condition), (fmt), ##__VA_ARGS__)
 #else
 #define LIB_ASSERT_THREADS(condition, fmt, ...)
 #endif
 
-#define MAX_PRIO 7U /* Maximum priority value, of the lowest criticality (prio=0 is of the HIGHEST) */
+#ifndef NPRIOS
+#define NPRIOS 64U
+#endif
+
+_Static_assert(NPRIOS % 2U == 0U, "NPRIOS should be even");
+_Static_assert(NPRIOS >= 16U, "NPRIOS should be greater than 16");
+
+typedef s8 priority_t;
+_Static_assert(NPRIOS <= (1UL << (sizeof(priority_t) * 8U)), "NPRIOS must fit into priority_t range");
+
+#define PRIO_OFFSET (NPRIOS / 2U)
+#define MAX_PRIO    (((priority_t)PRIO_OFFSET) - 1) /* Maximum priority value, of the lowest criticality (scheduled when no threads with p < MAX_PRIO are ready) */
+#define MIN_PRIO    (-((priority_t)PRIO_OFFSET))    /* Minimum priority value, of the HIGHEST criticality (scheduled before MIN_PRIO + 1) */
 
 /* Stamped into every live thread_t and cleared when it is destroyed, so the two
  * places that take a caller-supplied `thread_t **` -- the wait-queue wakeups --
@@ -67,11 +81,12 @@ typedef struct _thread_t {
 	struct _thread_t **wait;
 	time_t wakeup;
 
-	unsigned int priorityBase : 4;
-	unsigned int priority : 4;
+	priority_t priorityBase;
+	priority_t priority;
+
 	unsigned int state : 2;
 	unsigned int exit : 2;
-	unsigned interruptible : 1;
+	unsigned int interruptible : 1;
 	/* Set on the vfork PARENT while a child is executing on its kernel stack
 	 * (process_vforkThread does `current->kstack = parent->kstack`).  The stack
 	 * must not be freed while the borrower is still running on it. */
@@ -79,9 +94,6 @@ typedef struct _thread_t {
 
 	unsigned int sigmask;
 	unsigned int sigpend;
-
-	time_t stick;
-	time_t utick;
 
 	void *kstack;
 	size_t kstacksz;
@@ -128,10 +140,11 @@ thread_t *proc_current(void);
 void threads_canaryInit(thread_t *t, void *ustack);
 
 
-int proc_threadCreate(process_t *process, startFn_t start, int *id, u8 priority, size_t kstacksz, void *stack, size_t stacksz, unsigned int sigmask, void *arg);
+int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t priority, size_t kstacksz, void *stack, size_t stacksz, unsigned int sigmask, void *arg);
 
 
-int proc_threadPriority(thread_t *t, int signedPriority);
+/* Sets the priority of t to val or retrieves the current priority of t when val == PH_GET_PRIO. Returns the current priority of t in *res if res != NULL. */
+int proc_threadPriority(thread_t *t, int val, int *res);
 
 
 __attribute__((noreturn)) void proc_threadEnd(void);
@@ -218,7 +231,7 @@ int proc_settime(time_t offs);
 __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx);
 
 
-void proc_threadsDump(u8 priority);
+void proc_threadsDump(priority_t priority);
 
 
 int _threads_init(vm_map_t *kmap, vm_object_t *kernel);
