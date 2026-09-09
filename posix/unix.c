@@ -28,7 +28,20 @@
 
 #define US_DEF_BUFFER_SIZE SIZE_PAGE
 #define US_MIN_BUFFER_SIZE SIZE_PAGE
-#define US_MAX_BUFFER_SIZE 65536U
+/* Ceiling for SO_RCVBUF. Raised from 64 kB on 2026-09-09.
+ *
+ * A stream write copies only what currently fits in the ring, so a large transfer
+ * costs one blocking round-trip per refill -- and the ring hands over only about
+ * HALF its capacity per refill (the writer blocks when full, the reader drains it,
+ * so the reader finds it half-full on average). Measured on hardware: an X client
+ * pushing a 1.2 MB XPutImage took ~38 round-trips at a fixed ~2.79 ms each, which
+ * was 68.6 ms of its 105.8 ms frame, and the frame rate scaled inversely with the
+ * round-trip count (32.6 kB/refill -> 9.46 fps, 40.7 kB/refill -> 11.87 fps).
+ *
+ * 256 kB gives ~128 kB per refill, so ~9 round-trips instead of 38. Only sockets
+ * that explicitly ask get more than US_DEF_BUFFER_SIZE, so this costs nothing
+ * except for the callers that opt in. */
+#define US_MAX_BUFFER_SIZE 262144U
 #ifndef US_CONNECT_TIMEOUT
 /* Timeout of connect() on UNIX sockets in us; 0 waits indefinitely */
 #define US_CONNECT_TIMEOUT 0L
