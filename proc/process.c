@@ -274,6 +274,15 @@ void process_dumpException(unsigned int n, exc_context_t *ctx)
 	/* use proc_current() as late as possible - to be able to print exceptions in scheduler */
 	thread = proc_current();
 	process = thread->process;
+	if ((process != NULL) && (process_isLive(process) == 0)) {
+		/* Never follow a dangling process pointer while dumping a fault: reading
+		 * process->path here is a nested fault inside the fault handler, which is
+		 * far harder to read back than this line. Report the pointer itself. */
+		len = lib_sprintf(buff, "in thread %lu, process pointer %p is NOT LIVE\n",
+				proc_getTid(thread), (void *)process);
+		(void)posix_write(2, buff, (size_t)len, -1);
+		return;
+	}
 
 	intr = userintr_active();
 

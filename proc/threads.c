@@ -454,6 +454,50 @@ static int _threads_checkSignal(thread_t *selected, process_t *proc, cpu_context
 
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_4 "Function is used externally within assembler code" */
+/* Emit a diagnostic from code that holds threads_common.spinlock.
+ *
+ * ⚠ lib_printf CANNOT be used from the scheduler, and this is a hang rather than
+ * a style question. _threads_schedule always runs with threads_common.spinlock
+ * held (threads_schedule takes it at threads.c:603 across the call, and the
+ * _exceptions.S path releases the caller's only after returning), plus the global
+ * schedulerLocked byte and interrupts masked. lib_printf -> lib_putch ->
+ * log_write then takes log_common.lock (log/log.c:186), and proc_lockSet re-enters
+ * hal_spinlockSet(&threads_common.spinlock) -- a NON-recursive spinlock on this
+ * HAL. So the very first character self-deadlocks this CPU, and every other core
+ * wedges at its next scheduler entry.
+ *
+ * That is not theoretical: it is why no "corrupt process pointer" line has ever
+ * appeared in a log despite the condition being detected, and why a desktop-exit
+ * run's UART output stopped in the MIDDLE of the vm/map.c message -- a timer tick
+ * landed inside that byte-at-a-time print and entered the scheduler. Two such
+ * runs truncated at 8 and 34 characters; a deterministic bug would stop in the
+ * same place both times.
+ *
+ * hal_consolePrint takes only console_common.lock, which the HAL documents as a
+ * leaf lock (hal/aarch64/generic/console.c:80) and which allocates nothing, so it
+ * is safe under any kernel lock. lib_sprintf takes no locks at all.
+ *
+ * The shared buffer is safe because every caller holds threads_common.spinlock,
+ * which is what serialises them.
+ */
+#define THREADS_DIAG_MAX 4u
+
+static char threads_diagBuf[192];
+static unsigned int threads_diagCount;
+
+
+static void _threads_diagEmit(void)
+{
+	/* Each line is ~8 ms of busy-wait on the UART at 115200 with interrupts
+	 * masked and the scheduler locked, which would stall all four cores if the
+	 * condition repeated. The first few carry all the diagnostic value. */
+	if (threads_diagCount < THREADS_DIAG_MAX) {
+		threads_diagCount++;
+		hal_consolePrint(ATTR_BOLD, threads_diagBuf);
+	}
+}
+
+
 int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 {
 	thread_t *current, *selected;
@@ -499,8 +543,10 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 			 * of corruption usually turns into a second, more confusing fault).
 			 * The whole queue is untrustworthy once a non-thread is on it, so
 			 * drop it and move to the next priority. */
-			lib_printf("proc: ready[%u] head %p is not a thread - queue dropped\n",
+			(void)lib_sprintf(threads_diagBuf,
+					"proc: ready[%u] head %p is not a thread - queue dropped\n",
 					i, (void *)selected);
+			_threads_diagEmit();
 			threads_common.ready[i] = NULL;
 			selected = NULL;
 			i++;
@@ -536,8 +582,28 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 			 * Name it here rather than faulting on proc->pmapp inside
 			 * pmap_switch, which is where this lands with nothing to say who
 			 * the victim was. */
-			lib_printf("proc: thread %p (tid %d) has a corrupt process pointer %p\n",
-					(void *)selected, proc_getTid(selected), (void *)proc);
+			/* magic is the discriminator between the two candidate causes, and
+			 * printing it is the whole reason this line is worth the risk of
+			 * emitting anything from here: process_destroy sets magic to exactly
+			 * 0 four statements before vm_kfree(p) (proc/process.c:122), so
+			 * magic==0 with refs==0 means a genuine process_t use-after-free,
+			 * while arbitrary bits mean a stray write landed on the pointer. The
+			 * reads are no riskier than the process_isLive() test just above,
+			 * which already dereferenced this pointer. */
+			(void)lib_sprintf(threads_diagBuf,
+					"proc: thread %p (tid %d) bad process %p magic=%08x refs=%d\n",
+					(void *)selected, proc_getTid(selected), (void *)proc,
+					proc->magic, proc->refs);
+			_threads_diagEmit();
+
+			/* Detach permanently. thread->process is written exactly once
+			 * (proc_threadCreate, below) and never cleared, so a thread that
+			 * outlives its process keeps a dangling pointer for good; leaving it
+			 * in place means thread_destroy's proc_put decrements a freed
+			 * refcount and the next schedule pmap_switches into freed page
+			 * tables. Safe to write here: thread_destroy does its list surgery
+			 * under this same spinlock. */
+			selected->process = NULL;
 			proc = NULL;
 		}
 
@@ -1247,8 +1313,10 @@ static int _proc_threadWakeup(thread_t **queue)
 		 * point where a non-thread would enter the ready queue.  Drop it here,
 		 * loudly, instead of scheduling it. */
 		if (thread_isLive(*queue) == 0) {
-			lib_printf("proc: wakeup on a queue head that is not a thread (queue=%p head=%p) - dropped\n",
+			(void)lib_sprintf(threads_diagBuf,
+					"proc: wakeup on a queue head that is not a thread (queue=%p head=%p) - dropped\n",
 					(void *)queue, (void *)*queue);
+			_threads_diagEmit();
 			*queue = NULL;
 			return 0;
 		}

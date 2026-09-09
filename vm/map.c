@@ -889,8 +889,18 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	 * doubly hard to read back from a register dump. */
 	proc = thread->process;
 	if ((proc != NULL) && (process_isLive(proc) == 0)) {
-		lib_printf("vm: page fault with a corrupt process pointer %p on thread %p\n",
-				(void *)proc, (void *)thread);
+		/* magic==0 with refs==0 means a genuine process_t use-after-free
+		 * (process_destroy clears magic at proc/process.c:122); arbitrary bits
+		 * mean a stray write hit the pointer. Interrupts are enabled here, so
+		 * lib_printf is legal at this site -- unlike the scheduler's copy of this
+		 * check, see the note on _threads_diagEmit in proc/threads.c. */
+		lib_printf("vm: page fault with a corrupt process pointer %p on thread %p"
+				   " (magic=%08x refs=%d)\n",
+				(void *)proc, (void *)thread, proc->magic, proc->refs);
+
+		/* Detach, so thread_destroy's proc_put does not decrement a freed
+		 * refcount and the scheduler cannot pmap_switch into freed page tables. */
+		thread->process = NULL;
 		proc = NULL;
 	}
 
@@ -923,9 +933,26 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	else {
 		process_dumpException(n, ctx);
 
-		LIB_ASSERT_ALWAYS(proc != NULL, "exception in kernel");
-
-		(void)threads_sigpost(proc, thread, signal_segv);
+		if (proc != NULL) {
+			(void)threads_sigpost(proc, thread, signal_segv);
+		}
+		else if (thread->process == NULL) {
+			/* A USER thread whose process_t is gone (detached above). It can
+			 * never make progress -- there is no map to fault into and no
+			 * process to signal -- but panicking here takes the whole board
+			 * down: LIB_ASSERT_ALWAYS reaches hal_cpuReboot(), which on BCM2711
+			 * is `for (;;) hal_cpuHalt()` (hal/aarch64/generic/generic.c:141),
+			 * i.e. a permanent halt with no reboot. That is what turned one
+			 * corrupt pointer into a dead Pi on an X11 session exit. Retire just
+			 * this thread instead and let the other three cores live. */
+			thread->exit = THREAD_END_NOW;
+			(void)hal_cpuReschedule(NULL, NULL);
+		}
+		else {
+			/* Genuine kernel-thread fault: no process to blame, nothing to
+			 * signal. This is the case the assert was written for. */
+			LIB_ASSERT_ALWAYS(0, "exception in kernel thread");
+		}
 	}
 }
 #endif
