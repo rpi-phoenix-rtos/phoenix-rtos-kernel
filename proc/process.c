@@ -2008,6 +2008,11 @@ int process_tlsDestroy(hal_tls_t *tls, vm_map_t *map)
 }
 
 
+/* A missing NULL terminator in a corrupted argv would otherwise walk off the
+ * array forever; no real command line comes close to this. */
+#define PROCESS_GETNAME_MAX_ARGC 256
+
+
 void process_getName(const process_t *process, char *buf, size_t sz)
 {
 	int argc;
@@ -2023,8 +2028,23 @@ void process_getName(const process_t *process, char *buf, size_t sz)
 		sbuf = buf;
 
 		if (process->argv != NULL) {
-			for (argc = 0; process->argv[argc] != NULL; ++argc) {
-				if (space == 0U) {
+			for (argc = 0; argc < PROCESS_GETNAME_MAX_ARGC; ++argc) {
+				if ((process->argv[argc] == NULL) || (space == 0U)) {
+					break;
+				}
+				/* argv and its strings are ONE kernel kmalloc block
+				 * (proc_copyargs), so every entry must be a kernel address.
+				 * Without this test a single garbage entry faults the KERNEL at
+				 * EL1 inside hal_strlen -- observed on 2026-09-09 as 2982
+				 * identical `Exception #37 ... far=0x1` aborts, i.e. a slot
+				 * holding the value 1. It storms because `top` re-enumerates
+				 * every process on each refresh, so one corrupt argv keeps
+				 * faulting; the register dump carried the Game-of-Life xterm's
+				 * command line, and proc_copyargs allocates from the same
+				 * 128-byte class implicated in
+				 * docs/misc/2026-09-02-kernel-heap-corruption-workorder.md.
+				 * Reporting a truncated name beats aborting in the kernel. */
+				if ((addr_t)process->argv[argc] < (addr_t)VADDR_KERNEL) {
 					break;
 				}
 				len = min(hal_strlen(process->argv[argc]) + 1U, space);
@@ -2033,7 +2053,15 @@ void process_getName(const process_t *process, char *buf, size_t sz)
 				sbuf += len;
 				space -= len;
 			}
-			*(sbuf - 1) = '\0';
+			/* sbuf only advanced if at least one entry was copied. Writing
+			 * *(sbuf - 1) unconditionally underflows into buf[-1] when argv[0]
+			 * is NULL or the first entry is rejected above. */
+			if (sbuf != buf) {
+				*(sbuf - 1) = '\0';
+			}
+			else {
+				buf[0] = '\0';
+			}
 		}
 		else {
 			len = hal_strlen(process->path) + 1U;
