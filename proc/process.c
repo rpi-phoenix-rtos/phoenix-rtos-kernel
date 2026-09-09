@@ -280,6 +280,12 @@ void process_dumpException(unsigned int n, exc_context_t *ctx)
 		 * far harder to read back than this line. Report the pointer itself. */
 		len = lib_sprintf(buff, "in thread %lu, process pointer %p is NOT LIVE\n",
 				proc_getTid(thread), (void *)process);
+		/* hal_consolePrint as well as posix_write: the injection run showed this
+		 * line never reaching the UART, because fd 2 of a process whose
+		 * process_t is gone goes nowhere. The console path is the only one that
+		 * can be relied on here, and this is the line that says WHY the dump
+		 * above stops. */
+		hal_consolePrint(ATTR_BOLD, buff);
 		(void)posix_write(2, buff, (size_t)len, -1);
 		return;
 	}

@@ -883,11 +883,57 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 
 	thread = proc_current();
 
-	/* thread->process has twice been found wild-written on this board (see
+	/* thread->process has been found not-live twice on this board (see
 	 * PROCESS_MAGIC).  Validate it ONCE here and use the checked copy for the
 	 * rest of the handler: a fault inside the page-fault handler itself is
-	 * doubly hard to read back from a register dump. */
+	 * doubly hard to read back from a register dump.
+	 *
+	 * NB the older comment here said "wild-written". That is unproven:
+	 * process_destroy clears magic (proc/process.c:122) before vm_kfree, so a
+	 * plain use-after-free reads exactly the same at this check. The printf
+	 * below dumps magic/refs precisely to tell the two apart. */
 	proc = thread->process;
+
+#ifdef MAP_INJECT_DEAD_PROCESS
+	/* TEST-ONLY, never in a shipped build. The recovery path below (retire the
+	 * thread, keep the board alive) is otherwise unexercised: the real condition
+	 * fires in roughly 1 of 6 X11 session exits, and a soak that comes back green
+	 * cannot distinguish "recovery works" from "the corruption did not happen" --
+	 * which matters because this project has already seen a kernel edit perturb
+	 * the timing enough to hide this corruption entirely.
+	 *
+	 * So point one user thread at a deliberately non-live process_t after N user
+	 * faults and watch the board survive. Build with
+	 * CONSOLE_CFLAGS+=-DMAP_INJECT_DEAD_PROCESS, or -DMAP_INJECT_DEAD_PROCESS in
+	 * the kernel CFLAGS; the counter makes it fire well after boot rather than on
+	 * the first fault, so init comes up normally. */
+	{
+		static process_t map_deadProcess;
+		static unsigned int map_injectCount;
+
+		/* Count EVERY abort, not just user-PC ones. Filtering on
+		 * hal_exceptionsPC(ctx) < VADDR_KERNEL was wrong and cost three runs
+		 * with no output at all: the faults that actually reach this handler on
+		 * this board are largely KERNEL-PC user-copy faults (an AF_UNIX recv
+		 * touching a just-forked COW buffer, per the note above), so the filter
+		 * excluded precisely the class that occurs. */
+		if (proc != NULL) {
+			map_injectCount++;
+			/* Report the scale too, so a run whose threshold was set wrong still
+			 * tells us how many user faults a boot+desktop actually takes. */
+			if ((map_injectCount % 1U) == 0U) {
+				lib_printf("vm: INJECT: user fault count %u\n", map_injectCount);
+			}
+			if (map_injectCount == (unsigned int)MAP_INJECT_DEAD_PROCESS) {
+				lib_printf("vm: INJECT: pointing thread %p at a dead process_t %p\n",
+						(void *)thread, (void *)&map_deadProcess);
+				map_deadProcess.magic = 0U; /* exactly what process_destroy leaves */
+				thread->process = &map_deadProcess;
+				proc = thread->process;
+			}
+		}
+	}
+#endif
 	if ((proc != NULL) && (process_isLive(proc) == 0)) {
 		/* magic==0 with refs==0 means a genuine process_t use-after-free
 		 * (process_destroy clears magic at proc/process.c:122); arbitrary bits
