@@ -190,6 +190,7 @@ int vm_objectPut(vm_object_t *o)
 static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, page_t **out, size_t *got)
 {
 	page_t *p;
+	unsigned int zeroRetry;
 	void *buf, *v;
 	size_t i, span, total, avail, target;
 	int r, err = EOK;
@@ -274,6 +275,7 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 	 * where a READ RPC can return short). Bytes past `total` are zero-filled per page
 	 * below, so a short/EOF read never leaves stale data in a mapped page. */
 	total = 0;
+	zeroRetry = 0u;
 	while (total < span) {
 		r = proc_read(oid, (off_t)(offs + total), (char *)buf + total, span - total, 0);
 		if (r < 0) {
@@ -281,10 +283,31 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 			break;
 		}
 		if (r == 0) {
-			/* Server reported EOF earlier than the object size promised; the trailing
-			 * zero-fill covers the gap rather than spinning. */
+			/* EOF before `span`, which is already clamped to the object's own size --
+			 * so the store is contradicting what it told us the object contains. The
+			 * old code broke straight out and let the per-page zero-fill below cover
+			 * the gap, which SILENTLY hands the process a zeroed page where file data
+			 * belongs. That is not a theoretical concern: a zeroed .data page is how
+			 * libphoenix's atexit_common.head came up NULL, killing a process in
+			 * _atexit_init() before main() with no diagnostic at all (2070 identical
+			 * Data Aborts in one boot; libphoenix 160e916 has the userspace half).
+			 *
+			 * NFS READ can return 0 transiently, so retry a bounded number of times
+			 * before accepting it. If it persists, still zero-fill -- failing the
+			 * fault would turn a recoverable read into a dead process, and a
+			 * genuinely truncated file must not wedge the pager -- but SAY SO, so the
+			 * next occurrence is attributable instead of silent. */
+			if (zeroRetry < 5u) {
+				++zeroRetry;
+				continue;
+			}
+			lib_printf("vm: object EOF at %u/%u bytes before its size (port %u, offs %u) -- "
+					"zero-filling the remainder; a mapped page will read as zeros\n",
+				(unsigned int)total, (unsigned int)span, (unsigned int)oid.port,
+				(unsigned int)offs);
 			break;
 		}
+		zeroRetry = 0u;
 		if ((size_t)r > (span - total)) {
 			/* A backing store must never report more bytes than it was asked
 			 * for. Trusting it would push `total` past the window, and the
