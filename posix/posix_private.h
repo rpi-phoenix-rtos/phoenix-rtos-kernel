@@ -5,8 +5,8 @@
  *
  * Private
  *
- * Copyright 2021 Phoenix Systems
- * Author: Pawel Pisarczyk
+ * Copyright 2021, 2026 Phoenix Systems
+ * Author: Pawel Pisarczyk, Ziemowit Leszczynski
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -17,11 +17,7 @@
 #include "hal/hal.h"
 #include "proc/proc.h"
 #include "posix.h"
-
-/* This define is used against oid_t.id which is __u32
- * hence the implicit bit value instead of -1
- */
-#define US_PORT 0xffffffffU /* FIXME */
+#include "usocket.h"
 
 
 #define SIGHUP    1
@@ -103,6 +99,7 @@ typedef struct {
 	lock_t lock;
 	int type;
 	char *path; /* canonical abs path captured at open (for fchdir); NULL if none */
+	usocket_t *sock; /* ftUnixSocket: reference to the socket */
 } open_file_t;
 
 
@@ -198,73 +195,5 @@ int inet_setfl(unsigned int socket, unsigned int flags);
 
 int inet_getfl(unsigned int socket);
 
-
-int unix_accept4(unsigned int socket, struct sockaddr *address, socklen_t *address_len, unsigned int flags);
-
-
-int unix_bind(unsigned int socket, const struct sockaddr *address, socklen_t address_len);
-
-
-int unix_connect(unsigned int socket, const struct sockaddr *address, socklen_t address_len);
-
-
-int unix_getpeername(unsigned int socket, struct sockaddr *address, socklen_t *address_len);
-
-
-int unix_getsockname(unsigned int socket, struct sockaddr *address, socklen_t *address_len);
-
-
-int unix_getsockopt(unsigned int socket, int level, int optname, void *optval, socklen_t *optlen);
-
-
-int unix_listen(unsigned int socket, int backlog);
-
-
-ssize_t unix_recvfrom(unsigned int socket, void *msg, size_t len, unsigned int flags, struct sockaddr *src_addr, socklen_t *src_len);
-
-
-ssize_t unix_sendto(unsigned int socket, const void *msg, size_t len, unsigned int flags, const struct sockaddr *dest_addr, socklen_t dest_len);
-
-
-ssize_t unix_recvmsg(unsigned int socket, struct msghdr *msg, unsigned int flags);
-
-
-ssize_t unix_sendmsg(unsigned int socket, const struct msghdr *msg, unsigned int flags);
-
-
-int unix_socket(int domain, unsigned int type, int protocol);
-
-
-int unix_socketpair(int domain, unsigned int type, int protocol, int sv[2]);
-
-
-int unix_shutdown(unsigned int socket, int how);
-
-
-int unix_unlink(unsigned int socket);
-
-
-int unix_setsockopt(unsigned int socket, int level, int optname, const void *optval, socklen_t optlen);
-
-
-int unix_setfl(unsigned int socket, unsigned int flags);
-
-
-int unix_getfl(unsigned int socket);
-
-
-int unix_close(unsigned int socket);
-
-
-int unix_poll(unsigned int socket, unsigned short events);
-
-
-/* Block until an AF_UNIX socket changes readiness or `deadline` (absolute,
- * proc_gettime raw units) passes — the readiness-woken backend for posix_poll.
- * Returns -EINTR if the calling process is being torn down, else 0. */
-int unix_pollWait(time_t deadline);
-
-
-void unix_sockets_init(void);
 
 #endif
