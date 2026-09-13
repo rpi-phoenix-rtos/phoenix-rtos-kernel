@@ -1294,6 +1294,27 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 
 	trace_eventProcessExec(current);
 
+#ifdef EXEC_ENTRY_TRACE
+	/* DIAGNOSTIC (-DEXEC_ENTRY_TRACE), for the `premain-hang` defect: a launch
+	 * that produces no output at all and never returns the shell's prompt.
+	 *
+	 * This is the LAST kernel statement before the EL1->EL0 hand-off, and every
+	 * exec path converges here (proc_fileSpawn, proc_execve and the syspage
+	 * spawn all end in process_exec), so it splits the fault cleanly in two:
+	 *
+	 *   printed, but no libc marker follows -> the ELF loaded and the CPU
+	 *       entered user mode; the hang is in crt0, before _libc_init;
+	 *   not printed at all                  -> the fault is still kernel-side,
+	 *       in program load or scheduling.
+	 *
+	 * A watchdog on proc_spawn() cannot answer this: psh runs external commands
+	 * through execve(), so proc_spawn() is never on that path and its silence
+	 * means nothing.
+	 */
+	lib_printf("proc: EXEC-ENTRY pid=%d entry=%p '%s'\n", process_getPid(current->process),
+		(void *)entry, (current->process->path != NULL) ? current->process->path : "?");
+#endif
+
 	hal_cpuDisableInterrupts();
 	_hal_cpuSetKernelStack(current->kstack + current->kstacksz);
 	hal_cpuSetGot(current->process->got);
