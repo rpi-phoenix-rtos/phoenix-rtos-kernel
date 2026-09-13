@@ -1376,9 +1376,55 @@ static int proc_spawn(vm_object_t *object, const syspage_prog_t *prog, vm_map_t 
 
 	pid = proc_start(proc_spawnThread, &spawn, path);
 	if (pid > 0) {
+#ifdef SPAWN_WATCHDOG
+		/* DIAGNOSTIC (-DSPAWN_WATCHDOG=<seconds>), for the `premain-hang` defect:
+		 * a launch where the child never produces a single byte of output and the
+		 * shell never gets its prompt back.
+		 *
+		 * The parent is released here once the child has finished process_load(),
+		 * so this one bit splits the search in half and needs no thread lookup:
+		 *
+		 *   watchdog FIRES  -> the child is stuck at or before the ELF load, i.e.
+		 *                      inside the kernel (never scheduled, or blocked in
+		 *                      the load's IPC to the fs server, which waits with
+		 *                      NO timeout);
+		 *   watchdog SILENT -> the load completed and the child reached user mode,
+		 *                      so the fault is in crt0, before _libc_init.
+		 *
+		 * Printing happens with the spinlock RELEASED: lib_printf() under a held
+		 * spinlock with interrupts off is how this kernel has deadlocked before.
+		 */
+		time_t wdRaw, wdOffs, wdDeadline;
+		unsigned int wdWarned = 0;
+
+		proc_gettime(&wdRaw, &wdOffs);
+		wdDeadline = wdRaw + ((time_t)SPAWN_WATCHDOG * 1000LL * 1000LL);
+#endif
 		hal_spinlockSet(&spawn.sl, &sc);
 		while (spawn.state == FORKING) {
+#ifdef SPAWN_WATCHDOG
+			(void)proc_threadWait(&spawn.wq, &spawn.sl, wdDeadline, &sc);
+			if (spawn.state == FORKING) {
+				if (wdWarned < 6u) {
+					hal_spinlockClear(&spawn.sl, &sc);
+					wdWarned++;
+					lib_printf("proc: SPAWN-WATCHDOG pid=%d still loading after %u s: '%s'\n",
+						pid, wdWarned * (unsigned int)SPAWN_WATCHDOG, path);
+					proc_gettime(&wdRaw, &wdOffs);
+					wdDeadline = wdRaw + ((time_t)SPAWN_WATCHDOG * 1000LL * 1000LL);
+					hal_spinlockSet(&spawn.sl, &sc);
+				}
+				else {
+					/* Cap reached: go back to waiting indefinitely. Leaving the
+					 * expired deadline in place would make every proc_threadWait()
+					 * return at once and spin the CPU hot on a lock cycle, turning
+					 * a passive diagnostic into a second fault. */
+					wdDeadline = 0;
+				}
+			}
+#else
 			(void)proc_threadWait(&spawn.wq, &spawn.sl, 0, &sc);
+#endif
 		}
 		hal_spinlockClear(&spawn.sl, &sc);
 	}

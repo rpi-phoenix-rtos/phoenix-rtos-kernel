@@ -35,6 +35,13 @@ ifneq (,$(filter aarch64%,$(TARGET_FAMILY)))
 endif
 CPPFLAGS += -DVERSION=\"$(VERSION)\" -DRELEASE=\"$(RELEASE)\" -DTARGET_FAMILY=\"$(TARGET_FAMILY)\"
 
+# Diagnostic defines, off by default and passed in from the build wrapper, e.g.
+#   KERNEL_DIAG='-DDEBUG_THREADS -DSPAWN_WATCHDOG=20' make ...
+# DEBUG_THREADS turns the scheduler's ready-list membership checks
+# (LIB_ASSERT_THREADS) back on -- they are compiled out otherwise, which leaves
+# ready-list/bitmask divergence completely undetected.
+CPPFLAGS += $(KERNEL_DIAG)
+
 # uncomment to enable stack canary checking
 # CPPFLAGS += -DSTACK_CANARY
 
