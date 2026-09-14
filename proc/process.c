@@ -1225,6 +1225,23 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	current->process->argv = spawn->argv;
 	current->process->envp = spawn->envp;
 
+#ifdef EXEC_ENTRY_TICK
+	/* '[' = entered process_exec. See the '~' tick below for why these are single
+	 * characters and not prints. Together they split a launch that produces no
+	 * output at all into four cases, by what appears AFTER the command echo:
+	 *   (nothing)  -> never reached process_exec: spawn / scheduling
+	 *   {          -> hung in process_load: the ELF load, which is EAGER here
+	 *                 (process->lazy = 0) and whose fault-path IPC to the fs
+	 *                 server waits with NO timeout (proc/msg.c, timeout == 0)
+	 *   {}         -> hung between the load and the hand-off
+	 *   {}~        -> reached user mode; the fault is past EL0 entry
+	 *
+	 * Characters chosen by COUNTING them in a real boot log, not by taste: '['
+	 * looked obvious and occurs 166 times (every ANSI escape), which would have
+	 * made the reading meaningless. '{', '}' and '~' occur 0, 0 and 2 times. */
+	hal_consolePutch('{');
+#endif
+
 #ifndef NOMMU
 	err = vm_mapCreate(&current->process->map, (void *)(VADDR_MIN + SIZE_PAGE), (void *)VADDR_USR_MAX);
 	if (err == EOK) {
@@ -1258,6 +1275,9 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	if (err == EOK) {
 		pmap_switch(current->process->pmapp);
 		err = process_load(current->process, spawn->object, spawn->offset, spawn->size, &stack, &entry);
+#ifdef EXEC_ENTRY_TICK
+		hal_consolePutch('}'); /* ELF load returned (see the '{' tick above) */
+#endif
 	}
 
 	if (err == EOK) {
@@ -1614,6 +1634,18 @@ static void process_vforkThread(void *arg)
 	spinlock_ctx_t sc;
 	int ret;
 
+#ifdef EXEC_ENTRY_TICK
+	/* '!' = the vfork CHILD THREAD is running. Three independent silent launches
+	 * show every later tick at zero -- including '$', the first statement of
+	 * proc_execve -- so the child never reaches its first syscall. This tick asks
+	 * the remaining question: does the child thread run at all?
+	 *   !      -> it ran, and stops in the vfork handshake below
+	 *   nothing-> it was created and never scheduled
+	 * '!' occurs 0 times in a real boot log (checked, as '[' and '(' were not and
+	 * occur 166 and 61 times). */
+	hal_consolePutch('!');
+#endif
+
 	current = proc_current();
 	parent = spawn->parent;
 	ret = posix_clone(process_getPid(spawn->parent->process));
@@ -1938,6 +1970,15 @@ static int process_execve(thread_t *current)
 
 int proc_execve(const char *path, char **argv, char **envp)
 {
+#ifdef EXEC_ENTRY_TICK
+	/* '(' = entered proc_execve. The '{' tick inside process_exec never fires on a
+	 * silent launch, so the child is stopping BEFORE that -- and proc_execve does
+	 * proc_lookup() + vm_objectGet() first, both IPC to the fs server, which waits
+	 * with NO timeout. '$' with no '^' means the lookup is where it stops.
+	 * '(' and ')' were the obvious pick and occur 61 times each in a real boot
+	 * log; '$' and '^' occur 0. Count the candidates, do not guess. */
+	hal_consolePutch('$');
+#endif
 	thread_t *current;
 	char *kpath;
 	process_spawn_t sspawn, *spawn;
@@ -1972,6 +2013,9 @@ int proc_execve(const char *path, char **argv, char **envp)
 	}
 
 	err = proc_lookup(path, NULL, &oid);
+#ifdef EXEC_ENTRY_TICK
+	hal_consolePutch('^'); /* path lookup returned (see the '$' tick above) */
+#endif
 	if (err < 0) {
 		vm_kfree(kpath);
 		vm_kfree(argv);
