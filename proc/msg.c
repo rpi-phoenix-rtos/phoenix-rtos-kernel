@@ -346,6 +346,12 @@ static int msg_opack(kmsg_t *kmsg)
 }
 
 
+#ifdef MSG_SEND_WATCHDOG
+#define WD_TIMEOUT wdDeadline
+#else
+#define WD_TIMEOUT 0
+#endif
+
 int proc_send(u32 port, msg_t *msg)
 {
 	port_t *p;
@@ -354,6 +360,16 @@ int proc_send(u32 port, msg_t *msg)
 	thread_t *sender;
 	spinlock_ctx_t sc;
 	int state = msg_rejected;
+#ifdef MSG_SEND_WATCHDOG
+	/* DIAGNOSTIC (-DMSG_SEND_WATCHDOG=<seconds>): the `premain-hang` bisect ends
+	 * in an open() that never returns, i.e. this round trip. kmsg.state says
+	 * which half is stuck and nothing else can:
+	 *   msg_waiting  -> the server never took the request off the port
+	 *   msg_received -> the server took it and never responded
+	 * One shot: it reports once and then goes back to waiting forever, so the
+	 * only behaviour change is a single line. */
+	time_t wdRaw, wdOffs, wdDeadline = 0;
+#endif
 
 	/* TODO - check if msg pointer belongs to user vm_map */
 	if (msg == NULL) {
@@ -377,6 +393,14 @@ int proc_send(u32 port, msg_t *msg)
 
 	msg_ipack(&kmsg);
 
+#ifdef MSG_SEND_WATCHDOG
+	/* Computed BEFORE the port spinlock: proc_gettime() takes a lock of its own
+	 * and nesting it under p->spinlock is exactly the shape that has deadlocked
+	 * this kernel before. */
+	proc_gettime(&wdRaw, &wdOffs);
+	wdDeadline = wdRaw + ((time_t)MSG_SEND_WATCHDOG * 1000LL * 1000LL);
+#endif
+
 	hal_spinlockSet(&p->spinlock, &sc);
 
 	if (p->closed != 0) {
@@ -395,13 +419,27 @@ int proc_send(u32 port, msg_t *msg)
 				 * and blocking a whole system (p->spinlock is held). When thread is running normally, the code behaves just like with
 				 * interruptible wait, without spinning on while loop on each interrupt in msg_received state.
 				 */
-				err = proc_threadWait(&kmsg.threads, &p->spinlock, 0, &sc);
+				err = proc_threadWait(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
 			}
 			else {
-				err = proc_threadWaitInterruptible(&kmsg.threads, &p->spinlock, 0, &sc);
+				err = proc_threadWaitInterruptible(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
 			}
 
 			state = kmsg.state;
+#ifdef MSG_SEND_WATCHDOG
+			if ((wdDeadline != 0) && (state != msg_responded) && (state != msg_rejected)) {
+				int wdState = state;
+
+				wdDeadline = 0; /* one shot; the wait is unbounded again from here */
+				err = EOK;      /* our own deadline is not a real error */
+				hal_spinlockClear(&p->spinlock, &sc);
+				lib_printf("proc: SEND-WATCHDOG port=%u state=%d (%s)\n", port, wdState,
+					(wdState == msg_waiting) ? "waiting: server never took it" :
+						((wdState == msg_received) ? "received: server never responded" : "?"));
+				hal_spinlockSet(&p->spinlock, &sc);
+				state = kmsg.state; /* may have changed while we were unlocked */
+			}
+#endif
 			if ((err != EOK) && (state == msg_waiting)) {
 				LIST_REMOVE(&p->kmessages, &kmsg);
 				break;
