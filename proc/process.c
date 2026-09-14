@@ -1649,6 +1649,9 @@ static void process_vforkThread(void *arg)
 	current = proc_current();
 	parent = spawn->parent;
 	ret = posix_clone(process_getPid(spawn->parent->process));
+#ifdef EXEC_ENTRY_TICK
+	hal_consolePutch('&'); /* posix_clone returned */
+#endif
 	if (ret < 0) {
 		proc_spawnThreadEnd(spawn, ret);
 	}
@@ -1663,6 +1666,15 @@ static void process_vforkThread(void *arg)
 		(void)proc_threadWait(&spawn->wq, &spawn->sl, 0, &sc);
 	}
 	hal_spinlockClear(&spawn->sl, &sc);
+#ifdef EXEC_ENTRY_TICK
+	/* '|' = the vfork handshake completed. A silent launch reaching '!' but not
+	 * '$' stops somewhere in this function; '&' and '|' split that into
+	 * posix_clone(), the handshake wait (which is an INFINITE proc_threadWait,
+	 * though the condition is re-checked under the spinlock so a plain lost
+	 * wakeup is unlikely), and everything after -- the parent-kstack kmalloc and
+	 * memcpy. */
+	hal_consolePutch('|');
+#endif
 
 	/* Copy parent kernel stack */
 	current->parentkstack = vm_kmalloc(process_parentKstacksz(parent));
