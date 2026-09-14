@@ -1691,6 +1691,9 @@ static void process_vforkThread(void *arg)
 	hal_memcpy(&current->tls, &parent->tls, sizeof(hal_tls_t));
 
 	ret = proc_resourcesCopy(parent->process);
+#ifdef EXEC_ENTRY_TICK
+	hal_consolePutch('"'); /* proc_resourcesCopy returned */
+#endif
 	if (ret < 0) {
 		vm_kfree(current->parentkstack);
 
@@ -1716,6 +1719,14 @@ static void process_vforkThread(void *arg)
 	if (current->tls.tls_base != 0U) {
 		hal_cpuTlsSet(&current->tls, current->context);
 	}
+
+#ifdef EXEC_ENTRY_TICK
+	/* '`' = everything in process_vforkThread is done and the child is about to
+	 * resume in userspace at the vfork() return. A silent launch showing '|' but
+	 * not '$' stops between the handshake and here; '"' and '`' split that into
+	 * the parent-kstack kmalloc+memcpy, proc_resourcesCopy, and the map switch. */
+	hal_consolePutch('`');
+#endif
 
 	/* Start execution from parent suspend point */
 	proc_longjmp(parent->context);
