@@ -2151,6 +2151,35 @@ static int _proc_lockClear(lock_t *lock)
 #ifdef DEBUG_THREADS
 	thread_t *current = proc_current();
 
+	/* Name the CALLER, not just the thread. Every userspace mutex is called
+	 * "user.mutex" and the assert below gives a tid but no address, so the
+	 * offending call site has survived three wrong diagnoses. The thread's saved
+	 * context holds the userspace PC it will return to, which addr2line resolves.
+	 * This catches the call wherever it came from -- libphoenix, a ported
+	 * library, or the application -- which a probe inside any one of them cannot.
+	 *
+	 * MUST come BEFORE the assert: LIB_ASSERT_ALWAYS does not return when its
+	 * condition fails, so downstream of it the compiler knows lock->owner != NULL
+	 * and dead-code-eliminates any branch testing it -- which is exactly what
+	 * happened to the first version of this probe. It compiled, linked, and its
+	 * format string was simply absent from threads.o. */
+	if ((lock->owner == NULL) && (current->context != NULL)) {
+		/* ⚠ READ THE CAVEAT BEFORE TRUSTING THIS. `thread->context` is whatever
+		 * the SCHEDULER last saved, NOT the syscall entry frame, so across three
+		 * runs it produced: a nonsense value, one genuine userspace address, and
+		 * a pair of kernel addresses. Only a reading that lands inside the
+		 * process's text means anything -- repeat until one does, and discard the
+		 * rest. The one good sample resolved to `mutexUnlock` in
+		 * libphoenix/arch/aarch64/syscalls.S, i.e. the syscall STUB, so pc names
+		 * the stub and x[30] (AAPCS64's link register) is meant to name its
+		 * caller -- but x[30] is only the caller when the saved frame really is
+		 * the user one.
+		 * Naming the caller properly needs the syscall-entry user frame, which
+		 * this pointer does not give. That is the work still to do. */
+		lib_printf("proc: STRAY-UNLOCK lock '%s' user pc=%p lr=%p\n", lock->name,
+				(void *)current->context->pc, (void *)current->context->x[30]);
+	}
+
 	LIB_ASSERT_THREADS(lock->owner != NULL, "lock: %s, pid: %d, tid: %d, unlock on not locked lock",
 			lock->name, (current->process != NULL) ? process_getPid(current->process) : 0, proc_getTid(current));
 
