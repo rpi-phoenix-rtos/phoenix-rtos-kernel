@@ -2226,6 +2226,21 @@ int proc_lockWait(thread_t **queue, lock_t *lock, time_t timeout)
 		return -EINVAL;
 	}
 
+#ifdef DEBUG_THREADS
+	/* DIAGNOSTIC: `_proc_lockClear()` below reports "unlock on not locked lock",
+	 * and so does the mutexUnlock() syscall path -- the same text from two very
+	 * different causes. This marker separates them: a condition wait on a mutex
+	 * the caller does not own lands here, and then returns -EPERM WITHOUT waiting
+	 * and WITHOUT re-acquiring the mutex, which is a far worse bug than a stray
+	 * unlock.
+	 * Read outside the spinlock on purpose. This is a racy read of lock->owner,
+	 * which is fine for a diagnostic, whereas lib_printf() while holding a
+	 * spinlock with interrupts disabled is how this kernel has deadlocked before. */
+	if (lock->owner == NULL) {
+		lib_printf("proc: LOCKWAIT-UNOWNED lock '%s'\n", lock->name);
+	}
+#endif
+
 	hal_spinlockSet(&lock->spinlock, &sc);
 
 	err = _proc_lockClear(lock);
