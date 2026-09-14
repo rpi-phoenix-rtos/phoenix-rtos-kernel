@@ -1294,6 +1294,20 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 
 	trace_eventProcessExec(current);
 
+#ifdef EXEC_ENTRY_TICK
+	/* DIAGNOSTIC (-DEXEC_ENTRY_TICK): the CHEAPEST possible marker at the EL1->EL0
+	 * hand-off -- one character, no varargs, no formatting. EXEC_ENTRY_TRACE below
+	 * does the same job with a full lib_printf() and SUPPRESSES the very fault it
+	 * was built to split (0/33 against 6/44, p = 0.0091), so it answers nothing.
+	 * A single putch is orders of magnitude shorter; if the fault still occurs with
+	 * it enabled, the tick count says which side of the hand-off the child died on:
+	 * one tick per exec, so a silent launch carrying its tick reached user mode
+	 * (fault in crt0, before _libc_init) and one without it did not (fault still
+	 * kernel-side). Pair it with LIBC_STARTUP_TRACE=min, which AMPLIFIES the fault
+	 * ~7x (13.6% vs 1.9%) and makes the bench affordable. */
+	hal_consolePutch('~');
+#endif
+
 #ifdef EXEC_ENTRY_TRACE
 	/* DIAGNOSTIC (-DEXEC_ENTRY_TRACE), for the `premain-hang` defect: a launch
 	 * that produces no output at all and never returns the shell's prompt.
