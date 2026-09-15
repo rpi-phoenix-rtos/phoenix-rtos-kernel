@@ -19,17 +19,44 @@
 #include "posix_private.h"
 
 
+/* Cached /dev/netsocket, resolved on the first socket() and kept for the life of
+ * the system (the socket server's port does not change). */
+static struct {
+	oid_t oid;
+	int resolved;
+} inet_common;
+
+
+/* Resolving PATH_SOCKSRV on EVERY socket() deadlocks the server that owns "/".
+ *
+ * A path lookup is answered by the filesystem that owns the root, via mtLookup.
+ * So when that filesystem's own thread calls socket(), the lookup is sent to the
+ * port it is itself supposed to be servicing, and nothing ever answers it. That
+ * is not hypothetical: it is what wedged nfs-fs -- which is single-threaded and
+ * IS "/" on an NFS root -- every time libnfs had to open a fresh socket to
+ * reconnect. Behind the wedged server, every process blocked on its first
+ * filesystem request, so a launch hung while opening its own binary.
+ *
+ * Resolve once and cache. A race between two first callers resolves the same
+ * oid twice and stores the same value; release/acquire ordering keeps the oid
+ * visible before the flag that publishes it.
+ */
 static ssize_t socksrvcall(msg_t *msg)
 {
 	oid_t oid;
 	ssize_t err;
 
-	err = proc_lookup(PATH_SOCKSRV, NULL, &oid);
-	if (err < 0) {
-		return err;
+	if (__atomic_load_n(&inet_common.resolved, __ATOMIC_ACQUIRE) == 0) {
+		err = proc_lookup(PATH_SOCKSRV, NULL, &oid);
+		if (err < 0) {
+			return err;
+		}
+
+		inet_common.oid = oid;
+		__atomic_store_n(&inet_common.resolved, 1, __ATOMIC_RELEASE);
 	}
 
-	err = proc_send(oid.port, msg);
+	err = proc_send(inet_common.oid.port, msg);
 	if (err < 0) {
 		return err;
 	}
