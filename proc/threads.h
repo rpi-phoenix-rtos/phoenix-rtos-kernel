@@ -35,14 +35,14 @@
 #endif
 
 _Static_assert(NPRIOS % 2U == 0U, "NPRIOS should be even");
-_Static_assert(NPRIOS >= 16U, "NPRIOS should be greater than 16");
+_Static_assert(NPRIOS >= 16U, "NPRIOS should be >=16");
+
+#define PRIO_OFFSET ((int)NPRIOS / 2)
+#define MAX_PRIO    (PRIO_OFFSET - 1) /* Maximum priority value, of the lowest criticality (scheduled when no threads with p < MAX_PRIO are ready) */
+#define MIN_PRIO    (-PRIO_OFFSET)    /* Minimum priority value, of the HIGHEST criticality (scheduled before MIN_PRIO + 1) */
 
 typedef s8 priority_t;
-_Static_assert(NPRIOS <= (1UL << (sizeof(priority_t) * 8U)), "NPRIOS must fit into priority_t range");
-
-#define PRIO_OFFSET (NPRIOS / 2U)
-#define MAX_PRIO    (((priority_t)PRIO_OFFSET) - 1) /* Maximum priority value, of the lowest criticality (scheduled when no threads with p < MAX_PRIO are ready) */
-#define MIN_PRIO    (-((priority_t)PRIO_OFFSET))    /* Minimum priority value, of the HIGHEST criticality (scheduled before MIN_PRIO + 1) */
+_Static_assert(PRIO_OFFSET <= 128, "priority range must fit into priority_t");
 
 /* Stamped into every live thread_t and cleared when it is destroyed, so the two
  * places that take a caller-supplied `thread_t **` -- the wait-queue wakeups --
@@ -226,6 +226,9 @@ void proc_gettime(time_t *raw, time_t *offs);
 
 
 int proc_settime(time_t offs);
+
+
+int proc_clockTimeoutToAbsTime(int clock, time_t timeout, time_t *rabstime);
 
 
 __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx);
