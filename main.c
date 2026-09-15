@@ -28,6 +28,22 @@
 #include "perf/perf.h"
 #include "log/log.h"
 
+/* Early bring-up progress markers, between the kernel banner and the first
+ * syspage program. They are the only visibility into kernel init if a future
+ * change hangs in _vm_init/_proc_init, so they are kept -- but this is the
+ * SHARED main.c, and unconditional ATTR_USER prints here land on every Phoenix
+ * board, not just the RPi4 this port was brought up on.
+ *
+ *   KERNEL_DIAG='-DKERNEL_BOOT_TRACE' make ...
+ */
+#ifdef KERNEL_BOOT_TRACE
+#define MAIN_BOOT_TRACE(s) hal_consolePrint(ATTR_USER, (s))
+#else
+#define MAIN_BOOT_TRACE(s) \
+	do { \
+	} while (0)
+#endif
+
 
 static struct {
 	vm_map_t kmap;
@@ -126,13 +142,13 @@ int main(void)
 	lib_printf("hal: %s\n", hal_timerFeatures(s, sizeof(s)));
 
 	_vm_init(&main_common.kmap, &main_common.kernel);
-	hal_consolePrint(ATTR_USER, "hi: vm-done\n");
+	MAIN_BOOT_TRACE("hi: vm-done\n");
 	(void)_perf_init(&main_common.kmap);
-	hal_consolePrint(ATTR_USER, "hi: perf-done\n");
+	MAIN_BOOT_TRACE("hi: perf-done\n");
 	(void)_proc_init(&main_common.kmap, &main_common.kernel);
-	hal_consolePrint(ATTR_USER, "hi: proc-done\n");
+	MAIN_BOOT_TRACE("hi: proc-done\n");
 	_syscalls_init();
-	hal_consolePrint(ATTR_USER, "hi: syscalls-done\n");
+	MAIN_BOOT_TRACE("hi: syscalls-done\n");
 
 #if 0
 	/*
@@ -152,7 +168,7 @@ int main(void)
 	(void)main_initthr;
 #else
 	(void)proc_start(main_initthr, NULL, (const char *)"init");
-	hal_consolePrint(ATTR_USER, "hi: proc-start-done\n");
+	MAIN_BOOT_TRACE("hi: proc-start-done\n");
 #endif
 
 	/* SMP-D-5: publish primary-ready flag. Secondaries spin-wait on
@@ -185,7 +201,7 @@ int main(void)
 
 	/* Enter the first scheduled context before unmasking timer IRQs in this bootstrap context. */
 	(void)hal_cpuReschedule(NULL, NULL);
-	hal_consolePrint(ATTR_USER, "hi: reschedule-done\n");
+	MAIN_BOOT_TRACE("hi: reschedule-done\n");
 
 	return 0;
 }

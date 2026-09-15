@@ -40,6 +40,9 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\" -DRELEASE=\"$(RELEASE)\" -DTARGET_FAMILY=\"
 # DEBUG_THREADS turns the scheduler's ready-list membership checks
 # (LIB_ASSERT_THREADS) back on -- they are compiled out otherwise, which leaves
 # ready-list/bitmask divergence completely undetected.
+# KERNEL_BOOT_TRACE re-enables main.c's early bring-up markers ("hi: vm-done",
+# ...), the only visibility between the kernel banner and the first syspage
+# program. Off by default: main.c is shared, so they printed on every board.
 CPPFLAGS += $(KERNEL_DIAG)
 
 # uncomment to enable stack canary checking
