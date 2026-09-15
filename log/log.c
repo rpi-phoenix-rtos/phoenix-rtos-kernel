@@ -37,6 +37,19 @@
 #define RPI4_LOG_TO_FILE 0
 #endif
 
+/* Mirror every klog byte to the console as it is written, giving the kernel its
+ * own complete deterministic boot log.
+ *
+ * OPT-IN, because this is shared kernel code: an unconditional per-byte console
+ * mirror changes console behaviour for every Phoenix board, and only the boards
+ * that want a full serial boot log should pay for it. The RPi4 board_config.h
+ * sets it; `RPI4_LOG_TO_FILE` (USER mode) still suppresses it on top, since
+ * there the rpi4-klogd daemon captures the ring to /var/log/messages instead.
+ * The panic path is never gated either way. */
+#ifndef KLOG_CONSOLE_MIRROR
+#define KLOG_CONSOLE_MIRROR 0
+#endif
+
 #define TCGETS 0x405c7401UL
 
 
@@ -432,7 +445,7 @@ size_t log_write(const char *data, size_t len)
 		 * log text.) */
 		for (i = 0; i < len; ++i) {
 			_log_push(data[i]);
-#if !RPI4_LOG_TO_FILE
+#if KLOG_CONSOLE_MIRROR && !RPI4_LOG_TO_FILE
 			/* DEBUG mode (default): mirror every klog byte to the UART, the
 			 * kernel's own complete deterministic boot log. In USER mode
 			 * (RPI4_LOG_TO_FILE) this normal-path mirror is suppressed to keep
