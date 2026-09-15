@@ -605,12 +605,21 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 
 			/* Zero ONLY the .bss tail that shares the last file-backed page (COW'd
 			 * from the file, so its bytes past p_filesz are garbage). The rest of
-			 * .bss lives in the anonymous mapping above, which the VM demand-zeroes
-			 * per page on first fault (amap.c). Eagerly memset-ing the whole .bss
-			 * here touched every page at exec time -- for a large .bss (e.g. a 26 MB
-			 * game binary = ~14k pages) that is a long exec window under map->lock
-			 * that intermittently hung over flaky netboot NFS. Demand-zeroing the
-			 * anon .bss (like Linux) makes exec fast + robust. */
+			 * .bss lives in the anonymous mapping above, whose pages are zeroed in
+			 * amap_page() before they are mapped.
+			 *
+			 * What this avoids is the memset, not the mapping: touching every .bss
+			 * page here meant a 26 MB game binary (~14k pages) walked all of them
+			 * under map->lock at exec, which intermittently hung over flaky netboot
+			 * NFS.
+			 *
+			 * ⚠ It does NOT make the anon .bss demand-paged, whatever this comment
+			 * used to claim. `process->lazy` is 0 on every MMU build
+			 * (process.c:229 — it is set to 1 only around the ELF-header mmap at
+			 * :814 and restored immediately), so _vm_mmap() eagerly _map_force()s
+			 * every page of both segments (vm/map.c:619-628). The mapping is
+			 * therefore fully populated when exec returns; `lazy` is an NOMMU /
+			 * header-parsing path, not this one. */
 			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + filesz) - ((ptr_t)vaddr + filesz));
 		}
 		phdr++;
