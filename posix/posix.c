@@ -92,7 +92,45 @@ static struct {
 	char hostname[HOST_NAME_MAX + 1U];
 	flock_t *fileLocks;   /* global list of held record locks */
 	lock_t fileLocksLock; /* guards fileLocks */
+	oid_t pipesrv;        /* /dev/posix/pipes, resolved once (see posix_pipesrv) */
+	int pipesrvResolved;
 } posix_common;
+
+
+/* Resolve /dev/posix/pipes once and cache it.
+ *
+ * Two reasons, and the first is a deadlock. A path lookup is answered by the
+ * filesystem that owns "/", so a process that IS that filesystem sends the
+ * lookup to the port it is itself supposed to be servicing -- and nothing ever
+ * answers. That is what wedged the single-threaded nfs-fs through the socket()
+ * path (see posix/inet.c); pipe(), mkfifo() and open() had the same shape.
+ *
+ * The second is cost: posix_open() resolved this path on EVERY open, and
+ * "/dev/posix/pipes" is a devfs node rather than a registered port name, so it
+ * misses the kernel's dcache and walks the namespace for real -- two extra
+ * mtLookup messages per open, the first of them queued behind the SAME
+ * single-threaded server that is about to handle the open itself.
+ *
+ * posixsrv may not have started yet, so only a successful lookup is cached.
+ */
+static int posix_pipesrv(oid_t *oid)
+{
+	int err;
+
+	if (__atomic_load_n(&posix_common.pipesrvResolved, __ATOMIC_ACQUIRE) == 0) {
+		err = proc_lookup("/dev/posix/pipes", NULL, oid);
+		if (err < 0) {
+			return err;
+		}
+
+		posix_common.pipesrv = *oid;
+		__atomic_store_n(&posix_common.pipesrvResolved, 1, __ATOMIC_RELEASE);
+		return EOK;
+	}
+
+	*oid = posix_common.pipesrv;
+	return EOK;
+}
 
 
 /* Drop all record locks the process holds on one file (called on any close of
@@ -779,7 +817,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 	mode_t mode;
 	off_t size;
 
-	if (proc_lookup("/dev/posix/pipes", NULL, &pipesrv) < 0) {
+	if (posix_pipesrv(&pipesrv) < 0) {
 		hal_memset(&pipesrv, 0xff, sizeof(oid_t));
 	}
 
@@ -1326,7 +1364,7 @@ int posix_pipe(int fildes[2])
 
 	hal_memset(&oid, 0, sizeof(oid));
 
-	res = proc_lookup("/dev/posix/pipes", NULL, &pipesrv);
+	res = posix_pipesrv(&pipesrv);
 	if (res < 0) {
 		pinfo_put(p);
 		return (res == -EINTR) ? res : -ENOSYS;
@@ -1418,7 +1456,7 @@ int posix_mkfifo(const char *pathname, mode_t mode)
 
 	hal_memset(&oid, 0, sizeof(oid));
 
-	if (proc_lookup("/dev/posix/pipes", NULL, &pipesrv) < 0) {
+	if (posix_pipesrv(&pipesrv) < 0) {
 		return -ENOSYS;
 	}
 
