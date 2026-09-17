@@ -239,9 +239,13 @@ int syscalls_spawnSyspage(u8 *ustack)
 int syscalls_sys_exit(u8 *ustack)
 {
 	int code;
+	unsigned int maskedCode;
 
 	GETFROMSTACK(ustack, int, code, 0U);
-	proc_exit(code);
+
+	maskedCode = (unsigned int)code & 0xffU;
+	proc_exit((int)maskedCode);
+
 	return EOK;
 }
 
@@ -525,30 +529,38 @@ int syscalls_schedSet(u8 *ustack)
  */
 
 
-int syscalls_threadsinfo(u8 *ustack)
+int syscalls_sys_threadsinfo(u8 *ustack)
 {
 	process_t *proc = proc_current()->process;
-	int n, i;
-	pid_t ppid;
+	size_t infosz;
+	int n, tid;
+	unsigned int flags;
 	threadinfo_t *info;
 
-	GETFROMSTACK(ustack, int, n, 0U);
-	GETFROMSTACK(ustack, threadinfo_t *, info, 1U);
+	GETFROMSTACK(ustack, int, tid, 0U);
+	GETFROMSTACK(ustack, unsigned int, flags, 1U);
+	GETFROMSTACK(ustack, int, n, 2U);
+	GETFROMSTACK(ustack, threadinfo_t *, info, 3U);
 
-	if (vm_mapBelongs(proc, info, sizeof(*info) * (size_t)n) < 0) {
-		return -EFAULT;
+	if (n < 0) {
+		return -EINVAL;
 	}
 
-	n = proc_threadsList(n, info);
+	if (((flags & PH_THREADINFO_OPT_THREADCOUNT) == 0U) && (n > 0)) {
+		if (info == NULL) {
+			return -EFAULT;
+		}
 
-	for (i = 0; i < n; ++i) {
-		ppid = posix_getppid(info[i].pid);
-		if (ppid > 0) {
-			info[i].ppid = ppid;
+		if (__builtin_mul_overflow(sizeof(*info), (size_t)n, &infosz)) {
+			return -EOVERFLOW;
+		}
+
+		if (vm_mapBelongs(proc, info, infosz) < 0) {
+			return -EFAULT;
 		}
 	}
 
-	return n;
+	return proc_threadsInfo(tid, flags, n, info);
 }
 
 
@@ -1192,54 +1204,40 @@ addr_t syscalls_va2pa(u8 *ustack)
 }
 
 
-int syscalls_signalHandle(u8 *ustack)
+int syscalls_signalAction(u8 *ustack)
 {
-	sighandlerFn_t handler;
-	thread_t *thread;
+	process_t *proc = proc_current()->process;
+	int sig, err = EOK;
+	struct sigaction *act, kact, *old, kold;
+	sigtrampolineFn_t trampoline;
 
-	GETFROMSTACK(ustack, sighandlerFn_t, handler, 0U);
+	GETFROMSTACK(ustack, int, sig, 0U);
+	GETFROMSTACK(ustack, struct sigaction *, act, 1U);
+	GETFROMSTACK(ustack, struct sigaction *, old, 2U);
+	GETFROMSTACK(ustack, sigtrampolineFn_t, trampoline, 3U);
 
-	thread = proc_current();
-	thread->process->sighandler = handler;
-
-	return EOK;
-}
-
-
-int syscalls_signalPost(u8 *ustack)
-{
-	int pid, tid, signal, err;
-	process_t *proc;
-	thread_t *t = NULL;
-
-	GETFROMSTACK(ustack, int, pid, 0U);
-	GETFROMSTACK(ustack, int, tid, 1U);
-	GETFROMSTACK(ustack, int, signal, 2U);
-
-	proc = proc_find(pid);
-	if (proc == NULL) {
-		return -EINVAL;
+	if ((act != NULL) && (vm_mapBelongs(proc, act, sizeof(*act)) < 0)) {
+		return -EFAULT;
 	}
 
-	if (tid >= 0) {
-		t = threads_findThread(tid);
-		if (t == NULL) {
-			(void)proc_put(proc);
-			return -EINVAL;
-		}
+	if ((old != NULL) && (vm_mapBelongs(proc, old, sizeof(*old)) < 0)) {
+		return -EFAULT;
 	}
 
-	if ((t != NULL) && (t->process != proc)) {
-		(void)proc_put(proc);
-		threads_put(t);
-		return -EINVAL;
+	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "Use of common address verification routine" */
+	if ((trampoline != NULL) && (vm_mapBelongs(proc, (void *)trampoline, 1U) < 0)) {
+		return -EFAULT;
 	}
 
-	err = threads_sigpost(proc, t, signal);
-
-	(void)proc_put(proc);
-	if (t != NULL) {
-		threads_put(t);
+	if (act != NULL) {
+		hal_memcpy(&kact, act, sizeof(kact));
+	}
+	if (old != NULL) {
+		hal_memset(&kold, 0, sizeof(kold));
+	}
+	err = threads_setSigaction(sig, trampoline, (act != NULL ? &kact : NULL), (old != NULL ? &kold : NULL));
+	if ((err == EOK) && (old != NULL)) {
+		hal_memcpy(old, &kold, sizeof(kold));
 	}
 
 	return err;
@@ -1248,7 +1246,7 @@ int syscalls_signalPost(u8 *ustack)
 
 unsigned int syscalls_signalMask(u8 *ustack)
 {
-	unsigned int mask, mmask, old;
+	unsigned int mask, mmask, old, new;
 	thread_t *t;
 
 	GETFROMSTACK(ustack, unsigned int, mask, 0U);
@@ -1257,7 +1255,9 @@ unsigned int syscalls_signalMask(u8 *ustack)
 	t = proc_current();
 
 	old = t->sigmask;
-	t->sigmask = (mask & mmask) | (t->sigmask & ~mmask);
+	new = (mask & mmask) | (old & ~mmask);
+
+	threads_setSigmask(t, new);
 
 	return old;
 }
@@ -1280,11 +1280,12 @@ void syscalls_sigreturn(u8 *ustack)
 
 	GETFROMSTACK(ustack, unsigned int, oldmask, 0U);
 	GETFROMSTACK(ustack, cpu_context_t *, ctx, 1U);
+	/* NOTE: `hal_cpuSigreturn` may take additional arguments from ustack */
 
 	hal_cpuDisableInterrupts();
 	hal_cpuSigreturn(t->kstack + t->kstacksz, ustack, &ctx);
 
-	t->sigmask = oldmask;
+	threads_setSigmask(t, oldmask);
 
 	/* TODO: check if return address belongs to user mapped memory */
 	if (hal_cpuSupervisorMode(ctx) != 0) {
@@ -1306,6 +1307,7 @@ int syscalls_sys_open(u8 *ustack)
 
 	GETFROMSTACK(ustack, const char *, filename, 0U);
 	GETFROMSTACK(ustack, int, oflag, 1U);
+	/* NOTE: `posix_open` may take additional arguments from ustack */
 
 	return posix_open(filename, oflag, ustack);
 }
@@ -1471,6 +1473,7 @@ int syscalls_sys_fcntl(u8 *ustack)
 
 	GETFROMSTACK(ustack, int, fd, 0U);
 	GETFROMSTACK(ustack, unsigned int, cmd, 1U);
+	/* NOTE: `posix_fcntl` may take additional arguments from ustack */
 
 	return posix_fcntl(fd, cmd, ustack);
 }
@@ -1993,6 +1996,7 @@ int syscalls_sys_ioctl(u8 *ustack)
 
 	GETFROMSTACK(ustack, int, fildes, 0U);
 	GETFROMSTACK(ustack, unsigned long, request, 1U);
+	/* NOTE: `posix_ioctl` may take additional arguments from ustack */
 
 	/* vm_mapBelongs on optional data pointer checked in posix_ioctl */
 	return posix_ioctl(fildes, request, ustack);
@@ -2164,11 +2168,14 @@ void *syscalls_dispatch(unsigned int n, u8 *ustack, cpu_context_t *ctx)
 
 	trace_eventSyscallExit(n, proc_getTid(thread));
 
+	if (thread->exit == 0U) {
+		threads_setupUserReturn(retval, ctx);
+	}
+
+	/* setupUserReturn could deliver a terminating signal */
 	if (thread->exit != 0U) {
 		proc_threadEnd();
 	}
-
-	threads_setupUserReturn(retval, ctx);
 
 	return retval;
 }

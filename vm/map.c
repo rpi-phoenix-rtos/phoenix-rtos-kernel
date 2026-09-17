@@ -979,8 +979,14 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	else {
 		process_dumpException(n, ctx);
 
+		/*
+		 * FIXME (upstream): in case the signal is ignored or blocked, the process
+		 * should be terminated to avoid an exception dump loop. In case it is
+		 * handled, we should provide a mechanism to force delivery of this signal
+		 * before other pending ones.
+		 */
 		if (proc != NULL) {
-			(void)threads_sigpost(proc, thread, signal_segv);
+			(void)threads_sigpost(proc, thread, SIGSEGV);
 		}
 		else if (thread->process == NULL) {
 			/* A USER thread whose process_t is gone (detached above). It can
@@ -990,15 +996,23 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 			 * is `for (;;) hal_cpuHalt()` (hal/aarch64/generic/generic.c:141),
 			 * i.e. a permanent halt with no reboot. That is what turned one
 			 * corrupt pointer into a dead Pi on an X11 session exit. Retire just
-			 * this thread instead and let the other three cores live. */
+			 * this thread instead and let the other three cores live.
+			 *
+			 * Since the 2026-09-17 upstream merge this only has to SET the exit
+			 * flag: the block below (upstream's) calls proc_threadEnd(), which
+			 * is a cleaner end than the hal_cpuReschedule() this used to do. */
 			thread->exit = THREAD_END_NOW;
-			(void)hal_cpuReschedule(NULL, NULL);
 		}
 		else {
 			/* Genuine kernel-thread fault: no process to blame, nothing to
-			 * signal. This is the case the assert was written for. */
+			 * signal. This is the case upstream's assert was written for --
+			 * kept as an assert, but only for that case. */
 			LIB_ASSERT_ALWAYS(0, "exception in kernel thread");
 		}
+	}
+
+	if (thread->exit != 0U) {
+		proc_threadEnd();
 	}
 }
 #endif

@@ -352,7 +352,7 @@ static int msg_opack(kmsg_t *kmsg)
 #define WD_TIMEOUT 0
 #endif
 
-int proc_send(u32 port, msg_t *msg)
+static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 {
 	port_t *p;
 	int err = EOK;
@@ -421,8 +421,15 @@ int proc_send(u32 port, msg_t *msg)
 				 */
 				err = proc_threadWait(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
 			}
-			else {
+			else if (interruptible != 0) {
+				/* WD_TIMEOUT rather than upstream's 0: with MSG_SEND_WATCHDOG
+				 * built in, a send that never gets a response has to come back
+				 * so the watchdog below can report it. It is 0 when the watchdog
+				 * is compiled out, i.e. identical to upstream then. */
 				err = proc_threadWaitInterruptible(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
+			}
+			else {
+				err = proc_threadWait(&kmsg.threads, &p->spinlock, 0, &sc);
 			}
 
 			state = kmsg.state;
@@ -473,6 +480,18 @@ int proc_send(u32 port, msg_t *msg)
 	}
 
 	return err;
+}
+
+
+int proc_send(u32 port, msg_t *msg)
+{
+	return proc_sendEx(port, msg, 1);
+}
+
+
+int proc_sendUninterruptible(u32 port, msg_t *msg)
+{
+	return proc_sendEx(port, msg, 0);
 }
 
 

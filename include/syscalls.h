@@ -58,7 +58,7 @@
 	ID(keepidle) \
 	ID(platformctl) \
 	ID(wdgreload) \
-	ID(threadsinfo) \
+	ID(sys_threadsinfo) \
 	ID(meminfo) \
 	ID(sys_perf_start) \
 	ID(sys_perf_read) \
@@ -66,8 +66,7 @@
 	ID(sys_perf_stop) \
 	ID(syspageprog) \
 	ID(va2pa) \
-	ID(signalHandle) \
-	ID(signalPost) \
+	ID(signalAction) \
 	ID(signalMask) \
 	ID(signalSuspend) \
 	ID(sys_priority) \

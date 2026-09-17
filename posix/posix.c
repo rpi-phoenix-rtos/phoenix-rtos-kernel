@@ -206,9 +206,7 @@ int posix_fileDeref(open_file_t *f)
 			err = usocket_close(f->sock);
 		}
 		else {
-			do {
-				err = proc_close(f->oid, f->status);
-			} while (err == -EINTR);
+			err = proc_close(f->oid, f->status);
 		}
 
 		if (f->path != NULL) {
@@ -3362,7 +3360,7 @@ int posix_tkill(pid_t pid, int tid, int sig)
 {
 	TRACE("tkill(%p, %d, %d)", pid, tid, sig);
 
-	if ((sig < 0) || (sig > NSIG)) {
+	if ((sig < 0) || (sig >= NSIG_TOTAL)) {
 		return -EINVAL;
 	}
 
