@@ -407,9 +407,13 @@ static void thread_destroy(thread_t *thread)
 	 * thread_t's `process` field on this board. Leak the 8 KiB instead; the
 	 * borrower has no way to hand it back once we are gone, and a leak is cheap
 	 * next to writing into live kernel objects.
-	 * ⚠ REVIEW BEFORE TRUSTING THIS BRANCH: upstream's new execdata path may now
-	 * cover the same window, in which case this guard is dead code rather than
-	 * wrong -- it can only leak, never free something it should not. */
+	 * ⓘ Reviewed against upstream's new execdata path (2026-09-17): the two cover
+	 * DIFFERENT threads, so both are needed. `execdata`/`execkstack` are set on
+	 * the vforked CHILD (process.c: `current->execkstack = current->kstack`), and
+	 * upstream's block above restores the child's own stack before freeing it.
+	 * `lentKstack` is set on the PARENT (`parent->lentKstack = 1`) for exactly as
+	 * long as the child runs on the parent's stack, and this guard is what stops
+	 * an asynchronous parent death from freeing it underneath that child. */
 	if (thread->lentKstack != 0U) {
 		thread->magic = 0U;
 	}
