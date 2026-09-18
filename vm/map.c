@@ -177,6 +177,7 @@ static void _entry_put(vm_map_t *map, map_entry_t *e)
 static void *_map_find(vm_map_t *map, void *vaddr, size_t size, map_entry_t **prev, map_entry_t **next)
 {
 	map_entry_t *e = lib_treeof(map_entry_t, linkage, map->tree.root);
+	ptr_t gapStart, cand;
 
 	*prev = NULL;
 	*next = NULL;
@@ -203,22 +204,34 @@ static void *_map_find(vm_map_t *map, void *vaddr, size_t size, map_entry_t **pr
 			continue;
 		}
 
-		/* TODO(TD-22): the commented-out half of this condition is a real missing
-		 * check, but it belongs at the leaf return below, not here: on this branch
-		 * rmaxgap is a SUBTREE maximum whenever e has a right child, so gating the
-		 * descent on it would refuse to search subtrees that do have room. At the
-		 * leaf, where rmaxgap is this node's exact gap, the `max(vaddr, ...)` return
-		 * just below can yield a hinted address nearer the gap's end than `size` --
-		 * overlapping the next entry. Unreachable today (every hinted mmap in
-		 * libphoenix is MAP_FIXED, and MAP_FIXED unmaps its range first); see TD-22. */
 		if (size <= e->rmaxgap) {
-			*prev = e;
-
 			if (e->linkage.right == NULL) {
-				return (void *)max((ptr_t)vaddr, (ptr_t)e->vaddr + e->size);
+				/* This node's gap is [gapStart, gapStart + rmaxgap), exact rather than a
+				 * subtree maximum because the right child is NULL. `vaddr` is a non-FIXED
+				 * HINT, so it may sit inside that gap -- and nearer its end than `size`,
+				 * in which case returning it overlaps the next entry. The historic
+				 * condition here carried the bound commented out, which is why the
+				 * overlap was reachable; it cannot go back on the `if` above, because
+				 * there rmaxgap is a subtree maximum whenever e has a right child and
+				 * gating the DESCENT on it would refuse subtrees that do have room.
+				 *
+				 * No underflow: size <= rmaxgap, so gapStart + rmaxgap - size >= gapStart.
+				 * On refusal fall through to the parent walk, which searches other gaps
+				 * and sets *prev/*next itself -- so *prev is set only once the candidate
+				 * is accepted. */
+				gapStart = (ptr_t)e->vaddr + e->size;
+				cand = max((ptr_t)vaddr, gapStart);
+
+				if (cand <= ((gapStart + e->rmaxgap) - size)) {
+					*prev = e;
+					return (void *)cand;
+				}
 			}
-			e = lib_treeof(map_entry_t, linkage, e->linkage.right);
-			continue;
+			else {
+				*prev = e;
+				e = lib_treeof(map_entry_t, linkage, e->linkage.right);
+				continue;
+			}
 		}
 
 		for (;;) {
