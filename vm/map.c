@@ -37,6 +37,8 @@ static struct {
 
 	vm_map_t **maps;
 	size_t mapssz;
+
+	unsigned int overlapReports; /* bound on the _map_map() overlap report */
 } map_common;
 
 
@@ -201,7 +203,15 @@ static void *_map_find(vm_map_t *map, void *vaddr, size_t size, map_entry_t **pr
 			continue;
 		}
 
-		if ((size <= e->rmaxgap) /*&& (vaddr + size) <= (e->vaddr + e->size + e->rmaxgap)*/) {
+		/* TODO(TD-22): the commented-out half of this condition is a real missing
+		 * check, but it belongs at the leaf return below, not here: on this branch
+		 * rmaxgap is a SUBTREE maximum whenever e has a right child, so gating the
+		 * descent on it would refuse to search subtrees that do have room. At the
+		 * leaf, where rmaxgap is this node's exact gap, `max(vaddr, ...)` at :208 can
+		 * return a hinted address nearer the gap's end than `size` -- overlapping the
+		 * next entry. Unreachable today (every hinted mmap in libphoenix is
+		 * MAP_FIXED, and MAP_FIXED unmaps its range first); see TD-22. */
+		if ((size <= e->rmaxgap)) {
 			*prev = e;
 
 			if (e->linkage.right == NULL) {
@@ -380,7 +390,22 @@ static void *_map_map(vm_map_t *map, void *vaddr, process_t *proc, size_t size, 
 			}
 		}
 
-		(void)_map_add(proc, map, e);
+		/* _map_add() returns lib_rbInsert()'s result, and that is -EEXIST exactly when
+		 * the new entry overlaps one already in the tree. Discarding it -- as every
+		 * other call site here does -- means an overlap leaves `e` outside the tree
+		 * while we still hand `v` back to the caller, i.e. two mappings over the same
+		 * range with no record of the second. _map_find() is written so this cannot
+		 * happen (every stale gap it can compute is too SMALL, never too large), so
+		 * this is a safety net for that reasoning, not a known defect; say so if the
+		 * reasoning is ever wrong instead of corrupting silently. Bounded, because a
+		 * fault that repeats per mmap would otherwise drown the console. */
+		if (_map_add(proc, map, e) < 0) {
+			if (map_common.overlapReports < 8u) {
+				++map_common.overlapReports;
+				lib_printf("vm: MAP OVERLAP %p+%x rejected by the tree -- entry not tracked\n",
+					e->vaddr, e->size);
+			}
+		}
 	}
 
 	/* Clear anon entries */
