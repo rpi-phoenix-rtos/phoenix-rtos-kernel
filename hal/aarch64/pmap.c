@@ -198,6 +198,23 @@ static void _pmap_mapScratch(void *va, addr_t pa)
 	hal_cpuDataSyncBarrier();
 	__asm__ volatile("tlbi vaale1, %0" : : "r"(tlbiArg));
 	hal_cpuDataSyncBarrier();
+	/* TD-19. The caller dereferences this VA immediately -- _pmap_enter does
+	 * `_pmap_mapScratch(scratch_tt, addr); _pmap_writeTtl3(...)`, and the first
+	 * thing _pmap_writeTtl3 does is read scratch_tt[idx]. Per ARM ARM D8.16.1 the
+	 * maintenance sequence is not complete for the PE that will USE the new
+	 * translation until a context-synchronization event, and there is none here:
+	 * the caller holds pmap_common.lock, whose hal_spinlockSet masks interrupts
+	 * (`msr daifSet, #3`), so no exception entry/return can supply one.
+	 *
+	 * This is not theoretical. 2026-09-09, kernel 76e0adbc71d4, an X11 run took an
+	 * EL1 level-3 translation fault (esr=0x96000003) at exactly that read --
+	 * far=0xffffffffc002f990 with x26=0x132, and 0x132*8 = 0x990, so the faulting
+	 * address IS scratch_tt[x26] -- and the machine halted. Write-up:
+	 * docs/misc/2026-09-19-td19-scratch-mapping-fault.md.
+	 *
+	 * Note this site uses a raw `tlbi`, not one of the hal_tlbInval* helpers, so
+	 * the long-proposed "add isb to the five helpers" would NOT have covered it. */
+	hal_cpuInstrBarrier();
 }
 
 
@@ -431,6 +448,12 @@ static void _pmap_switch(pmap_t *pmap)
 
 	if (pmap->asid == ASID_SHARED) {
 		hal_tlbInvalASID(ASID_SHARED);
+		/* TD-19. This one is after the isb that brackets the TTBR switch, and the
+		 * caller (process_load / process_putargs) writes user VAs in the ASID just
+		 * invalidated without an intervening ERET. Effectively unreachable -- it
+		 * needs ~65 534 simultaneously live pmaps (ASID_BITS 16) -- but it costs a
+		 * single instruction on a path taken once per ASID exhaustion. */
+		hal_cpuInstrBarrier();
 	}
 
 	/* No cache invalidation should be necessary because on ARMv8
@@ -509,6 +532,23 @@ static void _pmap_writeTtl3(void *va, addr_t pa, vm_attr_t attr, asid_t asid)
 
 	pmap_common.scratch_tt[idx] = descr;
 	hal_cpuDataSyncBarrier();
+	/* TD-19. For a KERNEL va the fresh mapping may be used by kernel code with no
+	 * intervening exception return -- vm/amap.c zeroes a fresh anon page and copies
+	 * a COW page straight after mapping it -- so the PE needs a context
+	 * synchronization before it can rely on the new translation. For a USER va the
+	 * ERET back to userspace supplies that, which is why this is gated rather than
+	 * unconditional: it mirrors Linux's `pte_valid_not_user` -> `emit_pte_barriers()`
+	 * (arch/arm64/include/asm/pgtable.h), whose own comment is that the isb clears a
+	 * speculative "invalid translation" from the pipeline that would otherwise cause
+	 * a spurious fault.
+	 *
+	 * Note the break-before-make TLBI above runs ONLY when the old descriptor was
+	 * valid, so an invalid->valid kernel mapping reaches here having executed no
+	 * TLBI at all -- which is why adding isb to the hal_tlbInval* helpers would not
+	 * have covered this path either. */
+	if ((ptr_t)va >= VADDR_KERNEL) {
+		hal_cpuInstrBarrier();
+	}
 	_pmap_cacheOpAfterChange(descr, (ptr_t)va, 3);
 }
 
@@ -985,6 +1025,14 @@ void _pmap_preinit(addr_t dtbStart, addr_t dtbEnd)
 
 	hal_cpuDataSyncBarrier();
 	hal_tlbInvalAll_IS();
+	/* TD-19. This re-permissions the EXECUTING kernel's own text and data (AP2/PXN/
+	 * UXN above) and then keeps running through those very translations. Benign so
+	 * far only because every change here is strictly MORE restrictive than the stale
+	 * entry, so a stale entry cannot fault -- not because the architecture allows
+	 * running on a translation you have just changed. Boot-time, single core (the
+	 * secondaries are gated on hal_smpPrimaryReady, set much later), so this costs
+	 * nothing. */
+	hal_cpuInstrBarrier();
 }
 
 
