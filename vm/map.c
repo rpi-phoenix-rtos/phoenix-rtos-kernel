@@ -217,7 +217,7 @@ static void *_map_find(vm_map_t *map, void *vaddr, size_t size, map_entry_t **pr
 				 *
 				 * No underflow: size <= rmaxgap, so gapStart + rmaxgap - size >= gapStart.
 				 * On refusal fall through to the parent walk, which searches other gaps
-				 * and sets *prev/*next itself -- so *prev is set only once the candidate
+				 * and sets both output pointers itself -- so *prev is set only once the candidate
 				 * is accepted. */
 				gapStart = (ptr_t)e->vaddr + e->size;
 				cand = max((ptr_t)vaddr, gapStart);
