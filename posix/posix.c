@@ -1862,9 +1862,18 @@ int posix_fsync(int fd)
 
 	hal_memset(&msg, 0, sizeof(msg_t));
 
-	/* FIXME: Replace this hack, pass oid via msg_t root struct */
 	msg.type = 0xf52; /* mtSync */
 
+	/* The oid belongs in the message's root struct: EVERY storage driver that
+	 * implements mtSync reads msg->oid.id (bcm2711-emmc, zynq7000-sdcard,
+	 * pc-ata, flashdrv, ...), and NONE reads i.raw. Sending it only in i.raw
+	 * left msg.oid zeroed by the memset above, so fsync() reached the right
+	 * port but asked it to sync storage id 0 rather than the file's device --
+	 * i.e. fsync() did not sync the file. */
+	msg.oid = f->oid;
+
+	/* Kept as well as, not instead of: it costs nothing and cannot break an
+	 * out-of-tree server that reads the old location. */
 	hal_memcpy(msg.i.raw, &f->oid, sizeof(f->oid));
 
 	err = proc_send(f->oid.port, &msg);
