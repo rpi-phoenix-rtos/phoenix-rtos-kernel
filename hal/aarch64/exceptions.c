@@ -260,6 +260,32 @@ static void hal_exceptionsBacktrace(exc_context_t *ctx)
  * and a nested fault taken here at EL1 would turn every userspace crash into a
  * board reset. The range is clipped to the page sp sits in, so a read that
  * starts on a mapped page cannot walk off it. */
+/* Can EL1 read this address in the CURRENT translation regime?
+ *
+ * Asks the MMU rather than walking the tables, so it needs no lock -- which
+ * matters here: this runs in exception context, possibly with interrupts off and
+ * possibly from inside the page-fault handler, where taking pmap's spinlock
+ * could deadlock against whatever was interrupted. `at s1e1r` sets PAR_EL1, and
+ * PAR_EL1.F (bit 0) is set when the translation aborted.
+ *
+ * Clobbering PAR_EL1 is safe at this point: we are printing a crash dump and
+ * nothing downstream reads it back. */
+static int exceptions_canReadEL1(unsigned long va)
+{
+	u64 par;
+
+	/* clang-format off */
+	__asm__ volatile(
+			"at s1e1r, %1\n"
+			"mrs %0, par_el1\n"
+			: "=r"(par)
+			: "r"(va));
+	/* clang-format on */
+
+	return ((par & 1ULL) == 0ULL) ? 1 : 0;
+}
+
+
 static void exceptions_dumpUserStack(exc_context_t *ctx)
 {
 	char buff[512];
@@ -283,6 +309,21 @@ static void exceptions_dumpUserStack(exc_context_t *ctx)
 	end = addr + 384UL;
 	if (end > pageHi) {
 		end = pageHi;
+	}
+
+	/* The clip above keeps every read inside sp's page -- but only helps if that
+	 * page is mapped, and in the one crash that most needs a stack dump it is
+	 * not. A stack OVERFLOW faults precisely because sp has run past the stack
+	 * region, so the page holding it is unmapped and the first read below took a
+	 * nested Data Abort at EL1: measured `far = sp - 128` exactly, twice per
+	 * crash, on 5 runs of tools/stack-bomb. Ask before dereferencing. One check
+	 * is enough because the whole range lies in this single page. */
+	if (exceptions_canReadEL1(pageLo) == 0) {
+		i += hal_i2s("stack: not mapped at ", &buff[i], pageLo, 16U, 1U);
+		i += hal_i2s(" (sp=", &buff[i], sp, 16U, 1U);
+		(void)hal_strcpy(&buff[i], ") -- stack overflow?\n");
+		hal_consolePrint(ATTR_BOLD, buff);
+		return;
 	}
 
 	(void)hal_strcpy(&buff[i], "stack:");
