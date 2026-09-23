@@ -98,6 +98,10 @@ typedef struct _thread_t {
 	void *kstack;
 	size_t kstacksz;
 	char *ustack;
+	/* Size of the user stack VMA starting at ustack, so the signal-delivery path
+	 * can bound BOTH ends of it. Knowing only where the stack begins leaves a
+	 * process free to point SP anywhere else and fault the kernel at EL1. */
+	size_t ustacksz;
 
 	hal_tls_t tls;
 
@@ -137,7 +141,7 @@ static inline int proc_getTid(const thread_t *t)
 thread_t *proc_current(void);
 
 
-void threads_canaryInit(thread_t *t, void *ustack);
+void threads_canaryInit(thread_t *t, void *ustack, size_t ustacksz);
 
 
 int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t priority, size_t kstacksz, void *stack, size_t stacksz, unsigned int sigmask, void *arg);

@@ -801,13 +801,14 @@ static int thread_alloc(thread_t *thread)
 }
 
 
-void threads_canaryInit(thread_t *t, void *ustack)
+void threads_canaryInit(thread_t *t, void *ustack, size_t ustacksz)
 {
 	spinlock_ctx_t sc;
 
 	hal_spinlockSet(&threads_common.spinlock, &sc);
 
 	t->ustack = ustack;
+	t->ustacksz = (ustack == NULL) ? 0U : ustacksz;
 	if (t->ustack != NULL) {
 		hal_memcpy(t->ustack, threads_common.stackCanary, sizeof(threads_common.stackCanary));
 	}
@@ -899,7 +900,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 
 	/* Prepare initial stack */
 	(void)hal_cpuCreateContext(&t->context, start, t->kstack, t->kstacksz, (stack == NULL) ? NULL : (unsigned char *)stack + stacksz, arg, &t->tls);
-	threads_canaryInit(t, stack);
+	threads_canaryInit(t, stack, stacksz);
 
 	if (process != NULL) {
 		hal_cpuSetCtxGot(t->context, process->got);
@@ -1878,19 +1879,34 @@ static int _threads_checkSignal(thread_t *selected, process_t *proc)
  * threads_common.spinlock, where taking proc->mapp->lock (as vm_mapBelongs does)
  * or calling lib_printf would deadlock the kernel.
  *
- * Limitation, recorded rather than papered over: only the LOW bound is checked.
- * The thread does not record its stack size, so a wild SP pointing ABOVE the
- * stack is still unguarded. That is not the reported defect and widening the
- * thread structure to cover it belongs in its own change.
+ * BOTH ends are checked, and the upper one is not theoretical: exhausting the
+ * stack is only one way to aim the frame at unmapped memory. A process can just
+ * point SP somewhere that was never mapped and fault -- `sigbomb wildsp` does it
+ * in three instructions -- and a low-bound-only guard waves that straight
+ * through. Measured: it produced `Exception #37: Data Abort (EL1)` and wedged the
+ * box even with the low bound in place.
  */
 static int _threads_signalFrameFits(const thread_t *selected, const cpu_context_t *signalCtx)
 {
 	const char *lowest;
+	const char *stackLow;
+	const char *stackHigh;
 
 	/* Kernel threads, and any thread whose stack we did not allocate, have no
-	 * recorded bound -- keep the previous behaviour rather than guess at one. */
-	if (selected->ustack == NULL) {
+	 * recorded bounds -- keep the previous behaviour rather than guess at them. */
+	if ((selected->ustack == NULL) || (selected->ustacksz == 0U)) {
 		return 1;
+	}
+
+	/* Stay clear of the canary at the very bottom, so a delivery that only just
+	 * fits cannot destroy the corruption detector on its way past. */
+	stackLow = selected->ustack + sizeof(threads_common.stackCanary);
+	stackHigh = selected->ustack + selected->ustacksz;
+
+	/* A stack too small to hold a frame at all: refuse rather than wrap the
+	 * arithmetic below. */
+	if (selected->ustacksz < (sizeof(threads_common.stackCanary) + (2U * sizeof(cpu_context_t)))) {
+		return 0;
 	}
 
 	/* The frame itself is sizeof(cpu_context_t) at signalCtx; the trampoline
@@ -1898,9 +1914,17 @@ static int _threads_signalFrameFits(const thread_t *selected, const cpu_context_
 	 * those few words and keeps this free of per-architecture arithmetic. */
 	lowest = (const char *)signalCtx - sizeof(cpu_context_t);
 
-	/* Stay clear of the canary at the very bottom, so a delivery that only just
-	 * fits cannot destroy the corruption detector on its way past. */
-	return (lowest >= (selected->ustack + sizeof(threads_common.stackCanary))) ? 1 : 0;
+	if (lowest < stackLow) {
+		return 0;
+	}
+
+	/* Compare against a pointer derived from the stack, never signalCtx + size:
+	 * signalCtx is attacker-chosen here and adding to it can wrap. */
+	if ((const char *)signalCtx > (stackHigh - sizeof(cpu_context_t))) {
+		return 0;
+	}
+
+	return 1;
 }
 
 

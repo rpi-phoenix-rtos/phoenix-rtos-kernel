@@ -874,7 +874,7 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 
 	*ustack = stack + ustacksz;
 
-	threads_canaryInit(proc_current(), stack);
+	threads_canaryInit(proc_current(), stack, ustacksz);
 
 	return EOK;
 }
@@ -1137,7 +1137,7 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 	process->got = (void *)got;
 	*ustack = stack + stacksz;
 
-	threads_canaryInit(proc_current(), stack);
+	threads_canaryInit(proc_current(), stack, stacksz);
 
 	if (badreloc != 0) {
 		if ((process->path != NULL) && (process->path[0] != '\0')) {
