@@ -1857,6 +1857,53 @@ static int _threads_checkSignal(thread_t *selected, process_t *proc)
 }
 
 
+/* Will the signal frame fit inside the thread's user stack?
+ *
+ * hal_cpuPushSignal() writes the saved context at signalCtx and then pushes the
+ * trampoline arguments BELOW it, with no check of its own -- and its caller can
+ * only decline if it is told not to. A thread that has exhausted its stack has a
+ * user SP at or past the bottom of the stack VMA, so that write lands on
+ * unmapped memory and faults at EL1, inside the scheduler spinlock. The box does
+ * not panic; it stops, silently.
+ *
+ * t->ustack is the LOW address of the user stack VMA (process.c maps the stack
+ * at map->pmap.end - ustacksz and hands that same pointer to threads_canaryInit),
+ * so this is a VMA-membership test and NOT a residency test. That distinction is
+ * the whole difficulty: the stack is demand-paged, so the top page is routinely
+ * not yet resident when a signal arrives, and a "is this page mapped right now"
+ * check would silently kill every process that takes a signal early. Comparing
+ * against the VMA bound lets the normal case page in exactly as before.
+ *
+ * Deliberately no locking and no printing: this runs under
+ * threads_common.spinlock, where taking proc->mapp->lock (as vm_mapBelongs does)
+ * or calling lib_printf would deadlock the kernel.
+ *
+ * Limitation, recorded rather than papered over: only the LOW bound is checked.
+ * The thread does not record its stack size, so a wild SP pointing ABOVE the
+ * stack is still unguarded. That is not the reported defect and widening the
+ * thread structure to cover it belongs in its own change.
+ */
+static int _threads_signalFrameFits(const thread_t *selected, const cpu_context_t *signalCtx)
+{
+	const char *lowest;
+
+	/* Kernel threads, and any thread whose stack we did not allocate, have no
+	 * recorded bound -- keep the previous behaviour rather than guess at one. */
+	if (selected->ustack == NULL) {
+		return 1;
+	}
+
+	/* The frame itself is sizeof(cpu_context_t) at signalCtx; the trampoline
+	 * arguments go below it. One more context's worth is a generous bound on
+	 * those few words and keeps this free of per-architecture arithmetic. */
+	lowest = (const char *)signalCtx - sizeof(cpu_context_t);
+
+	/* Stay clear of the canary at the very bottom, so a delivery that only just
+	 * fits cannot destroy the corruption detector on its way past. */
+	return (lowest >= (selected->ustack + sizeof(threads_common.stackCanary))) ? 1 : 0;
+}
+
+
 static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t *signalCtx, unsigned int oldmask, const int src)
 {
 	unsigned int curSig;
@@ -1866,6 +1913,22 @@ static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_co
 	if (ret > 0) {
 		curSig = (unsigned int)ret;
 		handler = proc->sigactions[curSig - 1U].sa_handler;
+
+		if (_threads_signalFrameFits(selected, signalCtx) == 0) {
+			/* The handler cannot be run: there is no stack left to run it on.
+			 * Take the DEFAULT action instead, which is what a process with no
+			 * handler installed already gets and is what POSIX systems do when a
+			 * fatal signal cannot be delivered.
+			 *
+			 * This is not optional tidying. Returning -1 alone leaves sigpend
+			 * set and the thread resumes at the faulting instruction, refaults,
+			 * and tries to deliver again -- trading a silent wedge for a silent
+			 * livelock, which is no better. _threads_sigdefault() sets
+			 * process->exit and destroys the threads, under this same spinlock. */
+			(void)_threads_sigdefault(proc, selected, (int)curSig);
+			return -1;
+		}
+
 		if (hal_cpuPushSignal(selected->kstack + selected->kstacksz, proc->sigtrampoline, handler, signalCtx, (int)curSig, oldmask, src) == 0) {
 			selected->sigpend &= ~(u32)(1UL << curSig);
 			proc->sigpend &= ~(u32)(1UL << curSig);
