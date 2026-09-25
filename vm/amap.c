@@ -108,6 +108,7 @@ amap_t *amap_ref(amap_t *amap)
 amap_t *amap_create(amap_t *amap, size_t *offset, size_t size)
 {
 	size_t i = size / SIZE_PAGE;
+	size_t srcPage;
 	amap_t *new;
 
 	if (amap != NULL) {
@@ -135,11 +136,19 @@ amap_t *amap_create(amap_t *amap, size_t *offset, size_t size)
 	(void)proc_lockInit(&new->lock, &proc_lockAttrDefault, "amap.map");
 	new->size = i;
 	new->refs = 1;
-	*offset = *offset / SIZE_PAGE;
-
+	/* Index the source amap in PAGE units. This used to divide the caller's
+	 * *offset in place and reuse it as the loop scratch, restoring it to 0 only
+	 * at the very end. That is correct as written -- both early returns above
+	 * sit before the division -- but it leaves the caller's offset holding a
+	 * page index for the whole copy, while the rest of the API is byte-based
+	 * (amap_page/amap_clear divide internally, and e->aoffs is bytes at every
+	 * site in vm/map.c). An early return added between the two points would
+	 * therefore silently corrupt every later amap_* index for that entry. Keep
+	 * the scratch in a local so that failure mode cannot be introduced. */
+	srcPage = *offset / SIZE_PAGE;
 
 	for (i = 0; i < size / SIZE_PAGE; ++i) {
-		new->anons[i] = (amap == NULL) ? NULL : amap->anons[*offset + i];
+		new->anons[i] = (amap == NULL) ? NULL : amap->anons[srcPage + i];
 	}
 
 	while (i < new->size) {
