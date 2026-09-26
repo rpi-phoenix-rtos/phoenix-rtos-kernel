@@ -27,6 +27,7 @@ typedef struct _port_t {
 	struct _port_t *prev;
 
 	idtree_t rid;
+	int nextRid; /* rids are handed out in rotation, from here */
 
 	kmsg_t *kmessages;
 	process_t *owner;
@@ -47,7 +48,12 @@ int proc_portCreate(u32 *id);
 void proc_portDestroy(u32 port);
 
 
-void proc_portsDestroy(process_t *proc);
+/*
+ * Destroys the ports of a process that has no threads left, failing the requests pending on
+ * them. unmapped: the process's address space is already destroyed, so the requests its
+ * threads received can be failed too (see proc_msgRejectPending()).
+ */
+void proc_portsDestroy(process_t *proc, int unmapped);
 
 
 port_t *proc_portGet(u32 id);
