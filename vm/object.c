@@ -148,7 +148,16 @@ int vm_objectPut(vm_object_t *o)
 		return EOK;
 	}
 
-	lib_rbRemove(&object_common.tree, &o->linkage);
+	/* A contiguous object (oid {-1, -1}, see vm_objectContiguous()) is never
+	 * inserted into the tree, and its linkage is all zeros. lib_rbRemove() of
+	 * such a node is not a no-op: with a NULL parent, rb_transplant() makes its
+	 * NULL child the new root, i.e. it EMPTIES the tree -- every cached file
+	 * object is orphaned, and later removals of those orphans can re-point the
+	 * root into freed nodes. Every last unmap of a MAP_CONTIGUOUS buffer (e.g.
+	 * each GPU BO free) did this. */
+	if (!((o->oid.port == (u32)(-1)) && (o->oid.id == (id_t)(-1)))) {
+		lib_rbRemove(&object_common.tree, &o->linkage);
+	}
 	(void)proc_lockClear(&object_common.lock);
 
 	/* Contiguous object 'holds' all pages in pages[0] */
