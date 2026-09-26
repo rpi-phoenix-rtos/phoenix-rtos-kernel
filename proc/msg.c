@@ -612,6 +612,7 @@ int proc_respond(u32 port, msg_t *msg, msg_rid_t rid)
 
 	kmsg = proc_portRidGet(p, rid);
 	if (kmsg == NULL) {
+		port_put(p, 0);
 		return -ENOENT;
 	}
 
