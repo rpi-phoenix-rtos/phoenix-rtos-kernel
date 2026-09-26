@@ -185,25 +185,32 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 }
 
 
+/* Releases the shadow pages of an unaligned payload and their kernel mappings */
+static void msg_releaseShadow(struct _kmsg_layout_t *ml)
+{
+	if (ml->bp != NULL) {
+		vm_pageFree(ml->bp);
+		(void)vm_munmap(msg_common.kmap, ml->bvaddr, SIZE_PAGE);
+		ml->bp = NULL;
+	}
+
+	if (ml->eoffs != 0U) {
+		if (ml->ep != NULL) {
+			vm_pageFree(ml->ep);
+		}
+		(void)vm_munmap(msg_common.kmap, ml->evaddr, SIZE_PAGE);
+		ml->eoffs = 0;
+		ml->ep = NULL;
+	}
+}
+
+
 static void msg_release(kmsg_t *kmsg)
 {
 	process_t *process;
 	vm_map_t *map;
 
-	if (kmsg->i.bp != NULL) {
-		vm_pageFree(kmsg->i.bp);
-		(void)vm_munmap(msg_common.kmap, kmsg->i.bvaddr, SIZE_PAGE);
-		kmsg->i.bp = NULL;
-	}
-
-	if (kmsg->i.eoffs != 0U) {
-		if (kmsg->i.ep != NULL) {
-			vm_pageFree(kmsg->i.ep);
-		}
-		(void)vm_munmap(msg_common.kmap, kmsg->i.evaddr, SIZE_PAGE);
-		kmsg->i.eoffs = 0;
-		kmsg->i.ep = NULL;
-	}
+	msg_releaseShadow(&kmsg->i);
 
 	process = proc_current()->process;
 	if (process != NULL) {
@@ -218,20 +225,7 @@ static void msg_release(kmsg_t *kmsg)
 		kmsg->i.w = NULL;
 	}
 
-	if (kmsg->o.bp != NULL) {
-		vm_pageFree(kmsg->o.bp);
-		(void)vm_munmap(msg_common.kmap, kmsg->o.bvaddr, SIZE_PAGE);
-		kmsg->o.bp = NULL;
-	}
-
-	if (kmsg->o.eoffs != 0U) {
-		if (kmsg->o.ep != NULL) {
-			vm_pageFree(kmsg->o.ep);
-		}
-		(void)vm_munmap(msg_common.kmap, kmsg->o.evaddr, SIZE_PAGE);
-		kmsg->o.eoffs = 0;
-		kmsg->o.ep = NULL;
-	}
+	msg_releaseShadow(&kmsg->o);
 
 	if (kmsg->o.w != NULL) {
 		(void)vm_munmap(map, kmsg->o.w, CEIL((ptr_t)kmsg->msg.o.data + kmsg->msg.o.size) - FLOOR((ptr_t)kmsg->msg.o.data));
@@ -385,6 +379,7 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 
 	hal_memcpy(&kmsg.msg, msg, sizeof(msg_t));
 	kmsg.src = sender->process;
+	kmsg.dst = NULL;
 	kmsg.threads = NULL;
 	kmsg.state = msg_waiting;
 
@@ -554,6 +549,8 @@ int proc_recv(u32 port, msg_t *msg, msg_rid_t *rid)
 	kmsg->o.eoffs = 0;
 	kmsg->o.ep = NULL;
 
+	kmsg->dst = proc_current()->process;
+
 	if ((kmsg->msg.i.data >= (void *)kmsg->msg.i.raw) && (kmsg->msg.i.data < (void *)kmsg->msg.i.raw + sizeof(kmsg->msg.i.raw))) {
 		ipacked = 1;
 	}
@@ -650,6 +647,63 @@ int proc_respond(u32 port, msg_t *msg, msg_rid_t rid)
 	port_put(p, 0);
 
 	return EOK;
+}
+
+
+void proc_msgRejectPending(port_t *p, const process_t *receiver)
+{
+	kmsg_t *kmsg, *rejected = NULL;
+	idnode_t *n;
+	spinlock_ctx_t sc;
+
+	/* Close the port and fail what nobody has received: no receiver is left to do it */
+	hal_spinlockSet(&p->spinlock, &sc);
+	p->closed = 1;
+	while ((kmsg = p->kmessages) != NULL) {
+		LIST_REMOVE(&p->kmessages, kmsg);
+		kmsg->state = msg_rejected;
+		(void)proc_threadWakeup(&kmsg->threads);
+	}
+	hal_spinlockClear(&p->spinlock, &sc);
+
+	if (receiver == NULL) {
+		return;
+	}
+
+	/*
+	 * Received requests are reachable only through their rids. Take over those of the dead
+	 * receiver: their payload windows went away with its address space, so only the kernel's
+	 * shadow pages are left to release. A request taken by another, live process is left to
+	 * it: its window still maps the sender's pages. kmsg->next is free once received.
+	 */
+	(void)proc_lockSet(&p->lock);
+	for (n = lib_idtreeMinimum(p->rid.root); n != NULL; n = lib_idtreeNext(&n->linkage)) {
+		kmsg = lib_treeof(kmsg_t, idlinkage, n);
+		if (kmsg->dst == receiver) {
+			LIST_ADD(&rejected, kmsg);
+		}
+	}
+
+	kmsg = rejected;
+	if (kmsg != NULL) {
+		do {
+			lib_idtreeRemove(&p->rid, &kmsg->idlinkage);
+			kmsg = kmsg->next;
+		} while (kmsg != rejected);
+	}
+	(void)proc_lockClear(&p->lock);
+
+	/* The kmsg lives on its sender's stack: it must not be touched once the sender is woken */
+	while ((kmsg = rejected) != NULL) {
+		LIST_REMOVE(&rejected, kmsg);
+		msg_releaseShadow(&kmsg->i);
+		msg_releaseShadow(&kmsg->o);
+
+		hal_spinlockSet(&p->spinlock, &sc);
+		kmsg->state = msg_rejected;
+		(void)proc_threadWakeup(&kmsg->threads);
+		hal_spinlockClear(&p->spinlock, &sc);
+	}
 }
 
 

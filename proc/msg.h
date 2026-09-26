@@ -35,6 +35,7 @@ typedef struct _kmsg_t {
 
 	thread_t *threads;
 	process_t *src;
+	process_t *dst; /* Receiver; its address space holds the payload windows */
 	volatile int state;
 
 #ifndef NOMMU
@@ -70,6 +71,19 @@ int proc_recv(u32 port, msg_t *msg, msg_rid_t *rid);
 
 
 int proc_respond(u32 port, msg_t *msg, msg_rid_t rid);
+
+
+struct _port_t;
+
+
+/*
+ * Closes a port and fails every request queued on it, so that no sender waits for a response
+ * that cannot come. If receiver is not NULL, also fails every request that receiver's threads
+ * took and never answered: the caller guarantees that the receiver has no threads left and
+ * that its address space, which held the payload windows, is already destroyed.
+ * The caller holds a reference to the port.
+ */
+void proc_msgRejectPending(struct _port_t *p, const process_t *receiver);
 
 
 void _msg_init(vm_map_t *kmap, vm_object_t *kernel);

@@ -208,7 +208,7 @@ void proc_portDestroy(u32 port)
 }
 
 
-void proc_portsDestroy(process_t *proc)
+void proc_portsDestroy(process_t *proc, int unmapped)
 {
 	port_t *p;
 
@@ -222,6 +222,10 @@ void proc_portsDestroy(process_t *proc)
 		LIST_REMOVE(&proc->ports, p);
 		p->owner = NULL;
 		(void)proc_lockClear(&proc->lock);
+
+		/* No thread of proc is left to respond: fail its clients. The owner's reference
+		 * keeps p valid until it is dropped below. */
+		proc_msgRejectPending(p, (unmapped != 0) ? proc : NULL);
 		port_put(p, 1);
 	}
 }

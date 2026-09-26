@@ -106,7 +106,7 @@ static void process_destroy(process_t *p)
 		}
 	}
 
-	proc_portsDestroy(p);
+	proc_portsDestroy(p, (borrowed == 0U) ? 1 : 0);
 	(void)proc_lockDone(&p->lock);
 
 	while ((ghost = p->ghosts) != NULL) {
@@ -2000,7 +2000,7 @@ static int process_execve(thread_t *current)
 		}
 
 		proc_resourcesDestroy(current->process);
-		proc_portsDestroy(current->process);
+		proc_portsDestroy(current->process, 1);
 	}
 
 	current->execkstack = NULL;

@@ -45,6 +45,7 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 
 	kmsg.msg = msg;
 	kmsg.src = sender->process;
+	kmsg.dst = NULL;
 	kmsg.threads = NULL;
 	kmsg.state = msg_waiting;
 
@@ -173,6 +174,8 @@ int proc_recv(u32 port, msg_t *msg, msg_rid_t *rid)
 		return err;
 	}
 
+	kmsg->dst = current->process;
+
 	if (proc_portRidAlloc(p, kmsg) < 0) {
 		proc_msgReject(kmsg, p);
 		return -ENOMEM;
@@ -262,6 +265,56 @@ int proc_respond(u32 port, msg_t *msg, msg_rid_t rid)
 	port_put(p, 0);
 
 	return EOK;
+}
+
+
+void proc_msgRejectPending(port_t *p, const process_t *receiver)
+{
+	kmsg_t *kmsg, *rejected = NULL;
+	idnode_t *n;
+	spinlock_ctx_t sc;
+
+	/* Close the port and fail what nobody has received: no receiver is left to do it */
+	hal_spinlockSet(&p->spinlock, &sc);
+	p->closed = 1;
+	while ((kmsg = p->kmessages) != NULL) {
+		LIST_REMOVE(&p->kmessages, kmsg);
+		kmsg->state = msg_rejected;
+		(void)proc_threadWakeup(&kmsg->threads);
+	}
+	hal_spinlockClear(&p->spinlock, &sc);
+
+	if (receiver == NULL) {
+		return;
+	}
+
+	/* The dead receiver's payload copies (imapped, omapped) went away with its map entries */
+	(void)proc_lockSet(&p->lock);
+	for (n = lib_idtreeMinimum(p->rid.root); n != NULL; n = lib_idtreeNext(&n->linkage)) {
+		kmsg = lib_treeof(kmsg_t, idlinkage, n);
+		if (kmsg->dst == receiver) {
+			LIST_ADD(&rejected, kmsg);
+		}
+	}
+
+	kmsg = rejected;
+	if (kmsg != NULL) {
+		do {
+			lib_idtreeRemove(&p->rid, &kmsg->idlinkage);
+			kmsg = kmsg->next;
+		} while (kmsg != rejected);
+	}
+	(void)proc_lockClear(&p->lock);
+
+	/* The kmsg lives on its sender's stack: it must not be touched once the sender is woken */
+	while ((kmsg = rejected) != NULL) {
+		LIST_REMOVE(&rejected, kmsg);
+
+		hal_spinlockSet(&p->spinlock, &sc);
+		kmsg->state = msg_rejected;
+		(void)proc_threadWakeup(&kmsg->threads);
+		hal_spinlockClear(&p->spinlock, &sc);
+	}
 }
 
 
