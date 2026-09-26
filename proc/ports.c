@@ -25,8 +25,16 @@ msg_rid_t proc_portRidAlloc(port_t *p, kmsg_t *kmsg)
 {
 	msg_rid_t ret;
 
+	/* Rotate rather than reuse the lowest free rid at once: a late or duplicate msgRespond
+	 * with a stale rid then fails with -ENOENT instead of answering an unrelated request. */
 	(void)proc_lockSet(&p->lock);
-	ret = lib_idtreeAlloc(&p->rid, &kmsg->idlinkage, 0);
+	ret = lib_idtreeAlloc(&p->rid, &kmsg->idlinkage, p->nextRid);
+	if (ret < 0) {
+		ret = lib_idtreeAlloc(&p->rid, &kmsg->idlinkage, 0);
+	}
+	if (ret >= 0) {
+		p->nextRid = (ret < (int)MAX_ID) ? (ret + 1) : 0;
+	}
 	(void)proc_lockClear(&p->lock);
 
 	return ret;
@@ -137,6 +145,7 @@ int proc_portCreate(u32 *id)
 	hal_spinlockCreate(&port->spinlock, "port.spinlock");
 
 	lib_idtreeInit(&port->rid);
+	port->nextRid = 0;
 	(void)proc_lockInit(&port->lock, &proc_lockAttrDefault, "port.rid");
 
 	port->threads = NULL;

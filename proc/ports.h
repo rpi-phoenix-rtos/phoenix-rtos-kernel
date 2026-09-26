@@ -27,6 +27,7 @@ typedef struct _port_t {
 	struct _port_t *prev;
 
 	idtree_t rid;
+	int nextRid; /* rids are handed out in rotation, from here */
 
 	kmsg_t *kmessages;
 	process_t *owner;
