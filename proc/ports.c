@@ -99,11 +99,15 @@ void port_put(port_t *p, int destroy)
 	lib_idtreeRemove(&port_common.tree, &p->linkage);
 	(void)proc_lockClear(&port_common.port_lock);
 
-	(void)proc_lockSet(&p->owner->lock);
-	if (p->next != NULL) {
-		LIST_REMOVE(&p->owner->ports, p);
+	/* Ports on an owner's list hold the owner's reference, so a port reaching zero references
+	 * normally has no owner left. A kernel port has none from the start. */
+	if (p->owner != NULL) {
+		(void)proc_lockSet(&p->owner->lock);
+		if (p->next != NULL) {
+			LIST_REMOVE(&p->owner->ports, p);
+		}
+		(void)proc_lockClear(&p->owner->lock);
 	}
-	(void)proc_lockClear(&p->owner->lock);
 
 	(void)proc_lockDone(&p->lock);
 	hal_spinlockDestroy(&p->spinlock);
@@ -154,21 +158,51 @@ int proc_portCreate(u32 *id)
 }
 
 
+/*
+ * Takes the port off the list of owner, as read by the caller. The owner's reference goes
+ * with the list entry, so only the caller that unlinks the port may drop it: returns 1 if
+ * that is this caller. The owner is forgotten too, because the port can outlive it (see
+ * port_put()). A kernel port (owner NULL) is on no list.
+ */
+static int port_disown(port_t *p, process_t *owner)
+{
+	int ret = 1;
+
+	if (owner != NULL) {
+		(void)proc_lockSet(&owner->lock);
+		if ((p->owner == owner) && (p->next != NULL)) {
+			LIST_REMOVE(&owner->ports, p);
+			p->owner = NULL;
+		}
+		else {
+			ret = 0;
+		}
+		(void)proc_lockClear(&owner->lock);
+	}
+
+	return ret;
+}
+
+
 void proc_portDestroy(u32 port)
 {
 	port_t *p = proc_portGet(port);
 	thread_t *curr = proc_current();
 	process_t *proc = (curr == NULL) ? NULL : curr->process;
+	process_t *owner;
+	int owned = 0;
 
 	if (p == NULL) {
 		return;
 	}
 
-	if ((p->closed != 0) || ((proc != NULL) && (p->owner != proc))) {
-		port_put(p, 0);
+	owner = p->owner;
+	if ((p->closed == 0) && ((proc == NULL) || (owner == proc))) {
+		owned = port_disown(p, owner);
 	}
-	else {
-		port_put(p, 0);
+
+	port_put(p, 0);
+	if (owned != 0) {
 		port_put(p, 1);
 	}
 }
@@ -186,6 +220,7 @@ void proc_portsDestroy(process_t *proc)
 			break;
 		}
 		LIST_REMOVE(&proc->ports, p);
+		p->owner = NULL;
 		(void)proc_lockClear(&proc->lock);
 		port_put(p, 1);
 	}
