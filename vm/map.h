@@ -89,6 +89,11 @@ int vm_mapForce(vm_map_t *map, void *paddr, vm_prot_t prot);
 int vm_mapFlags(vm_map_t *map, void *vaddr);
 
 
+/* Returns a reference to the object mapped (without anonymous copies) at [vaddr, vaddr + size)
+ * by a single entry, the offset of vaddr in it and the entry's flags. */
+int vm_mapObjectRange(vm_map_t *map, void *vaddr, size_t size, struct _vm_object_t **o, u64 *offs, vm_flags_t *flags);
+
+
 int vm_lockVerify(vm_map_t *map, struct _amap_t **amap, struct _vm_object_t *o, void *vaddr, u64 offs);
 
 

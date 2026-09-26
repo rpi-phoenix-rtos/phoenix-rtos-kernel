@@ -131,7 +131,9 @@
 	ID(schedInfo) \
 	ID(schedGet) \
 	ID(schedSet) \
-	ID(sys_fdpath)
+	ID(sys_fdpath) \
+	ID(memExport) \
+	ID(memUnexport)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */

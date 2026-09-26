@@ -26,8 +26,25 @@ static struct {
 	rbtree_t tree;
 	vm_object_t *kernel;
 	vm_map_t *kmap;
+	vm_object_t *exports; /* published export windows, see vm_objectExport() */
 	lock_t lock;
 } object_common;
+
+
+/* An anonymous contiguous object (vm_objectContiguous) carries this oid and is never in the tree */
+static int object_isContiguous(const vm_object_t *o)
+{
+	return ((o->oid.port == (u32)(-1)) && (o->oid.id == (id_t)(-1))) ? 1 : 0;
+}
+
+
+/* Makes a published export unreachable by oid. Called with object_common.lock held. */
+static void _object_unpublish(vm_object_t *o)
+{
+	lib_rbRemove(&object_common.tree, &o->linkage);
+	LIST_REMOVE(&object_common.exports, o);
+	o->flags &= (u8)~VM_OBJ_PUBLISHED;
+}
 
 
 static int object_cmp(rbnode_t *n1, rbnode_t *n2)
@@ -100,6 +117,11 @@ int vm_objectGet(vm_object_t **o, oid_t oid)
 			/* Safe to cast - sz fits into size_t from above checks */
 			(*o)->size = (size_t)sz;
 			(*o)->refs = 0;
+			(*o)->flags = 0U;
+			(*o)->memtype = 0U;
+			(*o)->parent = NULL;
+			(*o)->next = NULL;
+			(*o)->prev = NULL;
 
 			for (i = 0; i < n; ++i) {
 				(*o)->pages[i] = NULL;
@@ -148,20 +170,28 @@ int vm_objectPut(vm_object_t *o)
 		return EOK;
 	}
 
-	/* A contiguous object (oid {-1, -1}, see vm_objectContiguous()) is never
-	 * inserted into the tree, and its linkage is all zeros. lib_rbRemove() of
-	 * such a node is not a no-op: with a NULL parent, rb_transplant() makes its
-	 * NULL child the new root, i.e. it EMPTIES the tree -- every cached file
-	 * object is orphaned, and later removals of those orphans can re-point the
-	 * root into freed nodes. Every last unmap of a MAP_CONTIGUOUS buffer (e.g.
-	 * each GPU BO free) did this. */
-	if (!((o->oid.port == (u32)(-1)) && (o->oid.id == (id_t)(-1)))) {
+	/* Only remove what is in the tree: a contiguous object is never inserted (see the fix in
+	 * d0fb0ca9 -- rb-removing its zeroed node empties the tree), and an export window leaves
+	 * the tree when its export is withdrawn (_object_unpublish). */
+	if ((o->flags & VM_OBJ_EXPORT) != 0U) {
+		if ((o->flags & VM_OBJ_PUBLISHED) != 0U) {
+			_object_unpublish(o);
+		}
+	}
+	else if (object_isContiguous(o) == 0) {
 		lib_rbRemove(&object_common.tree, &o->linkage);
+	}
+	else {
+		/* No action required */
 	}
 	(void)proc_lockClear(&object_common.lock);
 
+	if (o->parent != NULL) {
+		/* Export window: the pages belong to the parent */
+		(void)vm_objectPut(o->parent);
+	}
 	/* Contiguous object 'holds' all pages in pages[0] */
-	if ((o->oid.port == (u32)(-1)) && (o->oid.id == (id_t)(-1))) {
+	else if (object_isContiguous(o) != 0) {
 		vm_pageFree(o->pages[0]);
 	}
 	else {
@@ -518,6 +548,176 @@ vm_object_t *vm_objectContiguous(size_t size)
 	}
 
 	return o;
+}
+
+
+/*
+ * Memory export
+ *
+ * A server exports memory it has mapped (MAP_CONTIGUOUS) by publishing an export window: an
+ * object that borrows the pages of the source object and holds a reference to it. The window
+ * is inserted into the object tree under the server's oid, so mmap() of any descriptor carrying
+ * that oid finds it in vm_objectGet() and maps the same pages -- every page is present, so
+ * object_fetchCluster() is never reached and the server is never asked for data.
+ *
+ * Lifetime: the export holds one reference to the window, every mapping holds another, and the
+ * window holds one to its parent. The pages are freed only when the export is withdrawn
+ * (vm_objectUnexport(), or release of the port) AND the last mapping is gone. A withdrawn
+ * window leaves the tree at once, so its oid can never resolve to stale memory.
+ *
+ * Memory type: the window records the cache attributes of the source mapping, and every
+ * mapping of it must request exactly those (vm_objectMapCheck()): a page is never mapped
+ * cached in one place and uncached in another.
+ */
+
+int vm_objectExport(vm_map_t *map, oid_t oid, void *vaddr, size_t size)
+{
+	vm_object_t *o, *parent;
+	vm_flags_t flags;
+	u64 offs;
+	size_t i, n;
+	int err;
+
+	if ((size == 0U) || ((((ptr_t)vaddr | size) & (SIZE_PAGE - 1U)) != 0U)) {
+		return -EINVAL;
+	}
+
+	/* The contiguous sentinel oid is not a name anyone can export under */
+	if ((oid.port == (u32)(-1)) && (oid.id == (id_t)(-1))) {
+		return -EINVAL;
+	}
+
+	n = size / SIZE_PAGE;
+	o = vm_kmalloc(sizeof(vm_object_t) + n * sizeof(page_t *));
+	if (o == NULL) {
+		return -ENOMEM;
+	}
+	hal_memset(o, 0, sizeof(vm_object_t));
+
+	err = vm_mapObjectRange(map, vaddr, size, &parent, &offs, &flags);
+	if (err < 0) {
+		vm_kfree(o);
+		return err;
+	}
+
+	/* Only kernel-allocated anonymous contiguous memory: its pages are all present, owned by
+	 * this object alone and never replaced. A file object's pages are a cache that can be
+	 * refetched, and PHYSMEM has no page ownership at all. */
+	if ((object_isContiguous(parent) == 0) || (offs > parent->size) || (size > (parent->size - offs))) {
+		(void)vm_objectPut(parent);
+		vm_kfree(o);
+		return -EINVAL;
+	}
+
+	hal_memcpy(&o->oid, &oid, sizeof(oid));
+	o->refs = 1; /* the export's reference */
+	o->size = size;
+	o->flags = (u8)(VM_OBJ_EXPORT | VM_OBJ_PUBLISHED);
+	o->memtype = flags & (MAP_UNCACHED | MAP_DEVICE);
+	o->parent = parent; /* takes over the reference from vm_mapObjectRange() */
+
+	for (i = 0; i < n; ++i) {
+		o->pages[i] = parent->pages[(size_t)(offs / SIZE_PAGE) + i];
+	}
+
+	(void)proc_lockSet(&object_common.lock);
+	/* -EEXIST also covers a file object that an early mmap() created under this oid */
+	if (lib_rbInsert(&object_common.tree, &o->linkage) < 0) {
+		(void)proc_lockClear(&object_common.lock);
+		(void)vm_objectPut(parent);
+		vm_kfree(o);
+		return -EEXIST;
+	}
+	LIST_ADD(&object_common.exports, o);
+	parent->flags |= (u8)VM_OBJ_SHARED;
+	(void)proc_lockClear(&object_common.lock);
+
+	return EOK;
+}
+
+
+int vm_objectUnexport(oid_t oid)
+{
+	vm_object_t t, *o;
+
+	hal_memcpy(&t.oid, &oid, sizeof(oid));
+
+	(void)proc_lockSet(&object_common.lock);
+	o = lib_treeof(vm_object_t, linkage, lib_rbFind(&object_common.tree, &t.linkage));
+	if ((o == NULL) || ((o->flags & VM_OBJ_PUBLISHED) == 0U)) {
+		/* Not an export (e.g. a file object under the same oid): leave it alone */
+		(void)proc_lockClear(&object_common.lock);
+		return -ENOENT;
+	}
+	_object_unpublish(o);
+	(void)proc_lockClear(&object_common.lock);
+
+	return vm_objectPut(o);
+}
+
+
+void vm_objectUnexportPort(u32 port)
+{
+	vm_object_t *o;
+	unsigned int n = 0;
+
+	for (;;) {
+		(void)proc_lockSet(&object_common.lock);
+		o = object_common.exports;
+		if (o != NULL) {
+			while (o->oid.port != port) {
+				o = o->next;
+				if (o == object_common.exports) {
+					o = NULL;
+					break;
+				}
+			}
+		}
+		if (o != NULL) {
+			_object_unpublish(o);
+		}
+		(void)proc_lockClear(&object_common.lock);
+
+		if (o == NULL) {
+			break;
+		}
+		(void)vm_objectPut(o);
+		++n;
+	}
+
+	if (n != 0U) {
+		/* Normal for an exporter that exits without withdrawing its exports; the pages
+		 * stay with whoever still maps them. */
+		lib_printf("vm: port %u released with %u memory export(s) still published, withdrawn\n", port, n);
+	}
+}
+
+
+int vm_objectMapCheck(const vm_object_t *o, u64 offs, size_t size, vm_flags_t flags)
+{
+	if ((o == NULL) || (o == VM_OBJ_PHYSMEM) || ((o->flags & VM_OBJ_EXPORT) == 0U)) {
+		return EOK;
+	}
+
+	if ((flags & (MAP_UNCACHED | MAP_DEVICE)) != o->memtype) {
+		return -EINVAL;
+	}
+
+	if ((offs == VM_OFFS_MAX) || (offs > (u64)o->size) || ((u64)size > ((u64)o->size - offs))) {
+		return -EINVAL;
+	}
+
+	return EOK;
+}
+
+
+int vm_objectShared(const vm_object_t *o)
+{
+	if ((o == NULL) || (o == VM_OBJ_PHYSMEM)) {
+		return 0;
+	}
+
+	return ((o->flags & (VM_OBJ_EXPORT | VM_OBJ_SHARED)) != 0U) ? 1 : 0;
 }
 
 

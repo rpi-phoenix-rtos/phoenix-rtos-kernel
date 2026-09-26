@@ -618,6 +618,11 @@ void *_vm_mmap(vm_map_t *map, void *vaddr, page_t *p, size_t size, vm_prot_t pro
 		return NULL;
 	}
 
+	/* Exported memory is mapped only with its own memory type and within its size */
+	if (vm_objectMapCheck(o, offs, size, flags) < 0) {
+		return NULL;
+	}
+
 	if ((flags & MAP_FIXED) != 0U) {
 		if (_vm_munmap(map, vaddr, size) < 0) {
 			return NULL;
@@ -710,6 +715,35 @@ int vm_lockVerify(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 	}
 
 	return EOK;
+}
+
+
+int vm_mapObjectRange(vm_map_t *map, void *vaddr, size_t size, vm_object_t **o, u64 *offs, vm_flags_t *flags)
+{
+	map_entry_t t, *e;
+	int err = -EINVAL;
+
+	(void)proc_lockSet(&map->lock);
+
+	t.vaddr = vaddr;
+	t.size = SIZE_PAGE;
+
+	e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &t.linkage));
+
+	/* One entry must cover the whole range and map object pages directly: no anonymous
+	 * (amap) copies over them and no pending COW */
+	if ((e != NULL) && (size <= e->size) && (((ptr_t)vaddr - (ptr_t)e->vaddr) <= (e->size - size)) &&
+			(e->object != NULL) && (e->object != VM_OBJ_PHYSMEM) && (e->amap == NULL) &&
+			(e->offs != VM_OFFS_MAX) && ((e->flags & MAP_NEEDSCOPY) == 0U)) {
+		*o = vm_objectRef(e->object);
+		*offs = e->offs + ((ptr_t)vaddr - (ptr_t)e->vaddr);
+		*flags = e->flags;
+		err = EOK;
+	}
+
+	(void)proc_lockClear(&map->lock);
+
+	return err;
 }
 
 
@@ -1379,7 +1413,9 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 		_vm_mapEntryCopy(f, e, 1);
 		(void)_map_add(proc, dst, f);
 
-		if ((e->flags & MAP_DEVICE) == 0U) {
+		/* Exported memory stays shared: a COW copy would silently detach this process
+		 * from pages other processes (and devices) keep using */
+		if (((e->flags & MAP_DEVICE) == 0U) && (vm_objectShared(e->object) == 0)) {
 			e->flags |= MAP_NEEDSCOPY;
 			f->flags |= MAP_NEEDSCOPY;
 

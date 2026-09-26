@@ -109,6 +109,14 @@ int syscalls_sys_mmap(u8 *ustack)
 		if (err < 0) {
 			return err;
 		}
+
+		/* Exported memory: refuse another memory type or a range past its end with a
+		 * specific error (vm_mmap() enforces the same, but reports only failure) */
+		err = vm_objectMapCheck(o, (u64)offs, size, flags);
+		if (err < 0) {
+			(void)vm_objectPut(o);
+			return err;
+		}
 	}
 
 	flags &= ~(MAP_ANONYMOUS | MAP_CONTIGUOUS | MAP_PHYSMEM | MAP_NEEDSCOPY);
@@ -122,6 +130,92 @@ int syscalls_sys_mmap(u8 *ustack)
 	}
 
 	return EOK;
+}
+
+
+#ifndef NOMMU
+/* Returns a reference to port id if it is open and owned by proc, NULL otherwise */
+static port_t *syscalls_portOwned(process_t *proc, u32 id)
+{
+	port_t *port = proc_portGet(id);
+
+	if ((port != NULL) && ((port->owner != proc) || (port->closed != 0))) {
+		port_put(port, 0);
+		port = NULL;
+	}
+
+	return port;
+}
+#endif
+
+
+int syscalls_memExport(u8 *ustack)
+{
+#ifndef NOMMU
+	process_t *proc = proc_current()->process;
+	const oid_t *uoid;
+	void *vaddr;
+	size_t size;
+	port_t *port;
+	oid_t oid;
+	int err;
+
+	GETFROMSTACK(ustack, const oid_t *, uoid, 0U);
+	GETFROMSTACK(ustack, void *, vaddr, 1U);
+	GETFROMSTACK(ustack, size_t, size, 2U);
+
+	if (vm_mapBelongs(proc, uoid, sizeof(*uoid)) < 0) {
+		return -EFAULT;
+	}
+	hal_memcpy(&oid, uoid, sizeof(oid));
+
+	/* Only the owner of a port exports under it. The reference is held across the export,
+	 * so the port cannot be released (withdrawing its exports) half-way through. */
+	port = syscalls_portOwned(proc, oid.port);
+	if (port == NULL) {
+		return -EPERM;
+	}
+
+	err = vm_objectExport(proc->mapp, oid, vaddr, size);
+	port_put(port, 0);
+
+	return err;
+#else
+	(void)ustack;
+	return -ENOSYS;
+#endif
+}
+
+
+int syscalls_memUnexport(u8 *ustack)
+{
+#ifndef NOMMU
+	process_t *proc = proc_current()->process;
+	const oid_t *uoid;
+	port_t *port;
+	oid_t oid;
+	int err;
+
+	GETFROMSTACK(ustack, const oid_t *, uoid, 0U);
+
+	if (vm_mapBelongs(proc, uoid, sizeof(*uoid)) < 0) {
+		return -EFAULT;
+	}
+	hal_memcpy(&oid, uoid, sizeof(oid));
+
+	port = syscalls_portOwned(proc, oid.port);
+	if (port == NULL) {
+		return -EPERM;
+	}
+
+	err = vm_objectUnexport(oid);
+	port_put(port, 0);
+
+	return err;
+#else
+	(void)ustack;
+	return -ENOSYS;
+#endif
 }
 
 

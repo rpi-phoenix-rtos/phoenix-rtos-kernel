@@ -13,6 +13,7 @@
 
 #include "ports.h"
 #include "lib/lib.h"
+#include "vm/object.h"
 
 
 static struct {
@@ -96,6 +97,12 @@ void port_put(port_t *p, int destroy)
 	}
 
 	hal_spinlockClear(&p->spinlock, &sc);
+
+	/* The id becomes reusable below. Withdraw memory exported under it first, or a new port
+	 * with the same id would inherit those names. No export can be in progress: exporting
+	 * holds a port reference. */
+	vm_objectUnexportPort((u32)p->linkage.id);
+
 	lib_idtreeRemove(&port_common.tree, &p->linkage);
 	(void)proc_lockClear(&port_common.port_lock);
 
