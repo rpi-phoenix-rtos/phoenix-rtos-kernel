@@ -29,9 +29,11 @@ typedef struct _dcache_entry_t {
 static struct {
 	int rootRegistered;
 	oid_t rootOid;
-	/* TODO(TD-14-devfs-direct): devfs fast-path cache. The short-circuit
-	 * in proc_portLookup() uses these to skip a proc_send to the root
-	 * server (avoids the Pi 4 cold-boot devfs lookup race). */
+	/* Deliberate deviation from upstream (accepted fork change, formerly
+	 * TD-14-devfs-direct): devfs fast-path cache. The short-circuit in
+	 * proc_portLookup() uses these to skip a proc_send to the root server,
+	 * which otherwise races devfs's own portRegister at cold boot. Keep it
+	 * across upstream merges. */
 	int devfsRegistered;
 	oid_t devfsOid;
 
@@ -253,10 +255,11 @@ int proc_portLookup(const char *name, oid_t *file, oid_t *dev)
 		return -ENOENT;
 	}
 
-	/* TODO(TD-14-devfs-direct): devfs fast path — short-circuit a "devfs"
-	 * lookup to the cached devfsOid instead of a proc_send to the root
-	 * server. name_traceDevfsLookup() despite its name is the live
-	 * fast-path predicate (see comment above it), not a diagnostic. */
+	/* Deliberate deviation from upstream (formerly TD-14-devfs-direct):
+	 * short-circuit a "devfs" lookup to the cached devfsOid instead of a
+	 * proc_send to the root server. name_traceDevfsLookup() despite its name
+	 * is the live fast-path predicate (see comment above it), not a
+	 * diagnostic. Before devfs registers it answers -ENOENT, never a guess. */
 	if (traceDevfs != 0) {
 		(void)proc_lockSet(&name_common.lock);
 		if (name_common.devfsRegistered != 0) {
