@@ -367,35 +367,6 @@ static void exceptions_defaultHandler(unsigned int n, exc_context_t *ctx)
 }
 
 
-/* TD-10: dedicated SError policy.
- *
- * SError is an asynchronous abort: ELR_EL1/PC only approximate where
- * execution was when it was taken, and FAR_EL1 is not meaningful. The
- * decisive information is in ESR_EL1 (EA, AET, DFSC, IDS), which the
- * context dump prints raw.
- *
- * Policy: ALWAYS halt with the dump on the console - never reboot, even
- * in release builds where exceptions_defaultHandler would reboot. On the
- * Pi 4 an SError signals a genuine, otherwise-invisible fault (external
- * bus / parity abort) that was previously hidden by masking SError across
- * all paths; a silent reset would destroy that evidence. Revisit a
- * contained-error continue policy only once the real SError sources on
- * this SoC have been characterized. */
-static void exceptions_serrorHandler(unsigned int n, exc_context_t *ctx)
-{
-	char buff[SIZE_CTXDUMP];
-
-	hal_exceptionsDumpContext(buff, ctx, n);
-	hal_consolePrint(ATTR_BOLD, "\nasynchronous SError taken - halting (decode ESR.{EA,AET,DFSC,IDS}):\n");
-	hal_consolePrint(ATTR_BOLD, buff);
-	hal_exceptionsBacktrace(ctx);
-
-	for (;;) {
-		hal_cpuHalt();
-	}
-}
-
-
 /* Value-trap window for the watchpoint handler, set by hal_cpuWatchpointSet
  * (cpu.c). trapHi == 0 => halt on any store. */
 extern addr_t hal_wpTrapLo;
@@ -574,9 +545,6 @@ void _hal_exceptionsInit(void)
 	for (i = 0; i < N_EXCEPTIONS; i++) {
 		exceptions.handler[i] = exceptions_trampoline;
 	}
-
-	/* TD-10: SError gets a dedicated dump-and-halt handler (see above). */
-	exceptions.handler[EXC_SERROR] = exceptions_serrorHandler;
 
 	/* Route A: EL0 data watchpoints (armed via platformctl(pctl_watchpoint))
 	 * dump-and-halt instead of the default reboot, so the writer is readable. */

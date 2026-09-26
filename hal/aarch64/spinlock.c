@@ -22,13 +22,20 @@ static struct {
 } spinlock_common;
 
 
+/* Deliberate deviation from upstream (accepted fork change): a held spinlock
+ * masks SError as well as IRQ/FIQ (daifSet #7, upstream #3). SError is
+ * unmasked in exception, syscall and IRQ dispatch, and its handler prints
+ * through hal_consolePrint(), which takes console_common.lock -- so an SError
+ * taken while this CPU holds that lock would deadlock the CPU. Masked here, it
+ * is taken as soon as the lock is released instead. Keep across upstream
+ * merges. */
 void hal_spinlockSet(spinlock_t *spinlock, spinlock_ctx_t *sc)
 {
 #if NUM_CPUS == 1
 	(void)spinlock;
 	__asm__ volatile(
 		"mrs x2, daif\n"
-		"msr daifSet, #3\n"
+		"msr daifSet, #7\n"
 		"str w2, [%0]\n"
 		:
 		: "r"(sc)
@@ -50,7 +57,7 @@ void hal_spinlockSet(spinlock_t *spinlock, spinlock_ctx_t *sc)
 	/* clang-format off */
 	__asm__ volatile (
 		"mrs x2, daif\n"
-		"msr daifSet, #3\n"
+		"msr daifSet, #7\n"
 		"str w2, [%0]\n"
 		"b 2f\n"
 	"1:\n"

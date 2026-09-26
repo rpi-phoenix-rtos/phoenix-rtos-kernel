@@ -181,15 +181,14 @@ _exceptions_dispatch:
 	stp X_ESR_EL1, x1, [sp, #-0x10]!
 	mov x1, sp
 
-	/* Do not implicitly unmask SError/FIQ while dispatching exceptions. */
-	msr daifClr, #2
+	msr daifClr, #7
 
 	/* Arguments to exceptions_dispatch:
 	 * * x0 - exception class
 	 * * x1 - pointer to exception context */
 	bl exceptions_dispatch
 
-	msr daifSet, #2
+	msr daifSet, #7
 
 	ldr x1, [sp, #0x10] /* Discard esr, far - not needed to restore context */
 	b _hal_cpuRestoreCtx
@@ -200,8 +199,7 @@ _syscalls_dispatch:
 	b.ne .L_el1_syscall
 	mov x1, X_OLD_SP
 	mov x2, sp
-	/* Do not implicitly unmask SError/FIQ while dispatching syscalls. */
-	msr daifClr, #2
+	msr daifClr, #7
 
 	/* Arguments to syscalls_dispatch:
 	 * * x0 - syscall number
@@ -209,7 +207,7 @@ _syscalls_dispatch:
 	 * * x2 - pointer to exception context */
 	bl syscalls_dispatch
 
-	msr daifSet, #2
+	msr daifSet, #7
 
 	ldr x1, [sp]
 	b _hal_cpuRestoreCtx
@@ -254,11 +252,14 @@ _syscalls_dispatch:
 _interrupts_dispatch:
 	mov x1, sp
 	mov x0, #0
+	msr daifClr, #4
 
 	/* Arguments to interrupts_dispatch:
 	 * * x0 - interrupt number (unused)
 	 * * x1 - pointer to CPU context */
 	bl interrupts_dispatch
+
+	msr daifSet, #4
 
 	ldr x1, [sp]
 	/* Check return value to see if reschedule was performed */
@@ -386,10 +387,7 @@ hal_jmp:
 	mov sp, x1
 	msr sp_el0, x2
 	/* TODO: There are some extensions that have their flags in SPSR and we clear them here. */
-	/* TD-10: SError stays masked at user entry. A real handler exists, but
-	 * unmasking exposed a live PCIe/USB external-abort SError source that
-	 * must be fixed first (see hal/aarch64/cpu.c TD-10 note). */
-	mov x1, #(MODE_EL0 | NO_SERR)
+	mov x1, #MODE_EL0
 	msr spsr_el1, x1
 
 	eret
