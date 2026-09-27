@@ -129,6 +129,13 @@ int syscalls_sys_mmap(u8 *ustack)
 		return -ENOMEM;
 	}
 
+#ifdef C1_PAGE_PROVENANCE
+	/* TODO(C1-hunt): a physical mapping allocates nothing, so the page log must be told */
+	if (o == VM_OBJ_PHYSMEM) {
+		vm_pageProvPhys((addr_t)offs, size, flags);
+	}
+#endif
+
 	return EOK;
 }
 
@@ -698,6 +705,13 @@ void syscalls_meminfo(u8 *ustack)
 	GETFROMSTACK(ustack, meminfo_t *, info, 0U);
 
 	if (vm_mapBelongs(proc, info, sizeof(*info)) >= 0) {
+#ifdef C1_PAGE_PROVENANCE
+		/* TODO(C1-hunt): provenance dump request, see C1PROV_MEMINFO_MAGIC in vm/page.h */
+		if ((info->page.mapsz == C1PROV_MEMINFO_MAGIC) && (info->entry.mapsz == C1PROV_MEMINFO_MAGIC)) {
+			info->page.alloc = vm_pageProvDump((addr_t)info->maps.total, info->maps.free, info->entry.pid);
+			return;
+		}
+#endif
 		vm_meminfo(info);
 	}
 }
