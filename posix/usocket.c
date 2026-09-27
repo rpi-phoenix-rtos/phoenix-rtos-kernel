@@ -110,6 +110,16 @@ struct _usocket_t {
 
 	thread_t *acceptq; /* accept(): pending != NULL or no longer listening */
 	thread_t *connq;   /* connect(): state != usocketConnecting */
+
+	/*
+	 * SO_PEERCRED: `ownPid` is the process that called listen() or connect()
+	 * (or socketpair()) on this endpoint, `peerPid` the one on the other end,
+	 * 0 while there is none. A connector's ownPid is set before it is queued
+	 * and not changed while it is, so the acceptor may read it under the
+	 * connector's lock.
+	 */
+	int ownPid;
+	int peerPid;
 };
 
 
@@ -123,6 +133,15 @@ static struct {
 static int usocket_isFramed(const usocket_t *s)
 {
 	return (s->type != SOCK_STREAM) ? 1 : 0;
+}
+
+
+/* The pid SO_PEERCRED reports for the calling process. */
+static int usocket_callerPid(void)
+{
+	thread_t *t = proc_current();
+
+	return ((t != NULL) && (t->process != NULL)) ? process_getPid(t->process) : 0;
 }
 
 
@@ -157,6 +176,8 @@ static usocket_t *usocket_alloc(unsigned int type, int nonblock)
 	s->backlog = 0;
 	s->acceptq = NULL;
 	s->connq = NULL;
+	s->ownPid = 0;
+	s->peerPid = 0;
 
 	return s;
 }
@@ -418,6 +439,10 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 	s[1]->tx = uchannel_ref(ch[0]);
 	s[0]->state = (u8)usocketConnected;
 	s[1]->state = (u8)usocketConnected;
+	s[0]->ownPid = usocket_callerPid();
+	s[0]->peerPid = s[0]->ownPid;
+	s[1]->ownPid = s[0]->ownPid;
+	s[1]->peerPid = s[0]->ownPid;
 
 	sv[0] = s[0];
 	sv[1] = s[1];
@@ -522,6 +547,7 @@ int usocket_listen(usocket_t *s, int backlog)
 	else if (s->state == (u8)usocketUnconnected) {
 		s->state = (u8)usocketListening;
 		s->backlog = (u8)limit;
+		s->ownPid = usocket_callerPid();
 		err = EOK;
 	}
 	else if (s->state == (u8)usocketListening) {
@@ -653,6 +679,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 	}
 	if (err == EOK) {
 		s->state = (u8)usocketConnecting;
+		s->ownPid = usocket_callerPid();
 	}
 	rcvbuf = s->rcvbuf;
 
@@ -802,7 +829,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 	usocket_t *cs, *ns;
 	uchannel_t *c2s, *tx, *oldTx;
 	size_t rcvbuf;
-	int err, nonblock;
+	int err, nonblock, listenerPid, connectorPid;
 
 	if ((ls->type != SOCK_STREAM) && (ls->type != SOCK_SEQPACKET)) {
 		return -EOPNOTSUPP;
@@ -840,6 +867,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 		LIST_REMOVE(&ls->pending, cs);
 		ls->pendingCnt--;
 		rcvbuf = ls->rcvbuf;
+		listenerPid = ls->ownPid;
 
 		(void)proc_lockClear(&ls->lock);
 
@@ -881,6 +909,8 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 		tx = uchannel_ref(cs->rx);
 		oldTx = cs->tx;
 		cs->tx = uchannel_ref(c2s);
+		cs->peerPid = listenerPid;
+		connectorPid = cs->ownPid;
 		cs->state = (u8)usocketConnected;
 		(void)proc_threadBroadcast(&cs->connq);
 		uchannel_pollNotify();
@@ -895,6 +925,8 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 		ns->rcvbuf = rcvbuf;
 		ns->rx = c2s;
 		ns->tx = tx;
+		ns->ownPid = listenerPid;
+		ns->peerPid = connectorPid;
 		ns->state = (u8)usocketConnected;
 
 		*s = ns;
@@ -916,6 +948,31 @@ int usocket_getsockname(usocket_t *s, struct sockaddr *address, socklen_t *addre
 }
 
 
+/*
+ * SO_PEERCRED: the peer's pid as captured at connect()/listen()/socketpair().
+ * A socket that is not connected (or a datagram socket connected with
+ * connect(), which has no peer process) has no peer: ENOTCONN, as on OpenBSD.
+ */
+static int usocket_getPeerCred(usocket_t *s, struct ucred *cred)
+{
+	int pid;
+
+	(void)proc_lockSet(&s->lock);
+	pid = (s->state == (u8)usocketConnected) ? s->peerPid : 0;
+	(void)proc_lockClear(&s->lock);
+
+	if (pid == 0) {
+		return -ENOTCONN;
+	}
+
+	cred->pid = pid;
+	cred->uid = 0; /* no users yet (see struct ucred) */
+	cred->gid = 0;
+
+	return EOK;
+}
+
+
 int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, socklen_t *optlen)
 {
 	uchannel_t *rx;
@@ -927,7 +984,24 @@ int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, sockl
 		return -EINVAL;
 	}
 
-	if ((optval == NULL) || (optlen == NULL) || (*optlen < sizeof(int))) {
+	if ((optval == NULL) || (optlen == NULL)) {
+		return -EINVAL;
+	}
+
+	if ((unsigned int)optname == SO_PEERCRED) {
+		if (*optlen < sizeof(struct ucred)) {
+			return -EINVAL;
+		}
+
+		err = usocket_getPeerCred(s, (struct ucred *)optval);
+		if (err == EOK) {
+			*optlen = (socklen_t)sizeof(struct ucred);
+		}
+
+		return err;
+	}
+
+	if (*optlen < sizeof(int)) {
 		return -EINVAL;
 	}
 
