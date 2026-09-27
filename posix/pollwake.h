@@ -66,8 +66,7 @@ void pollwake_unregister(pollwake_waiter_t *w);
 
 
 /* Sleeps until a watched oid is notified or the absolute deadline (proc_gettime
- * units) passes. Returns -EINTR if a signal interrupted the sleep, which only a
- * waiter with watchUnix set allows (the AF_UNIX wait's behaviour). */
+ * units) passes. Returns -EINTR if a caught signal interrupted the sleep. */
 int pollwake_wait(pollwake_waiter_t *w, time_t deadline);
 
 

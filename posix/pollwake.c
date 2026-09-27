@@ -101,20 +101,14 @@ int pollwake_wait(pollwake_waiter_t *w, time_t deadline)
 	spinlock_ctx_t sc;
 	int err;
 
-	/* Keep each set's signal behaviour as it was before this wait existed. A set
-	 * with an AF_UNIX socket used to block in the interruptible usocket_pollWait(),
-	 * so a caught signal ends that poll() with -EINTR. A set of server-backed fds
-	 * only used to sleep and ignore the interruption, so its handler ran once an
-	 * fd became ready or the timeout expired; an uninterruptible wait bounded by
-	 * the same deadline keeps that. (POSIX asks for -EINTR in both cases; switching
-	 * the second one is a one-line, separately reviewable change.) */
+	/* Always interruptible. A caught signal ends poll() with -EINTR (POSIX), as
+	 * it did before this wait existed: sets with an AF_UNIX socket blocked in the
+	 * interruptible usocket_pollWait(), and sets of server fds only got it from the
+	 * next re-query's interruptible proc_send(), up to 20 ms later. An
+	 * uninterruptible wait here kept that delay (measured 1001.4 ms vs 1000.0 ms
+	 * for the mixed set) and also delayed a thread kill by up to 20 ms. */
 	hal_spinlockSet(&pollwake_common.lock, &sc);
-	if (w->watchUnix != 0U) {
-		err = proc_threadWaitInterruptible(&w->queue, &pollwake_common.lock, deadline, &sc);
-	}
-	else {
-		err = proc_threadWait(&w->queue, &pollwake_common.lock, deadline, &sc);
-	}
+	err = proc_threadWaitInterruptible(&w->queue, &pollwake_common.lock, deadline, &sc);
 	hal_spinlockClear(&pollwake_common.lock, &sc);
 
 	return err;
