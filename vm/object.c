@@ -372,7 +372,7 @@ static int object_fetchCluster(oid_t oid, u64 offs, size_t osize, size_t want, p
 	}
 
 	for (i = 0; i < want; ++i) {
-		p = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+		p = VM_PAGE_ALLOC(SIZE_PAGE, PAGE_OWNER_APP, PAGE_PROV_FILE);
 		if (p == NULL) {
 			break;
 		}
@@ -414,7 +414,7 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 	int err;
 
 	if (o == NULL) {
-		*page = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+		*page = VM_PAGE_ALLOC(SIZE_PAGE, PAGE_OWNER_APP, (map == object_common.kmap) ? PAGE_PROV_KANON : PAGE_PROV_ANON);
 		return (*page != NULL) ? EOK : -ENOMEM;
 	}
 
@@ -522,7 +522,7 @@ vm_object_t *vm_objectContiguous(size_t size)
 	page_t *p;
 	size_t i, n;
 
-	p = vm_pageAlloc(size, PAGE_OWNER_APP);
+	p = VM_PAGE_ALLOC(size, PAGE_OWNER_APP, PAGE_PROV_CONTIG);
 	if (p == NULL) {
 		return NULL;
 	}

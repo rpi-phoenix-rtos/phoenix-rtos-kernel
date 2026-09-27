@@ -279,7 +279,7 @@ int amap_page(vm_map_t *map, amap_t *amap, vm_object_t *o, void *vaddr, size_t a
 
 	if (a != NULL || o != NULL) {
 		/* Copy from object or shared anon */
-		*page = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+		*page = VM_PAGE_ALLOC(SIZE_PAGE, PAGE_OWNER_APP, PAGE_PROV_COW);
 		if (*page == NULL) {
 			(void)amap_unmap(map, v);
 			if (a != NULL) {

@@ -195,7 +195,7 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 		ml->boffs = boffs;
 		bpa = pmap_resolve(&srcmap->pmap, data) & ~(SIZE_PAGE - 1U);
 
-		nbp = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+		nbp = VM_PAGE_ALLOC(SIZE_PAGE, PAGE_OWNER_APP, PAGE_PROV_MSG);
 		ml->bp = nbp;
 		if (nbp == NULL) {
 			return NULL;
@@ -236,7 +236,7 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 		epa = pmap_resolve(&srcmap->pmap, vaddr) & ~(SIZE_PAGE - 1U);
 
 		if ((boffs == 0U) || (eoffs >= boffs)) {
-			nep = vm_pageAlloc(SIZE_PAGE, PAGE_OWNER_APP);
+			nep = VM_PAGE_ALLOC(SIZE_PAGE, PAGE_OWNER_APP, PAGE_PROV_MSG);
 			ml->ep = nep;
 			if (nep == NULL) {
 				return NULL;
