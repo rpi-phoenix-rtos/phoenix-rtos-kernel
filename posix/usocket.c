@@ -76,6 +76,9 @@
 #define USOCKET_SHUT_WR  (1U << 2)
 #define USOCKET_BOUND    (1U << 3)
 
+/* Longest socket path, the size of sun_path in struct sockaddr_un */
+#define USOCKET_PATH_MAX 108U
+
 
 /* Socket state */
 enum {
@@ -86,6 +89,19 @@ enum {
 	usocketAborted,         /* connect() refused or interrupted, `err` says why */
 	usocketClosed           /* close() done, the channels are dropped and no syscall can see it */
 };
+
+
+/*
+ * The address a socket is bound to, as reported by getsockname() and
+ * getpeername(). It is immutable once made, so an endpoint can share it with the
+ * sockets that report it too (an accepted socket reports its listener's address)
+ * instead of reading it from them.
+ */
+typedef struct {
+	int refs; /* atomic */
+	size_t len; /* of the path, without the terminating NUL */
+	char path[];
+} usocket_addr_t;
 
 
 struct _usocket_t {
@@ -103,6 +119,8 @@ struct _usocket_t {
 	size_t rcvbuf;  /* size of the channels created for this socket */
 	uchannel_t *rx; /* counted */
 	uchannel_t *tx; /* counted */
+	usocket_addr_t *addr;     /* counted, NULL while unbound */
+	usocket_addr_t *peerAddr; /* counted, NULL while the peer is unbound */
 
 	struct _usocket_t *pending; /* connectors waiting to be accepted, counted */
 	u8 pendingCnt;
@@ -118,6 +136,74 @@ static struct {
 	lock_t lock;
 	int nextId;
 } usocket_common;
+
+
+/* Makes an address of the first `len` bytes of `path`. */
+static usocket_addr_t *usocket_addrAlloc(const char *path, size_t len)
+{
+	usocket_addr_t *addr;
+
+	addr = vm_kmalloc(sizeof(usocket_addr_t) + len + 1U);
+	if (addr != NULL) {
+		addr->refs = 1;
+		addr->len = len;
+		hal_memcpy(addr->path, path, len);
+		addr->path[len] = '\0';
+	}
+
+	return addr;
+}
+
+
+static usocket_addr_t *usocket_addrRef(usocket_addr_t *addr)
+{
+	if (addr != NULL) {
+		(void)lib_atomicIncrement(&addr->refs);
+	}
+
+	return addr;
+}
+
+
+static void usocket_addrPut(usocket_addr_t *addr)
+{
+	if ((addr != NULL) && (lib_atomicDecrement(&addr->refs) == 0)) {
+		vm_kfree(addr);
+	}
+}
+
+
+/*
+ * Returns an address to the caller the way getsockname() and getpeername() do:
+ * truncated to the caller's buffer, with the length of the whole address. An
+ * unbound socket has only the family.
+ */
+static int usocket_addrCopyOut(const usocket_addr_t *addr, struct sockaddr *address, socklen_t *address_len)
+{
+	sa_family_t family = AF_UNIX;
+	size_t len, n;
+
+	if (address_len == NULL) {
+		return -EINVAL;
+	}
+
+	len = sizeof(sa_family_t);
+	if (addr != NULL) {
+		len += addr->len + 1U;
+	}
+
+	n = min(len, (size_t)*address_len);
+	if (n > 0U) {
+		hal_memcpy(address, &family, min(n, sizeof(family)));
+	}
+	if (n > sizeof(family)) {
+		hal_memcpy(address->sa_data, addr->path, n - sizeof(family));
+	}
+
+	*address_len = (socklen_t)len;
+
+	return EOK;
+}
 
 
 static int usocket_isFramed(const usocket_t *s)
@@ -152,6 +238,8 @@ static usocket_t *usocket_alloc(unsigned int type, int nonblock)
 	s->rcvbuf = USOCKET_DEF_BUFFER_SIZE;
 	s->rx = NULL;
 	s->tx = NULL;
+	s->addr = NULL;
+	s->peerAddr = NULL;
 	s->pending = NULL;
 	s->pendingCnt = 0;
 	s->backlog = 0;
@@ -188,6 +276,8 @@ static void usocket_put(usocket_t *s)
 	 */
 	uchannel_put(s->rx);
 	uchannel_put(s->tx);
+	usocket_addrPut(s->addr);
+	usocket_addrPut(s->peerAddr);
 	(void)proc_lockDone(&s->lock);
 	vm_kfree(s);
 }
@@ -428,18 +518,29 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 
 int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address_len)
 {
+	usocket_addr_t *addr, *oldAddr;
 	char *path, *name;
-	const char *dir;
+	const char *dir, *sunPath;
 	oid_t odir, dev, node;
+	size_t len, maxLen;
 	int err, id;
 
-	/* TODO: validate `address_len` */
-	if ((address == NULL) || (address_len == 0U)) {
+	if ((address == NULL) || (address_len <= sizeof(sa_family_t))) {
 		return -EINVAL;
 	}
 
 	if (address->sa_family != (sa_family_t)AF_UNIX) {
 		return -EAFNOSUPPORT;
+	}
+
+	/* the path ends at its NUL, or at the end of the address if that comes first */
+	sunPath = address->sa_data;
+	maxLen = min((size_t)address_len - sizeof(sa_family_t), USOCKET_PATH_MAX);
+	for (len = 0; (len < maxLen) && (sunPath[len] != '\0'); len++) {
+	}
+
+	if (len == 0U) {
+		return -EINVAL;
 	}
 
 	/*
@@ -449,13 +550,24 @@ int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address
 	 * exchanges below run without any lock held.
 	 */
 
-	path = lib_strdup(address->sa_data);
+	addr = usocket_addrAlloc(sunPath, len);
+	path = (addr != NULL) ? lib_strdup(addr->path) : NULL;
 	id = (path != NULL) ? usocket_nameAlloc(s) : -ENOMEM;
 
 	if (id < 0) {
 		vm_kfree(path);
+		usocket_addrPut(addr);
 		return id;
 	}
+
+	/*
+	 * The address is in place before the socket file is made, so that no one
+	 * who reaches the socket by its name can find it without one.
+	 */
+	(void)proc_lockSet(&s->lock);
+	oldAddr = s->addr;
+	s->addr = addr;
+	(void)proc_lockClear(&s->lock);
 
 	lib_splitname(path, &name, &dir);
 
@@ -491,8 +603,16 @@ int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address
 		(void)proc_lockSet(&s->lock);
 		s->flags |= USOCKET_BOUND;
 		(void)proc_lockClear(&s->lock);
+
+		usocket_addrPut(oldAddr);
 	}
 	else {
+		(void)proc_lockSet(&s->lock);
+		s->addr = oldAddr;
+		(void)proc_lockClear(&s->lock);
+
+		usocket_addrPut(addr);
+
 		if (usocket_nameFree(s) != 0) {
 			usocket_put(s);
 		}
@@ -583,6 +703,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 {
 	usocket_t *ls;
 	uchannel_t *ch, *rx, *oldTx = NULL, *oldRx;
+	usocket_addr_t *peerAddr, *oldPeerAddr;
 	oid_t oid;
 	size_t rcvbuf;
 	int err = EOK, nonblock;
@@ -681,10 +802,12 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		 */
 		(void)proc_lockSet(&ls->lock);
 		ch = uchannel_ref(ls->rx);
+		peerAddr = usocket_addrRef(ls->addr);
 		(void)proc_lockClear(&ls->lock);
 		usocket_put(ls);
 
 		if (ch == NULL) {
+			usocket_addrPut(peerAddr);
 			usocket_connectRollback(s);
 			return -ECONNREFUSED;
 		}
@@ -692,11 +815,14 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		(void)proc_lockSet(&s->lock);
 		oldTx = s->tx;
 		s->tx = ch;
+		oldPeerAddr = s->peerAddr;
+		s->peerAddr = peerAddr;
 		s->state = (u8)usocketConnected;
 		(void)proc_lockClear(&s->lock);
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
+		usocket_addrPut(oldPeerAddr);
 
 		return EOK;
 	}
@@ -801,6 +927,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 {
 	usocket_t *cs, *ns;
 	uchannel_t *c2s, *tx, *oldTx;
+	usocket_addr_t *addr, *peerAddr, *oldPeerAddr;
 	size_t rcvbuf;
 	int err, nonblock;
 
@@ -839,6 +966,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 		cs = ls->pending;
 		LIST_REMOVE(&ls->pending, cs);
 		ls->pendingCnt--;
+		addr = usocket_addrRef(ls->addr);
 		rcvbuf = ls->rcvbuf;
 
 		(void)proc_lockClear(&ls->lock);
@@ -847,10 +975,14 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		ns = usocket_alloc(ls->type, nonblock);
 		if (ns == NULL) {
+			usocket_addrPut(addr);
 			usocket_abort(cs, ECONNREFUSED);
 			usocket_put(cs);
 			return -ENOMEM;
 		}
+
+		/* ns is not reachable yet, and reports the listener's address as its own */
+		ns->addr = addr;
 
 		c2s = uchannel_alloc(rcvbuf, usocket_isFramed(ls));
 		if (c2s == NULL) {
@@ -862,7 +994,8 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/*
 		 * The one and only place where a socket touches another socket's
-		 * endpoint: handing the channels over to the connector.
+		 * endpoint: handing the channels and the listener's address over to
+		 * the connector, and taking the connector's address in return.
 		 */
 		(void)proc_lockSet(&cs->lock);
 
@@ -878,6 +1011,10 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 			continue;
 		}
 
+		peerAddr = usocket_addrRef(cs->addr);
+		oldPeerAddr = cs->peerAddr;
+		cs->peerAddr = usocket_addrRef(addr);
+
 		tx = uchannel_ref(cs->rx);
 		oldTx = cs->tx;
 		cs->tx = uchannel_ref(c2s);
@@ -889,9 +1026,11 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
+		usocket_addrPut(oldPeerAddr);
 		usocket_put(cs);
 
 		/* ns is not reachable yet */
+		ns->peerAddr = peerAddr;
 		ns->rcvbuf = rcvbuf;
 		ns->rx = c2s;
 		ns->tx = tx;
@@ -906,13 +1045,38 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 int usocket_getpeername(usocket_t *s, struct sockaddr *address, socklen_t *address_len)
 {
-	return 0;
+	usocket_addr_t *addr;
+	int connected, err;
+
+	(void)proc_lockSet(&s->lock);
+	connected = (s->state == (u8)usocketConnected) ? 1 : 0;
+	addr = usocket_addrRef(s->peerAddr);
+	(void)proc_lockClear(&s->lock);
+
+	/* no lock is held while the caller's memory is written */
+	err = (connected != 0) ? usocket_addrCopyOut(addr, address, address_len) : -ENOTCONN;
+
+	usocket_addrPut(addr);
+
+	return err;
 }
 
 
 int usocket_getsockname(usocket_t *s, struct sockaddr *address, socklen_t *address_len)
 {
-	return 0;
+	usocket_addr_t *addr;
+	int err;
+
+	(void)proc_lockSet(&s->lock);
+	addr = usocket_addrRef(s->addr);
+	(void)proc_lockClear(&s->lock);
+
+	/* no lock is held while the caller's memory is written */
+	err = usocket_addrCopyOut(addr, address, address_len);
+
+	usocket_addrPut(addr);
+
+	return err;
 }
 
 
