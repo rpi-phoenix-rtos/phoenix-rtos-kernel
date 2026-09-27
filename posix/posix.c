@@ -2446,7 +2446,19 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 	int err;
 	msg_t msg;
 	void *data = NULL;
-	size_t size = IOCPARM_LEN(request);
+	size_t size;
+
+	/*
+	 * Every _IOC() encoding fits in 32 bits (the direction flags end at bit 31),
+	 * but POSIX declares the request as `int`, and callers that keep it in an
+	 * int sign-extend IOC_IN requests into the upper half of a 64-bit
+	 * unsigned long (TCSETS 0x805c7402 arrives as 0xffffffff805c7402).
+	 * Canonicalise here, as Linux does by taking the command as an unsigned int,
+	 * so servers comparing against the unsigned long constants still match.
+	 * No-op where unsigned long is 32 bits.
+	 */
+	request = (unsigned long)(u32)request;
+	size = IOCPARM_LEN(request);
 
 	err = posix_getOpenFile(fildes, &f);
 	if (err == EOK) {
