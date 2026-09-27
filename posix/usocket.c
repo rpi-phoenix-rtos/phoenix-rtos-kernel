@@ -119,7 +119,8 @@ struct _usocket_t {
 	size_t rcvbuf;  /* size of the channels created for this socket */
 	uchannel_t *rx; /* counted */
 	uchannel_t *tx; /* counted */
-	usocket_addr_t *addr; /* counted, NULL while unbound */
+	usocket_addr_t *addr;     /* counted, NULL while unbound */
+	usocket_addr_t *peerAddr; /* counted, NULL while the peer is unbound */
 
 	struct _usocket_t *pending; /* connectors waiting to be accepted, counted */
 	u8 pendingCnt;
@@ -238,6 +239,7 @@ static usocket_t *usocket_alloc(unsigned int type, int nonblock)
 	s->rx = NULL;
 	s->tx = NULL;
 	s->addr = NULL;
+	s->peerAddr = NULL;
 	s->pending = NULL;
 	s->pendingCnt = 0;
 	s->backlog = 0;
@@ -275,6 +277,7 @@ static void usocket_put(usocket_t *s)
 	uchannel_put(s->rx);
 	uchannel_put(s->tx);
 	usocket_addrPut(s->addr);
+	usocket_addrPut(s->peerAddr);
 	(void)proc_lockDone(&s->lock);
 	vm_kfree(s);
 }
@@ -700,6 +703,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 {
 	usocket_t *ls;
 	uchannel_t *ch, *rx, *oldTx = NULL, *oldRx;
+	usocket_addr_t *peerAddr, *oldPeerAddr;
 	oid_t oid;
 	size_t rcvbuf;
 	int err = EOK, nonblock;
@@ -798,10 +802,12 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		 */
 		(void)proc_lockSet(&ls->lock);
 		ch = uchannel_ref(ls->rx);
+		peerAddr = usocket_addrRef(ls->addr);
 		(void)proc_lockClear(&ls->lock);
 		usocket_put(ls);
 
 		if (ch == NULL) {
+			usocket_addrPut(peerAddr);
 			usocket_connectRollback(s);
 			return -ECONNREFUSED;
 		}
@@ -809,11 +815,14 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		(void)proc_lockSet(&s->lock);
 		oldTx = s->tx;
 		s->tx = ch;
+		oldPeerAddr = s->peerAddr;
+		s->peerAddr = peerAddr;
 		s->state = (u8)usocketConnected;
 		(void)proc_lockClear(&s->lock);
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
+		usocket_addrPut(oldPeerAddr);
 
 		return EOK;
 	}
@@ -918,7 +927,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 {
 	usocket_t *cs, *ns;
 	uchannel_t *c2s, *tx, *oldTx;
-	usocket_addr_t *addr;
+	usocket_addr_t *addr, *peerAddr, *oldPeerAddr;
 	size_t rcvbuf;
 	int err, nonblock;
 
@@ -985,7 +994,8 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/*
 		 * The one and only place where a socket touches another socket's
-		 * endpoint: handing the channels over to the connector.
+		 * endpoint: handing the channels and the listener's address over to
+		 * the connector, and taking the connector's address in return.
 		 */
 		(void)proc_lockSet(&cs->lock);
 
@@ -1001,6 +1011,10 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 			continue;
 		}
 
+		peerAddr = usocket_addrRef(cs->addr);
+		oldPeerAddr = cs->peerAddr;
+		cs->peerAddr = usocket_addrRef(addr);
+
 		tx = uchannel_ref(cs->rx);
 		oldTx = cs->tx;
 		cs->tx = uchannel_ref(c2s);
@@ -1012,9 +1026,11 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
+		usocket_addrPut(oldPeerAddr);
 		usocket_put(cs);
 
 		/* ns is not reachable yet */
+		ns->peerAddr = peerAddr;
 		ns->rcvbuf = rcvbuf;
 		ns->rx = c2s;
 		ns->tx = tx;
@@ -1029,7 +1045,20 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 int usocket_getpeername(usocket_t *s, struct sockaddr *address, socklen_t *address_len)
 {
-	return 0;
+	usocket_addr_t *addr;
+	int connected, err;
+
+	(void)proc_lockSet(&s->lock);
+	connected = (s->state == (u8)usocketConnected) ? 1 : 0;
+	addr = usocket_addrRef(s->peerAddr);
+	(void)proc_lockClear(&s->lock);
+
+	/* no lock is held while the caller's memory is written */
+	err = (connected != 0) ? usocket_addrCopyOut(addr, address, address_len) : -ENOTCONN;
+
+	usocket_addrPut(addr);
+
+	return err;
 }
 
 
