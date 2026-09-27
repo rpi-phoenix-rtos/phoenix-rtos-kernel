@@ -754,7 +754,11 @@ int vm_mapFlags(vm_map_t *map, void *vaddr)
 
 	(void)proc_lockSet(&map->lock);
 
-	t.vaddr = vaddr;
+	/* The page holding vaddr. map_cmp() matches on overlap, so a page-sized probe at an
+	 * unaligned vaddr also overlaps the entry that starts at the next page boundary, and
+	 * lib_rbFind() may return that one: a message payload at page offset 0x21 then took
+	 * the flags (e.g. MAP_DEVICE) of the mapping above its own. */
+	t.vaddr = (void *)((ptr_t)vaddr & ~(SIZE_PAGE - 1U));
 	t.size = SIZE_PAGE;
 
 	e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &t.linkage));
