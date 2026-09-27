@@ -113,6 +113,10 @@ struct {
 	/* The fields below may be reordered */
 
 	descr_t kernel_ttl1[SIZE_PAGE / sizeof(descr_t)]; /* Not used by hardware */
+	/* An all-invalid user table: what TTBR0 holds while a CPU runs a thread
+	 * with no address space of its own (see _pmap_switchUserOut) */
+	descr_t empty_ttl1[SIZE_PAGE / sizeof(descr_t)] __attribute__((aligned(SIZE_PAGE)));
+	addr_t emptyTtbr0;
 	/* Accesses to this struct don't need to be mutexed, because it isn't modified
 	 * after initialization */
 	struct {
@@ -419,11 +423,44 @@ addr_t pmap_destroy(pmap_t *pmap, unsigned int *i)
 }
 
 
+/* The kernel pmap lives in TTBR1 and is always in, so "switching to it" means
+ * switching the USER half out. The scheduler does that for every thread
+ * without an address space of its own (threads.c: "protects against use after
+ * free of process' memory map in SMP environment"), and exec does it before
+ * destroying the old map in place (process_execve). This used to return
+ * without touching TTBR0, so an idle CPU kept the last user table installed:
+ * after that process exec'd or died, vm_mapDestroy freed the tables and the
+ * ASID while the CPU could still walk them. The ARM ARM lets a PE walk TTBR0
+ * speculatively at any time, so the idle CPU could cache translations read
+ * from freed -- and by then reused -- pages under an ASID that the next
+ * pmap_create hands straight out again (lowest free first). The broadcast
+ * TLBI in _pmap_asidAlloc happens once, at allocation, and does not stop a
+ * later refill from the stale TTBR0. Nothing reads user memory after a switch
+ * to the kernel pmap; the other ports' kernel pmaps have no user half either. */
+static void _pmap_switchUserOut(void)
+{
+	if (pmap_common.emptyTtbr0 == 0U) {
+		/* _pmap_init has not run yet: nothing but the boot table exists */
+		return;
+	}
+
+	if ((sysreg_read(ttbr0_el1) & ~1UL) == pmap_common.emptyTtbr0) {
+		return;
+	}
+
+	hal_cpuDataSyncBarrier();
+	hal_cpuInstrBarrier();
+	hal_cpuSetTranslationBase(pmap_common.emptyTtbr0, ASID_NONE);
+	hal_cpuInstrBarrier();
+}
+
+
 static void _pmap_switch(pmap_t *pmap)
 {
 	const u64 expectedTTBR0 = pmap->addr | ((u64)pmap->asid << 48);
 	if ((ptr_t)pmap->start >= VADDR_KERNEL) {
-		/* Kernel pmap doesn't need to be switched in, also this function cannot do it. */
+		/* The kernel pmap cannot be switched in: it is always in, via TTBR1 */
+		_pmap_switchUserOut();
 		return;
 	}
 	else if (pmap->asid == ASID_NONE) {
@@ -907,6 +944,12 @@ void _pmap_init(pmap_t *pmap, void **vstart, void **vend)
 
 	/* Create kernel TTL1 - it is only used by software, but still needs to be initialized */
 	hal_memset(pmap_common.kernel_ttl1, 0, sizeof(pmap_common.kernel_ttl1));
+
+	/* ASID_NONE is never allocated, so no live translation carries it; with an
+	 * all-invalid table no walk can create one either. */
+	hal_memset(pmap_common.empty_ttl1, 0, sizeof(pmap_common.empty_ttl1));
+	hal_cpuDataSyncBarrier();
+	pmap_common.emptyTtbr0 = _pmap_kernelVAtoPA(pmap_common.empty_ttl1);
 	pmap_common.kernel_ttl1[TTL_IDX(1U, VADDR_KERNEL)] = DESCR_PA(_pmap_kernelVAtoPA(pmap_common.kernel_ttl2)) | DESCR_TABLE | DESCR_VALID;
 
 	pmap->start = (void *)VADDR_KERNEL;
