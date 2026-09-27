@@ -775,6 +775,19 @@ thread_t *proc_current(void)
 }
 
 
+void proc_schedulerBarrier(void)
+{
+	spinlock_ctx_t sc;
+
+	/* A thread going to sleep holds threads_common.spinlock from proc_threadWaitEx
+	 * until _threads_schedule has saved its context and switched away (the lock is
+	 * released on the far side of the switch, _exceptions.S .L_el1_syscall), so
+	 * taking the lock once is enough to see that context. */
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+}
+
+
 static int thread_alloc(thread_t *thread)
 {
 	int id;

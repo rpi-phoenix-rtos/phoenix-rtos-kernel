@@ -1695,6 +1695,18 @@ static void process_vforkThread(void *arg)
 		(void)proc_threadWait(&spawn->wq, &spawn->sl, 0, &sc);
 	}
 	hal_spinlockClear(&spawn->sl, &sc);
+
+	/* FORKING does not yet mean that parent->context is the parent's context in
+	 * proc_vfork(). The parent drops spawn->sl inside proc_threadWait() BEFORE it
+	 * enters the scheduler, and only the scheduler saves its context. Without this
+	 * barrier a child that was spinning on spawn->sl could read the context of
+	 * the parent's PREVIOUS switch-out: the kernel-stack copy below was sized from
+	 * that stale stack pointer and copied from whichever pointer was current a few
+	 * instructions later (overrunning the buffer when that one is deeper), or
+	 * saved a span that does not hold the parent's live frames at all -- and
+	 * process_restoreParentKstack() writes the same span back onto the parent's
+	 * stack. */
+	proc_schedulerBarrier();
 #ifdef EXEC_ENTRY_TICK
 	/* '|' = the vfork handshake completed. A silent launch reaching '!' but not
 	 * '$' stops somewhere in this function; '&' and '|' split that into
