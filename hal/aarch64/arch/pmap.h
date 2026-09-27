@@ -34,6 +34,11 @@
 #define PGHD_READ       0x00U
 #define PGHD_MASK       0x1fU
 
+/* Device memory (PGHD_DEV) takes an alignment fault on every unaligned access,
+ * whatever SCTLR_EL1.A says, and hal_memcpy makes unaligned accesses. So the
+ * kernel must not copy through a device mapping (see proc/msg.c). */
+#define PGHD_DEV_ALIGNED_ONLY
+
 
 /* Page flags */
 #define PAGE_FREE 0x00000001U

@@ -29,7 +29,81 @@ enum { msg_rejected = -1, msg_waiting = 0, msg_received, msg_responded };
 static struct {
 	vm_map_t *kmap;
 	vm_object_t *kernel;
+	unsigned int deviceRefusals;
 } msg_common;
+
+
+/* Flags of the source mapping holding vaddr (in the kernel map if vaddr is not in srcmap) */
+static int msg_srcFlags(vm_map_t *srcmap, void *vaddr)
+{
+	if (pmap_belongs(&srcmap->pmap, vaddr) == 0) {
+		srcmap = msg_common.kmap;
+	}
+
+	return vm_mapFlags(srcmap, vaddr);
+}
+
+
+/*
+ * Device memory is not a message payload where the HAL says unaligned accesses to it fault
+ * (PGHD_DEV_ALIGNED_ONLY).
+ *
+ * The kernel copies payloads with hal_memcpy, which makes unaligned accesses: the partial first and
+ * last pages through a kernel view with the memory type of the sender's mapping (msg_map, and back
+ * in proc_respond), small payloads straight from and to the sender's buffer (msg_ipack, and back in
+ * proc_sendEx). An alignment fault cannot be resolved by mapping anything, so the copying thread
+ * would take the same fault on every return from the handler. The pages the kernel does not copy
+ * would reach the receiver as device memory, where its own unaligned accesses fault alike. So such a
+ * payload is refused, and the sender's call fails with -EINVAL as for a payload that cannot be mapped.
+ */
+static int msg_isDevice(int flags)
+{
+#ifdef PGHD_DEV_ALIGNED_ONLY
+	return ((flags >= 0) && (((vm_flags_t)flags & MAP_DEVICE) != 0U)) ? 1 : 0;
+#else
+	(void)flags;
+	return 0;
+#endif
+}
+
+
+/*
+ * Does the first or the last page of the user payload [data, data + size) lie in device memory?
+ * For msg_ipack and msg_opack, which run before a payload is packed. A buffer of the kernel's own
+ * is taken as memory: that avoids a kernel map lookup on every small message the kernel sends.
+ */
+static int msg_payloadIsDevice(const process_t *proc, const void *data, size_t size)
+{
+#ifdef PGHD_DEV_ALIGNED_ONLY
+	void *first = (void *)(ptr_t)data, *last = first + size - 1U;
+
+	if ((proc == NULL) || (pmap_belongs(&proc->mapp->pmap, first) == 0)) {
+		return 0;
+	}
+
+	if (msg_isDevice(vm_mapFlags(proc->mapp, first)) != 0) {
+		return 1;
+	}
+
+	return ((FLOOR((ptr_t)last) != FLOOR((ptr_t)first)) && (msg_isDevice(vm_mapFlags(proc->mapp, last)) != 0)) ? 1 : 0;
+#else
+	(void)proc;
+	(void)data;
+	(void)size;
+	return 0;
+#endif
+}
+
+
+static void msg_reportDevice(const process_t *from, const void *data, size_t size)
+{
+	/* A diagnostic: unsynchronised, and bounded so that a sender retrying in a loop cannot flood the console */
+	if (msg_common.deviceRefusals < 8U) {
+		msg_common.deviceRefusals++;
+		lib_printf("msg: refused a payload in device memory (%zu bytes at %p) from %s (PID %u)\n", size, data,
+				((from != NULL) && (from->path != NULL)) ? from->path : "kernel", (from != NULL) ? (unsigned int)process_getPid(from) : 0U);
+	}
+}
 
 
 static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *from, process_t *to)
@@ -44,7 +118,7 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 	vm_map_t *srcmap, *dstmap;
 	struct _kmsg_layout_t *ml = (dir != 0) ? &kmsg->o : &kmsg->i;
 	int err;
-	vm_flags_t flags;
+	vm_flags_t flags, eflags;
 	addr_t bpa, pa, epa;
 
 	if ((size == 0U) || (data == NULL)) {
@@ -94,17 +168,26 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 		return NULL;
 	}
 
-	if (pmap_belongs(&srcmap->pmap, data) != 0) {
-		err = vm_mapFlags(srcmap, data);
-	}
-	else {
-		err = vm_mapFlags(msg_common.kmap, data);
-	}
-
+	/* The kernel views of the partial pages take the memory type of the mappings they are in (only) */
+	err = msg_srcFlags(srcmap, data);
 	if (err < 0) {
 		return NULL;
 	}
-	flags = (vm_flags_t)err;
+	flags = (vm_flags_t)err & (MAP_UNCACHED | MAP_DEVICE);
+
+	eflags = flags;
+	if (eoffs != 0U) {
+		err = msg_srcFlags(srcmap, (void *)FLOOR((ptr_t)data + size));
+		if (err < 0) {
+			return NULL;
+		}
+		eflags = (vm_flags_t)err & (MAP_UNCACHED | MAP_DEVICE);
+	}
+
+	if ((msg_isDevice((int)flags) != 0) || (msg_isDevice((int)eflags) != 0)) {
+		msg_reportDevice(from, data, size);
+		return NULL;
+	}
 
 	attr |= vm_flagsToAttr(flags);
 
@@ -163,7 +246,7 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 			nep = nbp;
 		}
 
-		vaddr = vm_mmap(msg_common.kmap, NULL, NULL, SIZE_PAGE, PROT_READ | PROT_WRITE, VM_OBJ_PHYSMEM, (off_t)epa, flags);
+		vaddr = vm_mmap(msg_common.kmap, NULL, NULL, SIZE_PAGE, PROT_READ | PROT_WRITE, VM_OBJ_PHYSMEM, (off_t)epa, eflags);
 		ml->evaddr = vaddr;
 		if (vaddr == NULL) {
 			return NULL;
@@ -284,6 +367,11 @@ static void msg_ipack(kmsg_t *kmsg)
 			return;
 		}
 
+		/* Left unpacked for msg_map to refuse */
+		if (msg_payloadIsDevice(kmsg->src, kmsg->msg.i.data, kmsg->msg.i.size) != 0) {
+			return;
+		}
+
 		hal_memcpy(kmsg->msg.i.raw + offset, kmsg->msg.i.data, kmsg->msg.i.size);
 		kmsg->msg.i.data = kmsg->msg.i.raw + offset;
 	}
@@ -331,6 +419,11 @@ static int msg_opack(kmsg_t *kmsg)
 	}
 
 	if (kmsg->msg.o.size > (sizeof(kmsg->msg.o.raw) - offset)) {
+		return 0;
+	}
+
+	/* proc_sendEx would copy the packed response into it: left unpacked for msg_map to refuse */
+	if (msg_payloadIsDevice(kmsg->src, kmsg->msg.o.data, kmsg->msg.o.size) != 0) {
 		return 0;
 	}
 
