@@ -133,7 +133,6 @@ int syscalls_sys_mmap(u8 *ustack)
 }
 
 
-#ifndef NOMMU
 /* Returns a reference to port id if it is open and owned by proc, NULL otherwise */
 static port_t *syscalls_portOwned(process_t *proc, u32 id)
 {
@@ -146,7 +145,6 @@ static port_t *syscalls_portOwned(process_t *proc, u32 id)
 
 	return port;
 }
-#endif
 
 
 int syscalls_memExport(u8 *ustack)
@@ -216,6 +214,40 @@ int syscalls_memUnexport(u8 *ustack)
 	(void)ustack;
 	return -ENOSYS;
 #endif
+}
+
+
+/*
+ * pollNotify(oid): a server tells the kernel that the readiness of one of its
+ * oids may have changed, so poll()/select() callers watching it re-query at
+ * once instead of after POLL_INTERVAL (posix/pollwake.h). Only the owner of
+ * the oid's port may notify. Nothing is queued: with no poller watching, this
+ * is a no-op, and a server that never calls it keeps the timed re-poll.
+ */
+int syscalls_pollNotify(u8 *ustack)
+{
+	process_t *proc = proc_current()->process;
+	const oid_t *uoid;
+	port_t *port;
+	oid_t oid;
+	int err;
+
+	GETFROMSTACK(ustack, const oid_t *, uoid, 0U);
+
+	if (vm_mapBelongs(proc, uoid, sizeof(*uoid)) < 0) {
+		return -EFAULT;
+	}
+	hal_memcpy(&oid, uoid, sizeof(oid));
+
+	port = syscalls_portOwned(proc, oid.port);
+	if (port == NULL) {
+		return -EPERM;
+	}
+
+	err = posix_pollNotify(&oid);
+	port_put(port, 0);
+
+	return err;
 }
 
 

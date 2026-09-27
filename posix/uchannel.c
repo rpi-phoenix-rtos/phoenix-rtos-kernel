@@ -17,6 +17,7 @@
 #include "vm/vm.h"
 
 #include "uchannel.h"
+#include "pollwake.h"
 
 
 /* Readiness-woken poll() for AF_UNIX, re-applied onto upstream's endpoint/channel
@@ -53,6 +54,9 @@ void uchannel_pollInit(void)
 void uchannel_pollNotify(void)
 {
 	(void)proc_threadBroadcast(&uchannel_poll_common.queue);
+	/* Poll sets that mix AF_UNIX sockets with server-backed fds sleep on a
+	 * pollwake waiter instead of the queue above. */
+	pollwake_notifyUnix();
 }
 
 

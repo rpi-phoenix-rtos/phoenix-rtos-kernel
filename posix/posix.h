@@ -155,6 +155,10 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack);
 int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms);
 
 
+/* Wakes the poll() callers watching oid (the pollNotify syscall; the caller owns oid.port). */
+int posix_pollNotify(const oid_t *oid);
+
+
 int posix_futimens(int fildes, const struct timespec *times);
 
 

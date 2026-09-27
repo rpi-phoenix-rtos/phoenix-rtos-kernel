@@ -133,7 +133,8 @@
 	ID(schedSet) \
 	ID(sys_fdpath) \
 	ID(memExport) \
-	ID(memUnexport)
+	ID(memUnexport) \
+	ID(pollNotify)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */

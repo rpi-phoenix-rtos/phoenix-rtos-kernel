@@ -25,6 +25,7 @@
 #include "proc/proc.h"
 
 #include "posix_private.h"
+#include "pollwake.h"
 #include "lib/lib.h"
 
 #define MAX_FD_COUNT     1024
@@ -39,12 +40,14 @@
 /*
  * Fallback re-check granularity (us) for poll()/select(). AF_UNIX fds are now
  * readiness-woken (posix_poll blocks on the AF_UNIX readiness queue via usocket_pollWait,
- * woken the instant a socket changes state), so this interval only bounds the
- * latency for fds whose readiness comes from a remote server over mtGetAttr
- * (network sockets, devices), which has no readiness-wakeup yet. It is also the
- * safety-net timeout behind the AF_UNIX wait, so a missed notify degrades to
- * this latency rather than a hang. 20 ms: responsive enough for remote-fd polls
- * without the ~500Hz spin a sub-ms value would impose on every blocked poller.
+ * woken the instant a socket changes state), and so are fds whose server calls
+ * pollNotify() when their readiness changes (posix/pollwake.h). This interval
+ * bounds the latency for every other fd whose readiness comes from a remote
+ * server over mtGetAttr (network sockets, devices that do not notify). It is
+ * also the safety-net timeout behind both readiness waits, so a missed notify
+ * degrades to this latency rather than a hang. 20 ms: responsive enough for
+ * remote-fd polls without the ~500Hz spin a sub-ms value would impose on every
+ * blocked poller.
  */
 #define POLL_INTERVAL 20000
 
@@ -3112,7 +3115,7 @@ int posix_futimens(int fildes, const struct timespec *times)
 }
 
 
-static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix, unsigned int block_ms)
+static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix, unsigned int block_ms, pollwake_waiter_t *w)
 {
 	msg_t msg;
 	int ready = 0;
@@ -3153,6 +3156,10 @@ static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix, unsi
 			}
 			else {
 				hal_memcpy(&msg.oid, &f->oid, sizeof(oid_t));
+				if (w != NULL) {
+					/* Before the query: a notify from here on wakes the sleep that follows */
+					pollwake_watch(w, &msg.oid);
+				}
 				err = proc_send(msg.oid.port, &msg);
 				if (err >= 0) {
 					/* FIXME: 8 byte attr assigned to 4 byte err */
@@ -3192,12 +3199,14 @@ static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, int *hasUnix, unsi
 
 int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 {
-	unsigned int i, n;
+	unsigned int i, n, nUnix, nServer, nInet;
 	int ready;
 	int hasUnix = 0;
 	int singleInet = 0;
 	open_file_t *pf;
 	time_t timeout, now, cur, t0, t1;
+	pollwake_waiter_t waiter;
+	pollwake_waiter_t *w = NULL;
 
 	n = 0U;
 
@@ -3215,24 +3224,50 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		return 0;
 	}
 
+	/* Classify the set once, so the wait below is chosen before any query goes out. */
+	nUnix = 0U;
+	nServer = 0U;
+	nInet = 0U;
+	pollwake_waiterInit(&waiter);
+	for (i = 0U; i < nfds; ++i) {
+		if (fds[i].fd < 0) {
+			continue;
+		}
+		if (posix_getOpenFile(fds[i].fd, &pf) == 0) {
+			if (pf->type == ftUnixSocket) {
+				++nUnix;
+			}
+			else {
+				++nServer;
+				if (pf->type == ftInetSocket) {
+					++nInet;
+				}
+				pollwake_watch(&waiter, &pf->oid);
+			}
+			(void)posix_fileDeref(pf);
+		}
+	}
+
 	/* Fast-path gate: a poll on exactly ONE inet socket lets the socket server
 	 * block until readiness (see do_poll_iteration's block_ms) instead of the
 	 * kernel spin-polling every POLL_INTERVAL. Restricted to a single ftInetSocket
 	 * fd so only the lwip socket server (which decodes the packed timeout) is
-	 * affected; multi-fd and non-inet polls keep the legacy timed re-poll. */
-	if (n == 1U) {
-		for (i = 0U; i < nfds; ++i) {
-			if (fds[i].fd < 0) {
-				continue;
-			}
-			if (posix_getOpenFile(fds[i].fd, &pf) == 0) {
-				if (pf->type == ftInetSocket) {
-					singleInet = 1;
-				}
-				(void)posix_fileDeref(pf);
-			}
-			break;
-		}
+	 * affected. */
+	if ((n == 1U) && (nInet == 1U)) {
+		singleInet = 1;
+	}
+	else if (nServer != 0U) {
+		/* Any other set with a server-backed fd sleeps on a pollwake waiter: a
+		 * server that calls pollNotify() wakes it at once, one that does not is
+		 * asked again after POLL_INTERVAL as before. Listed before the first
+		 * query, so no notify can fall between a query and the sleep. AF_UNIX
+		 * fds in the same set wake it through pollwake_notifyUnix(). */
+		waiter.watchUnix = (nUnix != 0U) ? 1U : 0U;
+		w = &waiter;
+		pollwake_register(w);
+	}
+	else {
+		/* AF_UNIX only: the usocket_pollWait path below, unchanged */
 	}
 
 	if (timeout_ms >= 0) {
@@ -3243,7 +3278,7 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		timeout = 0;
 	}
 
-	ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
+	ready = do_poll_iteration(fds, nfds, &hasUnix, 0, w);
 	while (ready == 0) {
 		proc_gettime(&cur, NULL);
 		if (timeout != 0) {
@@ -3260,19 +3295,27 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 			now = POLL_INTERVAL;
 		}
 
+		if (w != NULL) {
+			/* Woken by a notify of a watched oid (or an AF_UNIX change when the
+			 * set has one), else after `now`, exactly as the timed sleep below. */
+			if (pollwake_wait(w, cur + now) == -EINTR) {
+				ready = -EINTR;
+				break;
+			}
+			ready = do_poll_iteration(fds, nfds, &hasUnix, 0, w);
+		}
 		/*
 		 * If any watched fd is an AF_UNIX socket, block on the unix poll queue
 		 * (woken the instant any unix socket changes readiness) with `now` as a
 		 * timeout fallback — so local X client<->server round-trips are not gated
-		 * by the re-check interval. Sets with no AF_UNIX fd keep the timed sleep
-		 * (their readiness comes from a remote server via mtGetAttr, which has no
-		 * readiness-wakeup yet).
+		 * by the re-check interval.
 		 */
-		if (hasUnix != 0) {
+		else if (hasUnix != 0) {
 			if (usocket_pollWait(cur + now) == -EINTR) {
-				return -EINTR;
+				ready = -EINTR;
+				break;
 			}
-			ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
+			ready = do_poll_iteration(fds, nfds, &hasUnix, 0, NULL);
 		}
 		else if (singleInet != 0) {
 			/* Single inet socket: let the socket server block until readiness
@@ -3281,7 +3324,7 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 			 * not-ready having blocked less than `now` (e.g. a server that ignores
 			 * the packed timeout), sleep the remainder so this can never busy-loop. */
 			proc_gettime(&t0, NULL);
-			ready = do_poll_iteration(fds, nfds, &hasUnix, (unsigned int)(now / 1000));
+			ready = do_poll_iteration(fds, nfds, &hasUnix, (unsigned int)(now / 1000), NULL);
 			if (ready == 0) {
 				proc_gettime(&t1, NULL);
 				if ((t1 - t0) < now) {
@@ -3291,11 +3334,23 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 		}
 		else {
 			(void)proc_threadSleep(now);
-			ready = do_poll_iteration(fds, nfds, &hasUnix, 0);
+			ready = do_poll_iteration(fds, nfds, &hasUnix, 0, NULL);
 		}
 	}
 
+	if (w != NULL) {
+		pollwake_unregister(w);
+	}
+
 	return ready;
+}
+
+
+int posix_pollNotify(const oid_t *oid)
+{
+	pollwake_notify(oid);
+
+	return EOK;
 }
 
 
@@ -3667,6 +3722,7 @@ void posix_init(void)
 	(void)proc_lockInit(&posix_common.fileLocksLock, &proc_lockAttrDefault, "posix.filelocks");
 	lib_rbInit(&posix_common.pid, pinfo_cmp, NULL);
 	usocket_init();
+	pollwake_init();
 	posix_common.fresh = 0;
 	posix_common.fileLocks = NULL;
 	hal_memset(posix_common.hostname, 0, sizeof(posix_common.hostname));
