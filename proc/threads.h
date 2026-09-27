@@ -193,6 +193,10 @@ int proc_threadWaitInterruptible(thread_t **queue, spinlock_t *spinlock, time_t 
 int proc_threadWaitExclusive(thread_t **queue, time_t timeout);
 
 
+/* Returns once every thread that was inside the scheduler when it was called has left it */
+void proc_schedulerBarrier(void);
+
+
 int proc_threadWakeup(thread_t **queue);
 
 
