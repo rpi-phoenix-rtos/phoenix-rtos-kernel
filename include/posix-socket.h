@@ -16,6 +16,7 @@
 
 
 #include "types.h"
+#include "posix-types.h"
 
 
 #define AF_UNSPEC 0
@@ -57,6 +58,8 @@
 #define SO_SNDTIMEO     0x1005U
 #define SO_TYPE         0x1008U
 #define SO_BINDTODEVICE 0x100bU
+/* AF_UNIX: credentials of the peer (struct ucred), as on Linux and OpenBSD (OpenBSD's value) */
+#define SO_PEERCRED 0x1022U
 
 #define MSG_PEEK     0x01U
 #define MSG_WAITALL  0x02U
@@ -89,6 +92,18 @@ struct msghdr {
 	void *msg_control;
 	socklen_t msg_controllen;
 	int msg_flags;
+};
+
+
+/*
+ * SO_PEERCRED result: the peer process as of connect() (on the accepted socket),
+ * listen() (on the connecting socket) or socketpair(). Phoenix-RTOS has no users
+ * yet, so uid and gid are always 0 - the same answer getuid()/getgid() give.
+ */
+struct ucred {
+	pid_t pid;
+	uid_t uid;
+	gid_t gid;
 };
 
 
