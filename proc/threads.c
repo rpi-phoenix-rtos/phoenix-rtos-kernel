@@ -3054,6 +3054,7 @@ static void _proc_threadInfo(thread_t *thread, unsigned int flags, threadinfo_t 
 		info->tid = (unsigned int)proc_getTid(thread);
 		info->priority = (int)thread->priorityBase;
 		info->state = (int)thread->state;
+		info->cpuId = (int)thread->cpuId;
 
 		if (now != thread->startTime) {
 			info->load = (int)((thread->cpuTime * 1000) / (now - thread->startTime));
