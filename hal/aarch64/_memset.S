@@ -19,13 +19,17 @@
 #define TMP       x5
 #define TMP2      x6
 
-/* TODO(TD-20): The Raspberry Pi 4 bring-up path reaches EL1 via
- * firmware/armstub/PLO, not TF-A. Until the EL2 trap state for DC ZVA is
- * proven, avoid using ZVA on Cortex-A72: the first post-D-cache large
- * zeroing operation (_log_init's log_common memset) hangs on real Pi 4
- * with no exception output. Normal stores keep D-cache enabled and
- * preserve correctness. Lift this gate once the EL2 DC-ZVA trap state is
- * proven (HW-only; does not repro in QEMU). */
+/* TODO(TD-20): DC ZVA is disabled on Cortex-A72 (Raspberry Pi 4); normal
+ * stores are used instead, which is correct and only slower. With ZVA, the
+ * first large zeroing after the D-cache is enabled (_log_init's log_common
+ * memset) hung on real Pi 4 with no exception output; it does not repro in
+ * QEMU. The hang is NOT an EL2 trap: DCZID_EL0 reads DZP=0 on the Pi 4, so
+ * DC ZVA is permitted and executes correctly with the MMU and caches on.
+ * Still open: (a) what caused that hang -- log_common is ordinary cacheable
+ * .bss, so the window right after D-cache enable is the suspect; and
+ * (b) whether any hal_memset caller can pass uncached memory, which the ZVA
+ * path is not meant for (see the header below). Lift this gate only once both
+ * are answered. */
 #if defined(__TARGET_AARCH64A72) && !defined(MEMSET_WITHOUT_ZVA)
 #define MEMSET_WITHOUT_ZVA
 #endif
