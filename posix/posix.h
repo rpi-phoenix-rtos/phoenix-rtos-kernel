@@ -177,6 +177,15 @@ pid_t posix_getpgid(pid_t pid);
 pid_t posix_getppid(pid_t pid);
 
 
+pid_t posix_getsid(pid_t pid);
+
+
+int posix_procExists(pid_t pid, pid_t pgid, pid_t sid, unsigned int flags);
+
+
+int posix_sessionCtty(pid_t sid, int acquire);
+
+
 pid_t posix_setsid(void);
 
 
