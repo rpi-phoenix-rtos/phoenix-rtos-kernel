@@ -1110,7 +1110,7 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 {
 	int result = EOK;
 	void *currVaddr;
-	size_t lenLeft = len, currSize, needed;
+	size_t lenLeft, currSize, needed;
 	process_t *p = proc_current()->process;
 	addr_t pa;
 	vm_attr_t attr;
@@ -1118,9 +1118,23 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 	map_entry_t *e, *buf = NULL, *prev, *head, *tail;
 	map_entry_t t;
 
-	if (((((ptr_t)vaddr) & (SIZE_PAGE - 1U)) != 0U) || (len == 0U) || ((len & (SIZE_PAGE - 1U)) != 0U)) {
+	/* POSIX requires a page-aligned addr, but not a page-multiple len: the
+	 * range covers every page that [vaddr, vaddr + len) touches. An empty
+	 * range touches none and is not an error (as on Linux and the BSDs). */
+	if ((((ptr_t)vaddr) & (SIZE_PAGE - 1U)) != 0U) {
 		return -EINVAL;
 	}
+
+	if (len == 0U) {
+		return EOK;
+	}
+
+	if (len > ((size_t)-1 - (SIZE_PAGE - 1U))) {
+		return -ENOMEM;
+	}
+
+	len = round_page(len);
+	lenLeft = len;
 
 	(void)proc_lockSet(&map->lock);
 
