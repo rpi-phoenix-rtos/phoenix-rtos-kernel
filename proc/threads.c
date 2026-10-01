@@ -521,7 +521,7 @@ __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx)
 static int _threads_checkSignal(thread_t *selected, process_t *proc);
 
 
-static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t *signalCtx, unsigned int oldmask, const int src);
+static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t **signalCtx, unsigned int oldmask, const int src);
 
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_4 "Function is used externally within assembler code" */
@@ -692,7 +692,7 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 			if ((hal_cpuSupervisorMode(selCtx) == 0) && (selected->longjmpctx == NULL)) {
 				signalCtx = (void *)((char *)hal_cpuGetUserSP(selCtx) - sizeof(cpu_context_t));
 				/* NOTE: Terminating signals are handled during delivery and should not reach this point */
-				if (_threads_trySignalDeliver(selected, proc, signalCtx, selected->sigmask, SIG_SRC_SCHED) == 0) {
+				if (_threads_trySignalDeliver(selected, proc, &signalCtx, selected->sigmask, SIG_SRC_SCHED) == 0) {
 					selCtx = signalCtx;
 				}
 			}
@@ -867,6 +867,9 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	t->sigmask = sigmask;
 	t->sigpend = 0;
 	t->sigaddr = NULL;
+	t->altstack.ss_sp = NULL;
+	t->altstack.ss_flags = SS_DISABLE;
+	t->altstack.ss_size = 0;
 	t->refs = 1;
 	t->interruptible = 0;
 	t->exit = 0;
@@ -1918,6 +1921,22 @@ static int _threads_checkSignal(thread_t *selected, process_t *proc)
 }
 
 
+#ifdef HAL_SIGNAL_ALTSTACK
+/* Is sp on the thread's alternate signal stack? The stack grows down, so its
+ * top address counts as on it and its base does not, as on Linux. */
+static int _threads_onAltstack(const thread_t *t, ptr_t sp)
+{
+	const ptr_t base = (ptr_t)t->altstack.ss_sp;
+
+	if (((unsigned int)t->altstack.ss_flags & SS_DISABLE) != 0U) {
+		return 0;
+	}
+
+	return ((sp > base) && ((sp - base) <= t->altstack.ss_size)) ? 1 : 0;
+}
+#endif
+
+
 /* Will the signal frame fit inside the thread's user stack?
  *
  * hal_cpuPushSignal() writes the saved context at signalCtx and then pushes the
@@ -1951,6 +1970,18 @@ static int _threads_signalFrameFits(const thread_t *selected, const cpu_context_
 	const char *lowest;
 	const char *stackLow;
 	const char *stackHigh;
+
+#ifdef HAL_SIGNAL_ALTSTACK
+	/* A frame on the alternate stack is bounded by it instead. sigaltstack()
+	 * checked that the whole of it is this process's memory. */
+	if (_threads_onAltstack(selected, (ptr_t)signalCtx) != 0) {
+		stackLow = selected->altstack.ss_sp;
+		stackHigh = stackLow + selected->altstack.ss_size;
+		lowest = (const char *)signalCtx - sizeof(cpu_context_t);
+
+		return ((lowest >= stackLow) && ((const char *)signalCtx <= (stackHigh - sizeof(cpu_context_t)))) ? 1 : 0;
+	}
+#endif
 
 	/* Kernel threads, and any thread whose stack we did not allocate, have no
 	 * recorded bounds -- keep the previous behaviour rather than guess at them. */
@@ -2021,22 +2052,34 @@ static void _threads_siginfoFill(siginfo_t *info, const thread_t *selected, cons
 }
 
 
-static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t *signalCtx, unsigned int oldmask, const int src)
+static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t **signalCtx, unsigned int oldmask, const int src)
 {
-	unsigned int curSig;
+	unsigned int curSig, flags;
 	int ret;
 	sighandler_t handler;
 	siginfo_t info;
 	stack_t ss;
 	const siginfo_t *infop = NULL;
 	const stack_t *ssp = NULL;
+	cpu_context_t *frame = *signalCtx;
 
 	ret = _threads_checkSignal(selected, proc);
 	if (ret > 0) {
 		curSig = (unsigned int)ret;
 		handler = proc->sigactions[curSig - 1U].sa_handler;
+		/* Read before SA_RESETHAND below clears SA_SIGINFO */
+		flags = (unsigned int)proc->sigactions[curSig - 1U].sa_flags;
 
-		if (_threads_signalFrameFits(selected, signalCtx) == 0) {
+#ifdef HAL_SIGNAL_ALTSTACK
+		/* frame is just below the interrupted sp. Move it to the top of the
+		 * alternate stack, unless the thread is running on that already. */
+		if (((flags & SA_ONSTACK) != 0U) && (((unsigned int)selected->altstack.ss_flags & SS_DISABLE) == 0U) &&
+				(_threads_onAltstack(selected, (ptr_t)(frame + 1)) == 0)) {
+			frame = (cpu_context_t *)(((ptr_t)selected->altstack.ss_sp + selected->altstack.ss_size) & ~(ptr_t)0xfU) - 1;
+		}
+#endif
+
+		if (_threads_signalFrameFits(selected, frame) == 0) {
 			/* The handler cannot be run: there is no stack left to run it on.
 			 * Take the DEFAULT action instead, which is what a process with no
 			 * handler installed already gets and is what POSIX systems do when a
@@ -2051,17 +2094,26 @@ static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_co
 			return -1;
 		}
 
-		/* Read before SA_RESETHAND below clears SA_SIGINFO */
-		if (((unsigned int)proc->sigactions[curSig - 1U].sa_flags & SA_SIGINFO) != 0U) {
+		if ((flags & SA_SIGINFO) != 0U) {
 			_threads_siginfoFill(&info, selected, proc, curSig);
+#ifdef HAL_SIGNAL_ALTSTACK
+			/* uc_stack: the alternate stack, and whether the interrupted code
+			 * was running on it */
+			ss = selected->altstack;
+			if ((((unsigned int)ss.ss_flags & SS_DISABLE) == 0U) && (_threads_onAltstack(selected, (ptr_t)(*signalCtx + 1)) != 0)) {
+				ss.ss_flags = SS_ONSTACK;
+			}
+#else
 			ss.ss_sp = NULL;
 			ss.ss_flags = SS_DISABLE;
 			ss.ss_size = 0;
+#endif
 			infop = &info;
 			ssp = &ss;
 		}
 
-		if (hal_cpuPushSignal(selected->kstack + selected->kstacksz, proc->sigtrampoline, handler, signalCtx, (int)curSig, oldmask, src, infop, ssp) == 0) {
+		if (hal_cpuPushSignal(selected->kstack + selected->kstacksz, proc->sigtrampoline, handler, frame, (int)curSig, oldmask, src, infop, ssp) == 0) {
+			*signalCtx = frame;
 			selected->sigpend &= ~(u32)(1UL << curSig);
 			proc->sigpend &= ~(u32)(1UL << curSig);
 
@@ -2269,7 +2321,7 @@ void threads_setupUserReturn(void *retval, cpu_context_t *ctx)
 	signalCtx = (void *)((char *)hal_cpuGetUserSP(ctx) - sizeof(*signalCtx));
 	hal_cpuSetReturnValue(ctx, retval);
 
-	if (_threads_trySignalDeliver(thread, thread->process, signalCtx, thread->sigmask, SIG_SRC_SCALL) == 0) {
+	if (_threads_trySignalDeliver(thread, thread->process, &signalCtx, thread->sigmask, SIG_SRC_SCALL) == 0) {
 		/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "f is passed to function hal_jmp which need void * type" */
 		f = thread->process->sigtrampoline;
 		hal_spinlockClear(&threads_common.spinlock, &sc);
@@ -2278,6 +2330,97 @@ void threads_setupUserReturn(void *retval, cpu_context_t *ctx)
 	}
 
 	hal_spinlockClear(&threads_common.spinlock, &sc);
+}
+
+
+#ifdef HAL_SIGNAL_ALTSTACK
+/* Is every page of ss mapped in process? vm_mapBelongs() only tells whether a
+ * range overlaps a mapping, so probe one byte per page. */
+static int threads_altstackMapped(const process_t *process, const stack_t *ss)
+{
+	const ptr_t start = (ptr_t)ss->ss_sp;
+	const ptr_t end = start + ss->ss_size;
+	ptr_t page;
+
+	if (end < start) {
+		return 0;
+	}
+
+	for (page = start & ~(ptr_t)(SIZE_PAGE - 1U); page < end; page += SIZE_PAGE) {
+		if (vm_mapBelongs(process, (const void *)((page < start) ? start : page), 1) < 0) {
+			return 0;
+		}
+	}
+
+	return 1;
+}
+#endif
+
+
+int threads_sigaltstack(const stack_t *ss, stack_t *oss)
+{
+#ifdef HAL_SIGNAL_ALTSTACK
+	thread_t *thread = proc_current();
+	cpu_context_t *ctx = (cpu_context_t *)((char *)thread->kstack + thread->kstacksz - sizeof(cpu_context_t));
+	const unsigned int flags = (ss != NULL) ? (unsigned int)ss->ss_flags : 0U;
+	spinlock_ctx_t sc;
+	int onstack, err = EOK;
+
+	if (ss != NULL) {
+		/* SS_ONSTACK is accepted and ignored, as on Linux */
+		if ((flags & ~(unsigned int)(SS_ONSTACK | SS_DISABLE)) != 0U) {
+			return -EINVAL;
+		}
+
+		if ((flags & SS_DISABLE) == 0U) {
+			if (ss->ss_size < MINSIGSTKSZ) {
+				return -ENOMEM;
+			}
+
+			/* Signal frames are written there with the scheduler lock held,
+			 * where a fault cannot be survived: it must be our memory now. */
+			if (threads_altstackMapped(thread->process, ss) == 0) {
+				return -EFAULT;
+			}
+		}
+	}
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+
+	onstack = _threads_onAltstack(thread, (ptr_t)hal_cpuGetUserSP(ctx));
+
+	if (oss != NULL) {
+		*oss = thread->altstack;
+		if (onstack != 0) {
+			oss->ss_flags = SS_ONSTACK;
+		}
+	}
+
+	if (ss != NULL) {
+		if (onstack != 0) {
+			err = -EPERM;
+		}
+		else if ((flags & SS_DISABLE) != 0U) {
+			thread->altstack.ss_sp = NULL;
+			thread->altstack.ss_flags = SS_DISABLE;
+			thread->altstack.ss_size = 0;
+		}
+		else {
+			thread->altstack.ss_sp = ss->ss_sp;
+			thread->altstack.ss_flags = 0;
+			thread->altstack.ss_size = ss->ss_size;
+		}
+	}
+
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	return err;
+#else
+	(void)ss;
+	(void)oss;
+
+	return -ENOSYS;
+#endif
 }
 
 
@@ -2304,7 +2447,7 @@ int threads_sigsuspend(unsigned int mask)
 	_threads_setSigmask(thread, mask);
 
 	/* check for pending signals before sleep - with the new mask */
-	if (_threads_trySignalDeliver(thread, thread->process, signalCtx, oldmask, SIG_SRC_SCALL) == 0) {
+	if (_threads_trySignalDeliver(thread, thread->process, &signalCtx, oldmask, SIG_SRC_SCALL) == 0) {
 		/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "f is passed to function hal_jmp which need void * type" */
 		f = thread->process->sigtrampoline;
 		hal_spinlockClear(&threads_common.spinlock, &sc);
@@ -2327,7 +2470,7 @@ int threads_sigsuspend(unsigned int mask)
 
 	/* check for pending signals before restoring the old mask */
 	hal_spinlockSet(&threads_common.spinlock, &sc);
-	if (_threads_trySignalDeliver(thread, thread->process, signalCtx, oldmask, SIG_SRC_SCALL) == 0) {
+	if (_threads_trySignalDeliver(thread, thread->process, &signalCtx, oldmask, SIG_SRC_SCALL) == 0) {
 		/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "f is passed to function hal_jmp which need void * type" */
 		f = thread->process->sigtrampoline;
 		hal_spinlockClear(&threads_common.spinlock, &sc);

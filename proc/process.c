@@ -1694,6 +1694,8 @@ static void process_vforkThread(void *arg)
 
 	/* POSIX: A child created via fork inherits a copy of its parent's signal mask */
 	threads_setSigmask(current, parent->sigmask);
+	/* ...and, as on other systems, its alternate signal stack */
+	current->altstack = parent->altstack;
 
 	/* No reaper race, parent is kept until current thread releases */
 	ret = proc_cloneSigactions(parent->process, current->process);
@@ -1996,8 +1998,11 @@ static int process_execve(thread_t *current)
 	thread_t *parent = spawn->parent;
 	vm_map_t *map, *imap;
 
-	/* The old user stack is no longer valid */
+	/* The old user stack is no longer valid, nor is the alternate signal stack */
 	current->ustack = NULL;
+	current->altstack.ss_sp = NULL;
+	current->altstack.ss_flags = SS_DISABLE;
+	current->altstack.ss_size = 0;
 
 	/* Terminate other threads */
 	proc_threadsDestroy(&current->process->threads, current);

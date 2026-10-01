@@ -96,6 +96,7 @@ typedef struct _thread_t {
 	unsigned int sigpend;
 	sigorigin_t sigorigin[NSIG - 1]; /* for sigpend, indexed like process->sigactions */
 	void *sigaddr;                   /* si_addr of the last fault raised on this thread */
+	stack_t altstack;                /* sigaltstack(); SS_DISABLE when there is none */
 
 	void *kstack;
 	size_t kstacksz;
@@ -261,6 +262,10 @@ int threads_sigCaught(const thread_t *thread, int sig);
 
 
 int threads_sigsuspend(unsigned int mask);
+
+
+/* sigaltstack() for the calling thread; ss and oss are kernel copies */
+int threads_sigaltstack(const stack_t *ss, stack_t *oss);
 
 
 void threads_setupUserReturn(void *retval, cpu_context_t *ctx);

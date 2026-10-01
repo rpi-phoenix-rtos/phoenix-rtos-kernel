@@ -1459,6 +1459,38 @@ void *syscalls_sigreturnContext(u8 *ustack)
 /* POSIX compatibility syscalls */
 
 
+int syscalls_sys_sigaltstack(u8 *ustack)
+{
+	process_t *proc = proc_current()->process;
+	const stack_t *ss;
+	stack_t *oss;
+	stack_t kss, koss;
+	int err;
+
+	GETFROMSTACK(ustack, const stack_t *, ss, 0U);
+	GETFROMSTACK(ustack, stack_t *, oss, 1U);
+
+	if ((ss != NULL) && (vm_mapBelongs(proc, ss, sizeof(*ss)) < 0)) {
+		return -EFAULT;
+	}
+
+	if ((oss != NULL) && (vm_mapBelongs(proc, oss, sizeof(*oss)) < 0)) {
+		return -EFAULT;
+	}
+
+	if (ss != NULL) {
+		hal_memcpy(&kss, ss, sizeof(kss));
+	}
+
+	err = threads_sigaltstack((ss != NULL) ? &kss : NULL, (oss != NULL) ? &koss : NULL);
+	if ((err == EOK) && (oss != NULL)) {
+		hal_memcpy(oss, &koss, sizeof(*oss));
+	}
+
+	return err;
+}
+
+
 int syscalls_sys_open(u8 *ustack)
 {
 	const char *filename;

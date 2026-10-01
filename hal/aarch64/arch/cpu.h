@@ -51,6 +51,11 @@
 #define NO_INT        (NO_IRQ | NO_FIQ) /* mask to disable IRQ and FIQ */
 
 
+/* hal_cpuPushSignal() builds the frame at signalCtx, wherever that is, so
+ * signals can be delivered on an alternate stack */
+#define HAL_SIGNAL_ALTSTACK
+
+
 #ifndef __ASSEMBLY__
 
 #define SYSTICK_INTERVAL 1000

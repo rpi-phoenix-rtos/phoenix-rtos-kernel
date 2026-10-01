@@ -138,7 +138,8 @@
 	ID(memExport) \
 	ID(memUnexport) \
 	ID(pollNotify) \
-	ID(sigreturnContext)
+	ID(sigreturnContext) \
+	ID(sys_sigaltstack)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */
