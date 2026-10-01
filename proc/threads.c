@@ -1964,11 +1964,49 @@ static int _threads_signalFrameFits(const thread_t *selected, const cpu_context_
 }
 
 
+/* The siginfo_t for a pending signal, from the origin recorded when it was
+ * posted. Called before the pending bit is cleared. */
+static void _threads_siginfoFill(siginfo_t *info, const thread_t *selected, const process_t *proc, unsigned int sig)
+{
+	const u32 sigbit = (u32)1U << sig;
+	const int threadDirected = ((selected->sigpend & sigbit) != 0U) ? 1 : 0;
+	const sigorigin_t *origin = (threadDirected != 0) ? &selected->sigorigin[sig - 1U] : &proc->sigorigin[sig - 1U];
+
+	hal_memset(info, 0, sizeof(*info));
+	info->si_signo = (int)sig;
+	info->si_code = origin->code;
+	info->si_pid = origin->pid;
+	info->si_status = origin->status;
+
+	/* si_addr belongs to the synchronous faults, which the kernel raises on the
+	 * faulting thread with a signal-specific (small, positive) si_code */
+	if ((threadDirected != 0) && (origin->code > 0) && (origin->code < SI_KERNEL)) {
+		switch (sig) {
+			case SIGILL:
+			case SIGTRAP:
+			case SIGFPE:
+			case SIGBUS:
+			case SIGSEGV:
+				info->si_addr = selected->sigaddr;
+				break;
+
+			default:
+				break;
+		}
+	}
+}
+
+
 static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_context_t *signalCtx, unsigned int oldmask, const int src)
 {
 	unsigned int curSig;
 	int ret;
 	sighandler_t handler;
+	siginfo_t info;
+	stack_t ss;
+	const siginfo_t *infop = NULL;
+	const stack_t *ssp = NULL;
+
 	ret = _threads_checkSignal(selected, proc);
 	if (ret > 0) {
 		curSig = (unsigned int)ret;
@@ -1989,7 +2027,17 @@ static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_co
 			return -1;
 		}
 
-		if (hal_cpuPushSignal(selected->kstack + selected->kstacksz, proc->sigtrampoline, handler, signalCtx, (int)curSig, oldmask, src) == 0) {
+		/* Read before SA_RESETHAND below clears SA_SIGINFO */
+		if (((unsigned int)proc->sigactions[curSig - 1U].sa_flags & SA_SIGINFO) != 0U) {
+			_threads_siginfoFill(&info, selected, proc, curSig);
+			ss.ss_sp = NULL;
+			ss.ss_flags = SS_DISABLE;
+			ss.ss_size = 0;
+			infop = &info;
+			ssp = &ss;
+		}
+
+		if (hal_cpuPushSignal(selected->kstack + selected->kstacksz, proc->sigtrampoline, handler, signalCtx, (int)curSig, oldmask, src, infop, ssp) == 0) {
 			selected->sigpend &= ~(u32)(1UL << curSig);
 			proc->sigpend &= ~(u32)(1UL << curSig);
 

@@ -137,7 +137,8 @@
 	ID(sys_fdpath) \
 	ID(memExport) \
 	ID(memUnexport) \
-	ID(pollNotify)
+	ID(pollNotify) \
+	ID(sigreturnContext)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */

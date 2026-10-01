@@ -149,7 +149,7 @@ void _hal_cpuSetKernelStack(void *kstack)
 }
 
 
-int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src)
+int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src, const siginfo_t *info, const stack_t *ss)
 {
 	cpu_context_t *ctx = (void *)((char *)kstack - sizeof(cpu_context_t));
 	const struct stackArg args[] = {
@@ -162,6 +162,10 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		{ &handler, sizeof(handler) },
 		{ &n, sizeof(n) },
 	};
+
+	(void)info;
+	(void)ss;
+
 	hal_memcpy(signalCtx, ctx, sizeof(cpu_context_t));
 
 	/* parasoft-begin-suppress MISRAC2012-RULE_11_1 "Need to assign function address to processor register" */

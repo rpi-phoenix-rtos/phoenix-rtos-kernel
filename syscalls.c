@@ -1421,6 +1421,41 @@ void syscalls_sigreturn(u8 *ustack)
 	proc_longjmp(ctx);
 }
 
+
+/* Return from an SA_SIGINFO handler, which may have changed the registers and
+ * the signal mask in its ucontext_t. Unlike sigreturn, the context is copied
+ * into the kernel stack and restored by the ordinary syscall return, so
+ * nothing in user memory is trusted after it has been checked. */
+void *syscalls_sigreturnContext(u8 *ustack)
+{
+#ifdef _PH_HAVE_MCONTEXT
+	thread_t *t = proc_current();
+	cpu_context_t *ctx = (cpu_context_t *)(t->kstack + t->kstacksz - sizeof(cpu_context_t));
+	const cpu_context_t *sctx;
+	const ucontext_t *uc;
+	void *retval;
+
+	GETFROMSTACK(ustack, const cpu_context_t *, sctx, 0U);
+	GETFROMSTACK(ustack, const ucontext_t *, uc, 1U);
+
+	if ((vm_mapBelongs(t->process, sctx, sizeof(*sctx)) < 0) || (vm_mapBelongs(t->process, uc, sizeof(*uc)) < 0)) {
+		/* There is no context to return to */
+		proc_kill(t->process);
+		return (void *)-EFAULT;
+	}
+
+	retval = hal_cpuSigreturnContext(ctx, sctx, uc);
+	threads_setSigmask(t, uc->uc_sigmask);
+
+	/* Becomes the first argument register again on the way out */
+	return retval;
+#else
+	(void)ustack;
+
+	return (void *)-ENOSYS;
+#endif
+}
+
 /* POSIX compatibility syscalls */
 
 

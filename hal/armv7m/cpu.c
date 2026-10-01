@@ -151,7 +151,7 @@ int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, si
 }
 
 
-int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src)
+int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src, const siginfo_t *info, const stack_t *ss)
 {
 	cpu_context_t *ctx = (void *)((char *)kstack - sizeof(cpu_context_t));
 	struct stackArg args[] = {
@@ -165,6 +165,9 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		{ 0, 0 } /* Reserve space for optional HWCTX */
 	};
 	size_t argc = (sizeof(args) / sizeof(args[0])) - 1U;
+
+	(void)info;
+	(void)ss;
 
 	hal_memcpy(signalCtx, ctx, sizeof(cpu_context_t));
 

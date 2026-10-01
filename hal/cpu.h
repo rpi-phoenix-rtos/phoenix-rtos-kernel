@@ -19,6 +19,7 @@
 
 #include <arch/cpu.h>
 #include "spinlock.h"
+#include "include/signal.h"
 
 
 struct _hal_tls_t;
@@ -113,11 +114,23 @@ void *hal_cpuGetUserSP(cpu_context_t *ctx);
 int hal_cpuSupervisorMode(cpu_context_t *ctx);
 
 
-/* oldmask: mask to be restored in sigreturn after handling the signal */
-int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src);
+/* oldmask: mask to be restored in sigreturn after handling the signal
+ * info, ss: NULL for a plain handler; for an SA_SIGINFO handler, its siginfo_t
+ * and the uc_stack to report. Architectures without a ucontext_t ignore them. */
+int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src, const siginfo_t *info, const stack_t *ss);
 
 
 void hal_cpuSigreturn(void *kstack, void *ustack, cpu_context_t **ctx);
+
+
+#ifdef _PH_HAVE_MCONTEXT
+/* Return from an SA_SIGINFO handler: load ctx (the context saved on the kernel
+ * stack at syscall entry) from the registers in uc, which the handler may have
+ * changed, and from the rest of the saved signal context sctx. Both point into
+ * user memory the caller has validated. Returns the value of the first argument
+ * register, which the syscall return path writes back into ctx. */
+void *hal_cpuSigreturnContext(cpu_context_t *ctx, const cpu_context_t *sctx, const ucontext_t *uc);
+#endif
 
 
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_6 "Definition in assembly code" */

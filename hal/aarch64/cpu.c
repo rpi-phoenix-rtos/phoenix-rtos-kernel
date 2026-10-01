@@ -81,10 +81,38 @@ int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, si
 }
 
 
-int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src)
+/* An SA_SIGINFO frame adds a ucontext_t and a siginfo_t between the saved
+ * context and the trampoline arguments. threads.c bounds the frame below
+ * signalCtx by one more cpu_context_t, so the additions must fit in that. */
+_Static_assert(sizeof(ucontext_t) + sizeof(siginfo_t) + (12U * sizeof(u64)) + 32U <= sizeof(cpu_context_t),
+		"SA_SIGINFO signal frame exceeds the bound checked by the scheduler");
+
+
+#define PSR_NZCV 0xf0000000UL
+
+
+/*
+ * Signal frame, from the interrupted (or alternate) stack downwards:
+ *
+ *   cpu_context_t  signalCtx: the interrupted context; restored by sigreturn
+ *   ucontext_t     uc        (SA_SIGINFO only) the handler's copy of it
+ *   siginfo_t      si        (SA_SIGINFO only)
+ *   arguments      n, handler, oldmask, signalCtx, pc, sp, psr, si[, uc]
+ *
+ * n is at the lowest address, where the trampoline finds it. The word after psr
+ * is NULL for a plain handler; it used to be alignment padding, so the plain
+ * frame keeps its size and layout and older trampolines, which read only the
+ * first seven words, handle both frames.
+ */
+int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(int signo), cpu_context_t *signalCtx, int n, unsigned int oldmask, const int src, const siginfo_t *info, const stack_t *ss)
 {
 	cpu_context_t *ctx = (void *)((char *)kstack - sizeof(cpu_context_t));
+	ucontext_t *uc = NULL;
+	siginfo_t *si = NULL;
+	size_t i;
 	const struct stackArg args[] = {
+		{ &uc, sizeof(uc) },
+		{ &si, sizeof(si) },
 		{ &ctx->psr, sizeof(ctx->psr) },
 		{ &ctx->sp, sizeof(ctx->sp) },
 		{ &ctx->pc, sizeof(ctx->pc) },
@@ -93,16 +121,39 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		{ &handler, sizeof(handler) },
 		{ &n, sizeof(n) },
 	};
+	size_t argc = sizeof(args) / sizeof(args[0]);
 
 	(void)src;
+
+	if (info != NULL) {
+		uc = (void *)(((ptr_t)signalCtx - sizeof(*uc)) & ~(ptr_t)0xfU);
+		si = (void *)(((ptr_t)uc - sizeof(*si)) & ~(ptr_t)0xfU);
+
+		hal_memcpy(si, info, sizeof(*si));
+
+		hal_memset(uc, 0, sizeof(*uc));
+		hal_memcpy(&uc->uc_stack, ss, sizeof(uc->uc_stack));
+		uc->uc_sigmask = oldmask;
+		uc->uc_mcontext.fault_address = (u64)(ptr_t)info->si_addr;
+		for (i = 0; i < 31U; i++) {
+			uc->uc_mcontext.regs[i] = ctx->x[i];
+		}
+		uc->uc_mcontext.sp = ctx->sp;
+		uc->uc_mcontext.pc = ctx->pc;
+		uc->uc_mcontext.pstate = ctx->psr;
+	}
+	else {
+		/* Plain frame: leave out uc, keep si as the NULL marker */
+		argc--;
+	}
 
 	hal_memcpy(signalCtx, ctx, sizeof(cpu_context_t));
 
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "Program counter must be set to the address of the function" */
 	signalCtx->pc = (u64)trampoline;
-	signalCtx->sp -= sizeof(cpu_context_t);
+	signalCtx->sp = (si != NULL) ? (u64)(ptr_t)si : (u64)(ptr_t)signalCtx;
 
-	hal_stackPutArgs((void **)&signalCtx->sp, sizeof(args) / sizeof(args[0]), args);
+	hal_stackPutArgs((void **)&signalCtx->sp, argc, &args[sizeof(args) / sizeof(args[0]) - argc]);
 
 	return 0;
 }
@@ -114,6 +165,36 @@ void hal_cpuSigreturn(void *kstack, void *ustack, cpu_context_t **ctx)
 	GETFROMSTACK(ustack, u64, (*ctx)->pc, 2);
 	GETFROMSTACK(ustack, u64, (*ctx)->sp, 3);
 	GETFROMSTACK(ustack, u64, (*ctx)->psr, 4);
+}
+
+
+void *hal_cpuSigreturnContext(cpu_context_t *ctx, const cpu_context_t *sctx, const ucontext_t *uc)
+{
+	size_t i;
+
+#ifndef __SOFTFP__
+	/* Only the FPU enable bits are restored: the FP/SIMD registers below are
+	 * loaded on return only when both are set. */
+	ctx->cpacr = sctx->cpacr & (3UL << 20);
+	ctx->fpcr = sctx->fpcr;
+	ctx->fpsr = sctx->fpsr;
+	hal_memcpy(ctx->freg, sctx->freg, sizeof(ctx->freg));
+#else
+	(void)sctx;
+#endif
+
+	for (i = 0; i < 31U; i++) {
+		ctx->x[i] = uc->uc_mcontext.regs[i];
+	}
+	ctx->sp = uc->uc_mcontext.sp;
+	ctx->pc = uc->uc_mcontext.pc;
+
+	/* The handler may change the condition flags only: never the exception
+	 * masks (an EL0 thread with IRQs masked could not be preempted) or the
+	 * exception level. */
+	ctx->psr = (uc->uc_mcontext.pstate & PSR_NZCV) | MODE_EL0;
+
+	return (void *)(ptr_t)ctx->x[0];
 }
 
 
