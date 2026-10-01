@@ -2490,6 +2490,45 @@ static int ioctl_processResponse(const msg_t *msg, unsigned long request, void *
 }
 
 
+/* FIONBIO as libphoenix <sys/ioctl.h> encodes it */
+#define POSIX_FIONBIO _IOC(IOC_IN, 'f', 126, sizeof(unsigned long))
+
+
+/*
+ * A UNIX socket lives in the kernel, so there is no server to forward its
+ * requests to: its oid.port is the USOCKET_PORT placeholder, and proc_send()
+ * on it failed every request with EINVAL - FIONBIO included, which is how
+ * CPython's socket.setblocking() (and so asyncio's self-pipe) sets O_NONBLOCK.
+ */
+static int posix_usocketIoctl(usocket_t *s, unsigned long request, const void *data, size_t size)
+{
+	int err, val;
+
+	switch (request) {
+		case POSIX_FIONBIO:
+			/*
+			 * The request is encoded with an unsigned long, but the argument is
+			 * an int on Linux, the BSDs and in lwip, and callers such as CPython
+			 * pass one: read only an int, never the 4 bytes beyond it.
+			 */
+			if (size < sizeof(val)) {
+				err = -EINVAL;
+			}
+			else {
+				hal_memcpy(&val, data, sizeof(val));
+				err = usocket_setfl(s, (val != 0) ? O_NONBLOCK : 0U);
+			}
+			break;
+
+		default:
+			err = -ENOTTY;
+			break;
+	}
+
+	return err;
+}
+
+
 int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 {
 	TRACE("ioctl(%d, %d)", fildes, request);
@@ -2533,7 +2572,10 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 			}
 		}
 
-		if (err == EOK) {
+		if ((err == EOK) && (f->type == ftUnixSocket)) {
+			err = posix_usocketIoctl(f->sock, request, data, size);
+		}
+		else if (err == EOK) {
 			/* Zero before packing: ioctl_pack fills i.raw's header and the
 			 * request payload but never touches o.raw, and
 			 * ioctl_processResponse copies o.raw back into the caller's buffer
