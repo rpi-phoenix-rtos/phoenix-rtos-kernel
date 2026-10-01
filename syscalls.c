@@ -987,6 +987,39 @@ int syscalls_condBroadcast(u8 *ustack)
 
 
 /*
+ * Futexes
+ */
+
+
+int syscalls_futexWait(u8 *ustack)
+{
+	u32 *uaddr;
+	u32 val;
+	time_t timeout;
+	int clock;
+
+	GETFROMSTACK(ustack, u32 *, uaddr, 0U);
+	GETFROMSTACK(ustack, u32, val, 1U);
+	GETFROMSTACK(ustack, time_t, timeout, 2U);
+	GETFROMSTACK(ustack, int, clock, 3U);
+
+	return proc_futexWait(uaddr, val, timeout, clock);
+}
+
+
+int syscalls_futexWake(u8 *ustack)
+{
+	u32 *uaddr;
+	u32 count;
+
+	GETFROMSTACK(ustack, u32 *, uaddr, 0U);
+	GETFROMSTACK(ustack, u32, count, 1U);
+
+	return proc_futexWake(uaddr, count);
+}
+
+
+/*
  * Resources
  */
 
