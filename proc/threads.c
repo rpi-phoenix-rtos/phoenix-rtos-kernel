@@ -1965,6 +1965,19 @@ static int _threads_trySignalDeliver(thread_t *selected, process_t *proc, cpu_co
 			if (((unsigned int)proc->sigactions[curSig - 1U].sa_flags & SA_NODEFER) == 0U) {
 				selected->sigmask |= (u32)(1UL << curSig);
 			}
+
+			/* POSIX: with SA_RESETHAND the disposition is reset to SIG_DFL and
+			 * SA_SIGINFO cleared on entry to the handler, so a second delivery
+			 * takes the default action. The handler for THIS delivery is already
+			 * in the frame. The signal stays blocked in the handler unless
+			 * SA_NODEFER is set too: POSIX allows, but does not require,
+			 * SA_RESETHAND to imply SA_NODEFER, and Linux keeps them apart.
+			 * Done under threads_common.spinlock, like every sigactions update,
+			 * so a concurrent delivery on another CPU sees one or the other. */
+			if (((unsigned int)proc->sigactions[curSig - 1U].sa_flags & SA_RESETHAND) != 0U) {
+				proc->sigactions[curSig - 1U].sa_handler = SIG_DFL;
+				proc->sigactions[curSig - 1U].sa_flags = (int)((unsigned int)proc->sigactions[curSig - 1U].sa_flags & ~SA_SIGINFO);
+			}
 			/* TODO: Handle other sa_flags */
 
 			return 0;

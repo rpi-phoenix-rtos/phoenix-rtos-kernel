@@ -77,7 +77,7 @@ enum { SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK };
 #define SA_NOCLDWAIT (1U << 1) /* FIXME: implement */
 #define SA_NODEFER   (1U << 2)
 #define SA_ONSTACK   (1U << 3) /* FIXME: implement sigaltstack() */
-#define SA_RESETHAND (1U << 4) /* FIXME: implement */
+#define SA_RESETHAND (1U << 4)
 #define SA_RESTART   (1U << 5) /* FIXME: implement */
 #define SA_SIGINFO   (1U << 6) /* FIXME: implement */
 
