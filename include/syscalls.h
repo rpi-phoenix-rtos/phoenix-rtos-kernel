@@ -139,7 +139,9 @@
 	ID(memUnexport) \
 	ID(pollNotify) \
 	ID(sigreturnContext) \
-	ID(sys_sigaltstack)
+	ID(sys_sigaltstack) \
+	ID(futexWait) \
+	ID(futexWake)
 
 /* parasoft-end-suppress MISRAC2012-RULE_20_7-a */
 /* clang-format on */
