@@ -320,15 +320,20 @@ static void process_illegal(unsigned int n, exc_context_t *ctx)
 {
 	thread_t *thread = proc_current();
 	process_t *process = thread->process;
+	siginfo_t info;
 
 	LIB_ASSERT_ALWAYS(process != NULL, "exception in kernel");
+
+	hal_memset(&info, 0, sizeof(info));
+	info.si_code = ILL_ILLOPC;
+	info.si_addr = (void *)hal_exceptionsPC(ctx);
 
 	/*
 	 * FIXME: In case signal is ignored or blocked, the process should be terminated
 	 * to avoid exception dump loop. In case it is handled, we should provide a mechanism
 	 * to force delivery of this signal before another pending ones.
 	 */
-	(void)threads_sigpost(process, thread, SIGILL);
+	(void)threads_sigpostInfo(process, thread, SIGILL, &info);
 
 	if (thread->exit != 0U) {
 		proc_threadEnd();
@@ -2145,7 +2150,7 @@ int proc_execve(const char *path, char **argv, char **envp)
 }
 
 
-int proc_sigpost(int pid, int sig)
+int proc_sigpost(int pid, int sig, const siginfo_t *info)
 {
 	process_t *p;
 	int err = -EINVAL;
@@ -2153,7 +2158,7 @@ int proc_sigpost(int pid, int sig)
 	(void)proc_lockSet(&process_common.lock);
 	p = lib_treeof(process_t, idlinkage, lib_idtreeFind(&process_common.id, pid));
 	if (p != NULL) {
-		err = threads_sigpost(p, NULL, sig);
+		err = threads_sigpostInfo(p, NULL, sig, info);
 	}
 	(void)proc_lockClear(&process_common.lock);
 

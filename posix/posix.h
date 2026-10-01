@@ -165,7 +165,9 @@ int posix_futimens(int fildes, const struct timespec *times);
 int posix_tkill(pid_t pid, int tid, int sig);
 
 
-void posix_sigchild(pid_t ppid);
+/* Tell ppid that its child pid has ended with exit status exit (as the kernel
+ * stores it: signal number in bits 8-14, exit code in bits 0-7). */
+void posix_sigchild(pid_t ppid, pid_t pid, int exit);
 
 
 int posix_setpgid(pid_t pid, pid_t pgid);

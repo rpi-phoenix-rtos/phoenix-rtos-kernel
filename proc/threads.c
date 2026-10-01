@@ -866,6 +866,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	t->magic = THREAD_MAGIC;
 	t->sigmask = sigmask;
 	t->sigpend = 0;
+	t->sigaddr = NULL;
 	t->refs = 1;
 	t->interruptible = 0;
 	t->exit = 0;
@@ -1730,7 +1731,28 @@ static int _threads_sigdefault(process_t *process, thread_t *thread, int sig)
 }
 
 
+static void _threads_sigoriginSet(sigorigin_t *origin, const siginfo_t *info)
+{
+	if (info == NULL) {
+		origin->pid = 0;
+		origin->code = (short)SI_KERNEL;
+		origin->status = 0;
+	}
+	else {
+		origin->pid = info->si_pid;
+		origin->code = (short)info->si_code;
+		origin->status = (short)info->si_status;
+	}
+}
+
+
 int threads_sigpost(process_t *process, thread_t *thread, int sig)
+{
+	return threads_sigpostInfo(process, thread, sig, NULL);
+}
+
+
+int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const siginfo_t *info)
 {
 	u32 sigbit;
 	spinlock_ctx_t sc;
@@ -1764,10 +1786,21 @@ int threads_sigpost(process_t *process, thread_t *thread, int sig)
 
 	sigbit = (u32)1U << (unsigned int)sig;
 
+	/* Keep the origin of the first pending instance, as the signal does not queue */
 	if (thread != NULL) {
+		if ((thread->sigpend & sigbit) == 0U) {
+			_threads_sigoriginSet(&thread->sigorigin[sig - 1], info);
+			/* A fault: see _threads_siginfoFill() */
+			if ((info != NULL) && (info->si_code > 0) && (info->si_code < SI_KERNEL)) {
+				thread->sigaddr = info->si_addr;
+			}
+		}
 		thread->sigpend |= sigbit;
 	}
 	else {
+		if ((process->sigpend & sigbit) == 0U) {
+			_threads_sigoriginSet(&process->sigorigin[sig - 1], info);
+		}
 		process->sigpend |= sigbit;
 		thread = process->threads;
 

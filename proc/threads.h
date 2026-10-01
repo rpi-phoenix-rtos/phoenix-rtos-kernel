@@ -94,6 +94,8 @@ typedef struct _thread_t {
 
 	unsigned int sigmask;
 	unsigned int sigpend;
+	sigorigin_t sigorigin[NSIG - 1]; /* for sigpend, indexed like process->sigactions */
+	void *sigaddr;                   /* si_addr of the last fault raised on this thread */
 
 	void *kstack;
 	size_t kstacksz;
@@ -246,6 +248,11 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel);
 
 
 int threads_sigpost(process_t *process, thread_t *thread, int sig);
+
+
+/* As threads_sigpost, recording where the signal came from for SA_SIGINFO
+ * handlers. info may be NULL (si_code SI_KERNEL); si_signo is ignored. */
+int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const siginfo_t *info);
 
 
 int threads_sigsuspend(unsigned int mask);

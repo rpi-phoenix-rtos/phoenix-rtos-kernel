@@ -3460,7 +3460,7 @@ int posix_pollNotify(const oid_t *oid)
 }
 
 
-static int posix_killOne(pid_t pid, int tid, int sig)
+static int posix_killOne(pid_t pid, int tid, int sig, const siginfo_t *info)
 {
 	process_info_t *pinfo;
 	process_t *proc;
@@ -3479,7 +3479,7 @@ static int posix_killOne(pid_t pid, int tid, int sig)
 	}
 
 	if (tid == 0) {
-		err = threads_sigpost(proc, NULL, sig);
+		err = threads_sigpostInfo(proc, NULL, sig, info);
 	}
 	else {
 		thr = threads_findThread(tid);
@@ -3490,7 +3490,7 @@ static int posix_killOne(pid_t pid, int tid, int sig)
 		}
 
 		if (thr->process == proc) {
-			err = threads_sigpost(proc, thr, sig);
+			err = threads_sigpostInfo(proc, thr, sig, info);
 		}
 		else {
 			err = -EINVAL;
@@ -3505,7 +3505,7 @@ static int posix_killOne(pid_t pid, int tid, int sig)
 }
 
 
-static int posix_killGroupOrSession(pid_t pgidOrSid, int sig, int isSid)
+static int posix_killGroupOrSession(pid_t pgidOrSid, int sig, int isSid, const siginfo_t *info)
 {
 	const process_info_t *pinfo;
 	rbnode_t *node;
@@ -3567,7 +3567,7 @@ static int posix_killGroupOrSession(pid_t pgidOrSid, int sig, int isSid)
 				signalSelf = 1;
 			}
 			else {
-				(void)proc_sigpost(batch[i], sig);
+				(void)proc_sigpost(batch[i], sig, info);
 			}
 			last = batch[i];
 		}
@@ -3578,29 +3578,27 @@ static int posix_killGroupOrSession(pid_t pgidOrSid, int sig, int isSid)
 	 * another thread of this process to tear down the process on different CPU.
 	 */
 	if (signalSelf != 0) {
-		(void)proc_sigpost(self, sig);
+		(void)proc_sigpost(self, sig, info);
 	}
 
 	return err;
 }
 
 
-static int posix_killGroup(pid_t pgid, int sig)
+static int posix_killGroup(pid_t pgid, int sig, const siginfo_t *info)
 {
-	return posix_killGroupOrSession(pgid, sig, 0);
+	return posix_killGroupOrSession(pgid, sig, 0, info);
 }
 
 
-static int posix_killSession(pid_t sid, int sig)
+static int posix_killSession(pid_t sid, int sig, const siginfo_t *info)
 {
-	return posix_killGroupOrSession(sid, sig, 1);
+	return posix_killGroupOrSession(sid, sig, 1, info);
 }
 
 
-int posix_tkill(pid_t pid, int tid, int sig)
+static int posix_signal(pid_t pid, int tid, int sig, const siginfo_t *info)
 {
-	TRACE("tkill(%p, %d, %d)", pid, tid, sig);
-
 	if ((sig < 0) || (sig >= NSIG_TOTAL)) {
 		return -EINVAL;
 	}
@@ -3614,20 +3612,43 @@ int posix_tkill(pid_t pid, int tid, int sig)
 		 * For now, kill the current session instead. Note that killpg(1, sig)
 		 * lands here too, so process group 1 cannot be signalled by name.
 		 */
-		return posix_killSession(0, sig);
+		return posix_killSession(0, sig, info);
 	}
 
 	if (pid > 0) {
-		return posix_killOne(pid, tid, sig);
+		return posix_killOne(pid, tid, sig, info);
 	}
 
-	return posix_killGroup((pid == 0) ? 0 : -pid, sig);
+	return posix_killGroup((pid == 0) ? 0 : -pid, sig, info);
 }
 
 
-void posix_sigchild(pid_t ppid)
+int posix_tkill(pid_t pid, int tid, int sig)
 {
-	(void)posix_tkill(ppid, 0, SIGCHLD);
+	const process_t *sender = proc_current()->process;
+	siginfo_t info;
+
+	TRACE("tkill(%p, %d, %d)", pid, tid, sig);
+
+	hal_memset(&info, 0, sizeof(info));
+	info.si_code = (tid != 0) ? SI_TKILL : SI_USER;
+	info.si_pid = (sender != NULL) ? process_getPid(sender) : 0;
+
+	return posix_signal(pid, tid, sig, &info);
+}
+
+
+void posix_sigchild(pid_t ppid, pid_t pid, int exit)
+{
+	siginfo_t info;
+	const int termsig = (exit >> 8) & 0x7f;
+
+	hal_memset(&info, 0, sizeof(info));
+	info.si_code = (termsig != 0) ? CLD_KILLED : CLD_EXITED;
+	info.si_pid = pid;
+	info.si_status = (termsig != 0) ? termsig : (exit & 0xff);
+
+	(void)posix_signal(ppid, 0, SIGCHLD, &info);
 }
 
 
@@ -4014,7 +4035,7 @@ void posix_died(pid_t pid, int exit)
 			LIST_ADD(&ppinfo->zombies, pinfo);
 			if (proc_threadBroadcast(&ppinfo->wait) == 0) {
 				/* Signal parent because no one was waiting in waitpid() */
-				posix_sigchild(ppid);
+				posix_sigchild(ppid, pid, exit);
 			}
 			adopted = 0;
 		}

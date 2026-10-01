@@ -34,6 +34,16 @@
 typedef void (*sigtrampolineFn_t)(void);
 
 
+/* Origin of a pending signal: the part of the siginfo_t an SA_SIGINFO handler
+ * receives that cannot be derived at delivery. Standard signals do not queue,
+ * so one record per signal number holds the first pending instance. */
+typedef struct {
+	pid_t pid;    /* si_pid: sender, 0 when raised by the kernel */
+	short code;   /* si_code */
+	short status; /* si_status */
+} sigorigin_t;
+
+
 /* Companion to THREAD_MAGIC: stamped into every live process_t so a thread_t
  * whose `process` pointer has been wild-written can be spotted at the point of
  * use instead of faulting on a garbage dereference.  Two crashes on this board
@@ -81,6 +91,7 @@ typedef struct _process_t {
 	unsigned int sigpend;
 	sigtrampolineFn_t sigtrampoline;
 	struct sigaction *sigactions; /* indices are offset by 1, as signal 0 is invalid */
+	sigorigin_t sigorigin[NSIG - 1]; /* for process->sigpend, indexed like sigactions */
 
 	void *got;
 	hal_tls_t tls;
@@ -135,7 +146,7 @@ int proc_syspageSpawn(const syspage_prog_t *program, vm_map_t *imap, vm_map_t *m
 int proc_execve(const char *path, char **argv, char **envp);
 
 
-int proc_sigpost(int pid, int sig);
+int proc_sigpost(int pid, int sig, const siginfo_t *info);
 
 
 int proc_vfork(void);

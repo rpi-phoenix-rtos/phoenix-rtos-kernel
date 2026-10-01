@@ -906,6 +906,8 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 	vm_map_t *map;
 	void *vaddr, *paddr;
 	vm_prot_t prot;
+	siginfo_t info;
+	int err;
 
 	prot = (vm_prot_t)hal_exceptionsFaultType(n, ctx);
 	vaddr = hal_exceptionsFaultAddr(n, ctx);
@@ -1044,7 +1046,8 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		prot |= PROT_USER;
 	}
 
-	if (vm_mapForce(map, paddr, prot) == 0) {
+	err = vm_mapForce(map, paddr, prot);
+	if (err == 0) {
 		/* Resolved. If this was a kernel user-copy fault -- the class no longer
 		 * reported one by one -- keep the storm canary fed. */
 		if ((hal_exceptionsPC(ctx) >= VADDR_KERNEL) &&
@@ -1062,7 +1065,10 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		 * before other pending ones.
 		 */
 		if (proc != NULL) {
-			(void)threads_sigpost(proc, thread, SIGSEGV);
+			hal_memset(&info, 0, sizeof(info));
+			info.si_code = (err == -EFAULT) ? SEGV_MAPERR : SEGV_ACCERR;
+			info.si_addr = vaddr;
+			(void)threads_sigpostInfo(proc, thread, SIGSEGV, &info);
 		}
 		else if (thread->process == NULL) {
 			/* A USER thread whose process_t is gone (detached above). It can
