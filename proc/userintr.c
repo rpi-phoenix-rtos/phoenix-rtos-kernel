@@ -94,7 +94,11 @@ static int userintr_dispatch(unsigned int n, cpu_context_t *ctx, void *arg)
 		pmap_switch(p->pmapp);
 	}
 
-	return reschedule;
+	/* A negative return tells the HAL the handler declined the interrupt
+	 * (on a shared line: "not my device"), so it can spot a line that
+	 * nobody claims. HALs that do not look at the sign treat it as a
+	 * request to reschedule, which is harmless. */
+	return (ret < 0) ? -1 : reschedule;
 }
 
 
