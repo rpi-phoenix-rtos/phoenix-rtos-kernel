@@ -41,6 +41,17 @@
 #define DEFAULT_CPU_MASK ((1U << NUM_CPUS) - 1U)
 #define DEFAULT_PRIORITY 0x80
 
+/* An SPI is masked after this many deliveries in a row that no handler
+ * claimed and that left the line asserted. A level interrupt nobody silences
+ * fires again as soon as it is EOIed, which hangs the CPU it is routed to;
+ * this happens on a shared line when the driver owning the asserting device
+ * dies, since its handler is gone but the other handlers keep the line
+ * enabled. A single claim resets the count, so a busy line with an owner is
+ * never masked. Linux uses the same order of magnitude (kernel/irq/spurious.c:
+ * 99900 unhandled of 100000) but tolerates rare claims; requiring an unbroken
+ * run is stricter. At storm rates this is well under a second. */
+#define UNCLAIMED_LIMIT 100000U
+
 
 enum {
 	/* Distributor registers */
@@ -93,6 +104,7 @@ static struct {
 	spinlock_t spinlock[SIZE_INTERRUPTS];
 	intr_handler_t *handlers[SIZE_INTERRUPTS];
 	unsigned int counters[SIZE_INTERRUPTS];
+	unsigned int unclaimed[SIZE_INTERRUPTS];
 	int trace_irqs;
 } interrupts_common;
 
@@ -101,6 +113,32 @@ void _hal_interruptsInitPerCPU(void);
 
 int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);
 
+static void interrupts_disableIRQ(unsigned int irqn);
+
+
+/* Called with interrupts_common.spinlock[n] held, before EOI. The pending
+ * test matters because a handler may return a negative value after it has
+ * silenced its device (it only declines to wake its thread): only a line
+ * still asserted after every handler ran is one that nobody serviced. */
+static void interrupts_noteUnclaimed(unsigned int n, int claimed)
+{
+	char buff[80];
+
+	if ((claimed != 0) || (interrupts_getPending(n) == 0U)) {
+		interrupts_common.unclaimed[n] = 0;
+		return;
+	}
+
+	interrupts_common.unclaimed[n]++;
+	if (interrupts_common.unclaimed[n] == UNCLAIMED_LIMIT) {
+		interrupts_disableIRQ(n);
+		/* lib_printf is not safe here (klog takes a scheduler lock); the
+		 * console lock is a leaf lock. */
+		(void)lib_sprintf(buff, "interrupts: IRQ %u unclaimed %u times in a row, masked\n", n, UNCLAIMED_LIMIT);
+		hal_consolePrint(ATTR_BOLD, buff);
+	}
+}
+
 
 /* parasoft-begin-suppress MISRAC2012-RULE_2_2 MISRAC2012-RULE_8_4 "Function is used externally within assembler code" */
 int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
@@ -108,7 +146,7 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	intr_handler_t *h;
 	unsigned int reschedule = 0;
 	spinlock_ctx_t sc;
-	int trace;
+	int trace, ret, claimed = 0;
 
 	u32 ciarValue = *(interrupts_common.gicc + gicc_iar);
 	n = ciarValue & 0x3ffU;
@@ -129,9 +167,18 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	h = interrupts_common.handlers[n];
 	if (h != NULL) {
 		do {
-			reschedule |= (unsigned int)h->f(n, ctx, h->data);
+			/* A negative return means the handler declined the interrupt */
+			ret = h->f(n, ctx, h->data);
+			if (ret >= 0) {
+				claimed = 1;
+				reschedule |= (unsigned int)ret;
+			}
 			h = h->next;
 		} while (h != interrupts_common.handlers[n]);
+	}
+
+	if (n >= SPI_FIRST_IRQID) {
+		interrupts_noteUnclaimed(n, claimed);
 	}
 
 	if (reschedule != 0U) {
@@ -238,6 +285,8 @@ int hal_interruptsSetHandler(intr_handler_t *h)
 
 	hal_spinlockSet(&interrupts_common.spinlock[h->n], &sc);
 	HAL_LIST_ADD(&interrupts_common.handlers[h->n], h);
+	/* A new handler may be the owner coming back: re-enabled below */
+	interrupts_common.unclaimed[h->n] = 0;
 
 	if (h->n >= 16U) {
 		interrupts_setConf(h->n, (u32)_interrupts_gicv2_classify(h->n));
@@ -284,6 +333,7 @@ int hal_interruptsDeleteHandler(intr_handler_t *h)
 
 	if (interrupts_common.handlers[h->n] == NULL) {
 		interrupts_disableIRQ(h->n);
+		interrupts_common.unclaimed[h->n] = 0;
 	}
 
 	hal_spinlockClear(&interrupts_common.spinlock[h->n], &sc);
@@ -313,6 +363,7 @@ void _hal_interruptsInit(void)
 	for (i = 0; i < SIZE_INTERRUPTS; ++i) {
 		interrupts_common.handlers[i] = NULL;
 		interrupts_common.counters[i] = 0;
+		interrupts_common.unclaimed[i] = 0;
 		hal_spinlockCreate(&interrupts_common.spinlock[i], "interrupts");
 	}
 
