@@ -1840,6 +1840,30 @@ int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const sig
 }
 
 
+int threads_sigCaught(const thread_t *thread, int sig)
+{
+	spinlock_ctx_t sc;
+	const process_t *process;
+	sighandler_t handler;
+	int caught = 0;
+
+	if ((sig <= 0) || (sig >= NSIG)) {
+		return 0;
+	}
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	process = thread->process;
+	if ((process != NULL) && (process->sigactions != NULL) && ((thread->sigmask & ((u32)1U << (unsigned int)sig)) == 0U)) {
+		handler = process->sigactions[sig - 1].sa_handler;
+		/* parasoft-suppress-next-line MISRAC2012-RULE_11_1-a "POSIX compliant definition" */
+		caught = ((handler != SIG_DFL) && (handler != SIG_IGN)) ? 1 : 0;
+	}
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	return caught;
+}
+
+
 /* With installed handler returns signal number or -EINTR for a terminating signal */
 static int _threads_checkSignal(thread_t *selected, process_t *proc)
 {

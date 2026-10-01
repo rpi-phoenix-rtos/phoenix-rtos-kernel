@@ -255,6 +255,11 @@ int threads_sigpost(process_t *process, thread_t *thread, int sig);
 int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const siginfo_t *info);
 
 
+/* Is sig going to run a handler on thread, rather than take its default action,
+ * be ignored, or stay pending? */
+int threads_sigCaught(const thread_t *thread, int sig);
+
+
 int threads_sigsuspend(unsigned int mask);
 
 

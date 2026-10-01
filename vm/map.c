@@ -1056,7 +1056,18 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		}
 	}
 	else {
-		process_dumpException(n, ctx);
+		/* A user fault the process handles itself need not be a crash: runtimes
+		 * fault on purpose (guard pages, bounds checks). Leave the register dump,
+		 * which reads as a crash, to faults that kill; keep one line for the
+		 * rest, as a crash handler that then aborts would hide where it was. */
+		if ((proc == NULL) || (hal_exceptionsPC(ctx) >= VADDR_KERNEL) || (threads_sigCaught(thread, SIGSEGV) == 0)) {
+			process_dumpException(n, ctx);
+		}
+		else {
+			lib_printf("vm: SIGSEGV caught by pid %d (%s): pc %p, address %p\n",
+					process_getPid(proc), (proc->path != NULL) ? proc->path : "?",
+					(void *)hal_exceptionsPC(ctx), vaddr);
+		}
 
 		/*
 		 * FIXME (upstream): in case the signal is ignored or blocked, the process
