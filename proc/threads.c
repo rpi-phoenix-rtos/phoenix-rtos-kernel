@@ -39,6 +39,7 @@ enum { event_scheduling, event_enqueued, event_waking, event_preempted };
 
 #define THREAD_WAIT_INTERRUPTIBLE (1U << 0)
 #define THREAD_WAIT_EXCLUSIVE     (1U << 1) /* reject a second waiter (unlocked exclusive conditional) */
+#define THREAD_WAIT_KILLABLE      (1U << 2) /* an exit request ends the wait, signals do not */
 
 /* Signal default actions */
 #define SIGNAL_TERMINATE        0
@@ -881,6 +882,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	t->altstack.ss_size = 0;
 	t->refs = 1;
 	t->interruptible = 0;
+	t->killable = 0;
 	t->exit = 0;
 	t->execdata = NULL;
 	t->wait = NULL;
@@ -1130,7 +1132,7 @@ __attribute__((noreturn)) void proc_threadEnd(void)
 static void _proc_threadExit(thread_t *t)
 {
 	t->exit = THREAD_END;
-	if (t->interruptible != 0U) {
+	if ((t->interruptible != 0U) || (t->killable != 0U)) {
 		_thread_interrupt(t);
 	}
 }
@@ -1244,6 +1246,7 @@ static void _proc_threadDequeue(thread_t *t)
 	t->wait = NULL;
 	t->state = READY;
 	t->interruptible = 0;
+	t->killable = 0;
 
 	/* MOD */
 	for (i = 0; i < hal_cpuGetCount(); i++) {
@@ -1275,6 +1278,7 @@ static void _proc_threadEnqueue(thread_t **queue, time_t timeout, u8 interruptib
 	current->wakeup = 0;
 	current->wait = queue;
 	current->interruptible = interruptible & 0x1U;
+	current->killable = 0;
 
 	if (timeout != 0) {
 		current->wakeup = timeout;
@@ -1400,6 +1404,15 @@ static int proc_threadWaitEx(thread_t **queue, spinlock_t *spinlock, time_t time
 			return -EINTR;
 		}
 	}
+	else if (((flags & THREAD_WAIT_KILLABLE) != 0U) && (thread->exit != 0U)) {
+		/* Checked under threads_common.spinlock, which _proc_threadExit holds: an exit request is either seen
+		 * here or ends the wait below */
+		hal_spinlockClear(&threads_common.spinlock, &tsc);
+		return -EINTR;
+	}
+	else {
+		/* No action required */
+	}
 
 	if (((flags & THREAD_WAIT_EXCLUSIVE) != 0U) && (*queue != NULL) && (*queue != wakeupPending)) {
 		hal_spinlockClear(&threads_common.spinlock, &tsc);
@@ -1411,6 +1424,10 @@ static int proc_threadWaitEx(thread_t **queue, spinlock_t *spinlock, time_t time
 	if (*queue == NULL) {
 		hal_spinlockClear(&threads_common.spinlock, &tsc);
 		return EOK;
+	}
+
+	if ((flags & THREAD_WAIT_KILLABLE) != 0U) {
+		thread->killable = 1;
 	}
 
 	if (spinlock != NULL) {
@@ -1435,6 +1452,12 @@ int proc_threadWait(thread_t **queue, spinlock_t *spinlock, time_t timeout, spin
 int proc_threadWaitInterruptible(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp)
 {
 	return proc_threadWaitEx(queue, spinlock, timeout, THREAD_WAIT_INTERRUPTIBLE, scp);
+}
+
+
+int proc_threadWaitKillable(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp)
+{
+	return proc_threadWaitEx(queue, spinlock, timeout, THREAD_WAIT_KILLABLE, scp);
 }
 
 
