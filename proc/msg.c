@@ -162,6 +162,13 @@ static void *msg_map(int dir, kmsg_t *kmsg, void *data, size_t size, process_t *
 		return data;
 	}
 
+	/* The payload is mapped by the physical addresses of the sender's pages, and a demand-zeroed
+	 * page the sender never touched has none yet: pmap_resolve() gives 0 for it. Its frame is
+	 * allocated here, while no lock is held. */
+	if ((srcmap != msg_common.kmap) && (vm_mapPopulate(srcmap, data, size) < 0)) {
+		return NULL;
+	}
+
 	w = vm_mapFind(dstmap, NULL, (n + bone + eone) * SIZE_PAGE, MAP_NOINHERIT, prot);
 	ml->w = w;
 	if (w == NULL) {
