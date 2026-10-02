@@ -1192,6 +1192,17 @@ int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, sockl
 			(void)proc_lockClear(&s->lock);
 			break;
 
+		case SO_TYPE:
+			/* GLib's g_socket_new_from_fd() needs it to adopt an inherited socket */
+			value = (int)s->type;
+			break;
+
+		case SO_ACCEPTCONN:
+			(void)proc_lockSet(&s->lock);
+			value = (s->state == (u8)usocketListening) ? 1 : 0;
+			(void)proc_lockClear(&s->lock);
+			break;
+
 		default:
 			err = -ENOPROTOOPT;
 			break;
