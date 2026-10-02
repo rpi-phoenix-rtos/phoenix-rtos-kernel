@@ -1327,7 +1327,17 @@ static ssize_t usocket_recv(usocket_t *s, void *buf, size_t len, unsigned int fl
 		 */
 		(void)fdpass_unpack(&packs, control, controllen);
 		if (packs != NULL) {
-			uchannel_returnPacks(rx, &packs);
+			if (usocket_isFramed(s) != 0) {
+				/*
+				 * A message's descriptors are delivered with that message or
+				 * not at all: what did not fit the control buffer is closed,
+				 * as on Linux (which also sets MSG_CTRUNC).
+				 */
+				fdpass_discard(&packs);
+			}
+			else {
+				uchannel_returnPacks(rx, &packs);
+			}
 		}
 	}
 	else {

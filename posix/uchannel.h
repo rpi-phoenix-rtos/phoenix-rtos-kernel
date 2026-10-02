@@ -116,9 +116,13 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
  * end-of-stream (the ring is empty and either side is shut down), or
  * -EWOULDBLOCK, -EINTR.
  *
- * When `packs` is not NULL the queued descriptor packs are detached into it
- * (the caller unpacks them with no lock held and returns the leftovers with
- * uchannel_returnPacks()).
+ * When `packs` is not NULL descriptor packs are detached into it, and the
+ * caller unpacks them with no lock held. On a byte stream these are all the
+ * queued packs, and the leftovers go back with uchannel_returnPacks(). On a
+ * framed channel it is at most the one pack sent with the frame just read -
+ * descriptors never move to another frame, so the caller closes what it cannot
+ * deliver - and a frame read with `packs` NULL has its descriptors closed here.
+ * A peek takes no descriptors.
  */
 ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags, fdpack_t **packs);
 

@@ -20,6 +20,16 @@
 #include "pollwake.h"
 
 
+/*
+ * A frame is stored as its length followed by its bytes. The top bit of the
+ * length word says that a descriptor pack travels with the frame: the packs of
+ * a framed channel are queued in frame order, one per marked frame, so the
+ * reader of a marked frame takes exactly the oldest pack. A frame can never be
+ * that long - it has to fit the ring - so the bit is free.
+ */
+#define UCHANNEL_FRAME_FDS ((size_t)1U << ((sizeof(size_t) * 8U) - 1U))
+
+
 /* Readiness-woken poll() for AF_UNIX, re-applied onto upstream's endpoint/channel
  * model (was posix/unix.c `unix_pollWait` before the rewrite).
  *
@@ -161,7 +171,7 @@ void uchannel_put(uchannel_t *ch)
 ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, fdpack_t *fdpack)
 {
 	ssize_t ret = 0;
-	size_t done = 0, chunk;
+	size_t done = 0, chunk, hdr;
 	int err;
 
 	(void)proc_lockSet(&ch->lock);
@@ -200,11 +210,14 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 			break;
 		}
 		else if (_cbuffer_free(&ch->buffer) >= (len + sizeof(len))) {
-			(void)_cbuffer_write(&ch->buffer, &len, sizeof(len));
-			(void)_cbuffer_write(&ch->buffer, buf, len);
+			hdr = len;
 			if (fdpack != NULL) {
+				/* the descriptors belong to this frame and to no other */
+				hdr |= UCHANNEL_FRAME_FDS;
 				LIST_ADD(&ch->fdpacks, fdpack);
 			}
+			(void)_cbuffer_write(&ch->buffer, &hdr, sizeof(hdr));
+			(void)_cbuffer_write(&ch->buffer, buf, len);
 			(void)proc_threadBroadcast(&ch->rxwait);
 			uchannel_pollNotify();
 			ret = (ssize_t)len;
@@ -247,7 +260,8 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 {
 	ssize_t ret = 0;
 	size_t rlen = 0;
-	int err;
+	fdpack_t *framePack = NULL, *pack;
+	int err, hasFds;
 
 	if (packs != NULL) {
 		*packs = NULL;
@@ -277,6 +291,8 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 		}
 		else if (_cbuffer_avail(&ch->buffer) > sizeof(rlen)) {
 			(void)_cbuffer_peek(&ch->buffer, &rlen, sizeof(rlen));
+			hasFds = ((rlen & UCHANNEL_FRAME_FDS) != 0U) ? 1 : 0;
+			rlen &= ~UCHANNEL_FRAME_FDS;
 			ret = (ssize_t)min(len, rlen);
 
 			if ((flags & UCHANNEL_OP_PEEK) != 0U) {
@@ -290,6 +306,21 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 					/* the rest of a truncated frame is dropped */
 					(void)_cbuffer_discard(&ch->buffer, rlen - (size_t)ret);
 				}
+
+				if ((hasFds != 0) && (ch->fdpacks != NULL)) {
+					/*
+					 * The oldest pack is this frame's. Leaving it queued would hand
+					 * it to the next reader of a later frame, which is how a reader
+					 * that drains two frames with descriptors got both sets of
+					 * descriptors with the first and none with the second.
+					 * ret > 0 here (len > 0 and no frame is empty), so the pack is
+					 * either handed out or closed below.
+					 */
+					pack = ch->fdpacks;
+					LIST_REMOVE(&ch->fdpacks, pack);
+					/* a list of its own: LIST_REMOVE() leaves the links zeroed */
+					LIST_ADD(&framePack, pack);
+				}
 			}
 		}
 		else {
@@ -298,8 +329,17 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 
 		if (ret > 0) {
 			if ((flags & UCHANNEL_OP_PEEK) == 0U) {
-				if (packs != NULL) {
+				if (ch->framed != 0U) {
+					if (packs != NULL) {
+						*packs = framePack;
+						framePack = NULL;
+					}
+				}
+				else if (packs != NULL) {
 					_uchannel_takePacks(ch, packs);
+				}
+				else {
+					/* No action */
 				}
 				(void)proc_threadBroadcast(&ch->txwait);
 				uchannel_pollNotify();
@@ -333,6 +373,15 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 	}
 
 	(void)proc_lockClear(&ch->lock);
+
+	if (framePack != NULL) {
+		/*
+		 * The frame was read without room for its descriptors, so they are
+		 * closed, as on Linux. With no lock held: fdpass_discard() reaches back
+		 * into the file descriptor table.
+		 */
+		fdpass_discard(&framePack);
+	}
 
 	return ret;
 }
@@ -469,6 +518,7 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 	void *data;
 	cbuffer_t old;
 	size_t avail, first;
+	fdpack_t *dropped = NULL;
 
 	data = vm_kmalloc(size);
 	if (data == NULL) {
@@ -500,6 +550,10 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 		 * has no way to tell they went missing - a byte stream loses a piece
 		 * out of its middle, a framed socket loses entire records.
 		 */
+		if (ch->framed != 0U) {
+			/* the descriptors of the dropped frames must not attach to later ones */
+			_uchannel_takePacks(ch, &dropped);
+		}
 	}
 
 	(void)proc_threadBroadcast(&ch->txwait);
@@ -508,6 +562,10 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 	(void)proc_lockClear(&ch->lock);
 
 	vm_kfree(old.data);
+
+	if (dropped != NULL) {
+		fdpass_discard(&dropped);
+	}
 
 	return 0;
 }
