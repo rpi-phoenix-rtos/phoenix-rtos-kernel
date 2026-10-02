@@ -102,6 +102,17 @@ int proc_mutexLock(int h, time_t timeout, int clock)
 		return -EINVAL;
 	}
 
+	/* Relocking a NORMAL mutex the caller already holds can never succeed. The
+	 * lock code would sleep on itself forever ("deadlock on itself" is only a
+	 * debug assertion), and a timed lock reported EOK after its timeout without
+	 * the caller owning anything new. POSIX allows EDEADLK here. Reading `owner`
+	 * unlocked is safe for this test: only the current thread can make itself
+	 * the owner, and it is busy in this call. */
+	if ((mutex->lock.attr.type == PH_LOCK_NORMAL) && (mutex->lock.owner == proc_current())) {
+		mutex_put(mutex);
+		return -EDEADLK;
+	}
+
 	if (timeout == 0) {
 		/* clock not needed here so left unverified to optimize the hot path */
 		err = proc_lockSetInterruptible(&mutex->lock);
