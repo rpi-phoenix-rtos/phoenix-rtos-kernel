@@ -1614,7 +1614,7 @@ void vm_mapinfo(meminfo_t *info)
 					emap[size].flags = e->flags;
 					emap[size].prot = e->prot;
 					emap[size].protOrig = e->protOrig;
-					emap[size].anonsz = ~0U;
+					emap[size].anonsz = (size_t)-1;
 
 					if (e->amap != NULL) {
 						emap[size].anonsz = 0;
@@ -1651,7 +1651,7 @@ void vm_mapinfo(meminfo_t *info)
 					emap[size].flags = e->flags;
 					emap[size].prot = e->prot;
 					emap[size].protOrig = e->protOrig;
-					emap[size].anonsz = ~0x0U;
+					emap[size].anonsz = (size_t)-1;
 
 					if (e->amap != NULL) {
 						emap[size].anonsz = 0;
@@ -1705,7 +1705,7 @@ void vm_mapinfo(meminfo_t *info)
 				ekmap[size].flags = e->flags;
 				ekmap[size].prot = e->prot;
 				ekmap[size].protOrig = e->protOrig;
-				ekmap[size].anonsz = ~0x0U;
+				ekmap[size].anonsz = (size_t)-1;
 
 				if (e->amap != NULL) {
 					ekmap[size].anonsz = 0x0U;
