@@ -1537,6 +1537,31 @@ int vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size)
 }
 
 
+/* Anonymous memory resident in the entry: the pages of its own range of the amap. Entries split
+ * from one mapping (mprotect, a partial munmap) share its amap at different offsets, so counting
+ * the whole amap credits each of them with all of it. (size_t)-1: the entry has no amap. */
+static size_t map_entryAnonSize(const map_entry_t *e)
+{
+	size_t i, end, sz = 0;
+
+	if (e->amap == NULL) {
+		return (size_t)-1;
+	}
+
+	end = (e->aoffs + e->size) / SIZE_PAGE;
+	if (end > e->amap->size) {
+		end = e->amap->size;
+	}
+	for (i = e->aoffs / SIZE_PAGE; i < end; ++i) {
+		if (e->amap->anons[i] != NULL) {
+			sz += SIZE_PAGE;
+		}
+	}
+
+	return sz;
+}
+
+
 void vm_mapinfo(meminfo_t *info)
 {
 	rbnode_t *n;
@@ -1545,7 +1570,6 @@ void vm_mapinfo(meminfo_t *info)
 	const syspage_map_t *spMap;
 	int size;
 	process_t *process, *proc = proc_current()->process;
-	size_t i;
 	size_t total, free;
 	entryinfo_t *emap = info->entry.map, *ekmap = info->entry.kmap;
 	mapinfo_t *smap = info->maps.map;
@@ -1614,16 +1638,7 @@ void vm_mapinfo(meminfo_t *info)
 					emap[size].flags = e->flags;
 					emap[size].prot = e->prot;
 					emap[size].protOrig = e->protOrig;
-					emap[size].anonsz = (size_t)-1;
-
-					if (e->amap != NULL) {
-						emap[size].anonsz = 0;
-						for (i = 0; (unsigned int)i < e->amap->size; ++i) {
-							if (e->amap->anons[i] != NULL) {
-								emap[size].anonsz += SIZE_PAGE;
-							}
-						}
-					}
+					emap[size].anonsz = map_entryAnonSize(e);
 
 					emap[size].offs = e->offs;
 
@@ -1651,16 +1666,7 @@ void vm_mapinfo(meminfo_t *info)
 					emap[size].flags = e->flags;
 					emap[size].prot = e->prot;
 					emap[size].protOrig = e->protOrig;
-					emap[size].anonsz = (size_t)-1;
-
-					if (e->amap != NULL) {
-						emap[size].anonsz = 0;
-						for (i = 0; i < e->amap->size; ++i) {
-							if (e->amap->anons[i] != NULL) {
-								emap[size].anonsz += SIZE_PAGE;
-							}
-						}
-					}
+					emap[size].anonsz = map_entryAnonSize(e);
 
 					emap[size].offs = e->offs;
 
@@ -1705,16 +1711,7 @@ void vm_mapinfo(meminfo_t *info)
 				ekmap[size].flags = e->flags;
 				ekmap[size].prot = e->prot;
 				ekmap[size].protOrig = e->protOrig;
-				ekmap[size].anonsz = (size_t)-1;
-
-				if (e->amap != NULL) {
-					ekmap[size].anonsz = 0x0U;
-					for (i = 0; i < e->amap->size; ++i) {
-						if (e->amap->anons[i] != NULL) {
-							ekmap[size].anonsz += SIZE_PAGE;
-						}
-					}
-				}
+				ekmap[size].anonsz = map_entryAnonSize(e);
 
 				ekmap[size].offs = e->offs;
 
