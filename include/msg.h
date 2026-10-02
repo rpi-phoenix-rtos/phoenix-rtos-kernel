@@ -41,6 +41,18 @@ enum {
 /* clang-format on */
 
 
+/*
+ * mtReaddir flags (i.readdir.flags)
+ *
+ * MSG_READDIR_NEXT: the client takes the position of the following entry from
+ * o.readdir.next instead of adding d_reclen to i.readdir.offs. A position is
+ * opaque, and a server that sets o.readdir.next (always > i.readdir.offs) can
+ * use positions that survive the removal of other entries during a scan.
+ * A server that does not know the flag leaves o.readdir.next untouched.
+ */
+#define MSG_READDIR_NEXT (1U << 0)
+
+
 #pragma pack(push, 8)
 
 
@@ -110,6 +122,7 @@ typedef struct _msg_t {
 			/* READDIR */
 			struct {
 				off_t offs;
+				unsigned int flags; /* MSG_READDIR_* */
 			} readdir;
 
 			unsigned char raw[64];
@@ -136,6 +149,11 @@ typedef struct _msg_t {
 				oid_t fil;
 				oid_t dev;
 			} lookup;
+
+			/* READDIR, only with MSG_READDIR_NEXT */
+			struct {
+				off_t next;
+			} readdir;
 
 			unsigned char raw[64];
 		};
