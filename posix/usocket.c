@@ -63,6 +63,16 @@
 #define USOCKET_MAX_BUFFER_SIZE (256U * 1024U)
 
 /*
+ * A framed socket (SOCK_SEQPACKET, SOCK_DGRAM) cannot take a message larger
+ * than its ring less the frame header, so the one-page stream default capped
+ * every message at 4088 bytes and failed the rest with EMSGSIZE. WebKit's IPC
+ * sends inline messages of up to 4096 bytes over SOCK_SEQPACKET, and a message
+ * that fails like that is dropped, not retried. Framed sockets get upstream's
+ * default instead, which also lets more than one such message be in flight.
+ */
+#define USOCKET_DEF_FRAMED_BUFFER_SIZE (64U * 1024U)
+
+/*
  * Upper bound on the pending connection queue of a listening socket. Each
  * entry is a reference to a connector that has already allocated its own
  * receive buffer, so the queue itself only has to be kept from growing
@@ -231,6 +241,12 @@ static int usocket_callerPid(void)
 }
 
 
+static size_t usocket_defaultBufferSize(unsigned int type)
+{
+	return (type == SOCK_STREAM) ? USOCKET_DEF_BUFFER_SIZE : USOCKET_DEF_FRAMED_BUFFER_SIZE;
+}
+
+
 static usocket_t *usocket_alloc(unsigned int type, int nonblock)
 {
 	usocket_t *s;
@@ -254,7 +270,7 @@ static usocket_t *usocket_alloc(unsigned int type, int nonblock)
 	s->state = (u8)usocketUnconnected;
 	s->flags = (nonblock != 0) ? (u8)USOCKET_NONBLOCK : 0U;
 	s->err = 0;
-	s->rcvbuf = USOCKET_DEF_BUFFER_SIZE;
+	s->rcvbuf = usocket_defaultBufferSize(type);
 	s->rx = NULL;
 	s->tx = NULL;
 	s->addr = NULL;
@@ -495,7 +511,7 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 	}
 
 	framed = (type != SOCK_STREAM) ? 1 : 0;
-	size = USOCKET_DEF_BUFFER_SIZE;
+	size = usocket_defaultBufferSize(type);
 
 	s[0] = usocket_alloc(type, nonblock);
 	if (s[0] == NULL) {
