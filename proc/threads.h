@@ -87,6 +87,8 @@ typedef struct _thread_t {
 	unsigned int state : 2;
 	unsigned int exit : 2;
 	unsigned int interruptible : 1;
+	/* Like interruptible, but only an exit request (not a signal) ends the wait */
+	unsigned int killable : 1;
 	/* Set on the vfork PARENT while a child is executing on its kernel stack
 	 * (process_vforkThread does `current->kstack = parent->kstack`).  The stack
 	 * must not be freed while the borrower is still running on it. */
@@ -191,6 +193,13 @@ int proc_threadWait(thread_t **queue, spinlock_t *spinlock, time_t timeout, spin
 
 
 int proc_threadWaitInterruptible(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp);
+
+
+/*
+ * As proc_threadWait, but returns -EINTR at once when the thread is told to exit (its process is
+ * killed or exits, or the thread is cancelled). Signals do not end the wait.
+ */
+int proc_threadWaitKillable(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp);
 
 
 int proc_threadWaitExclusive(thread_t **queue, time_t timeout);
