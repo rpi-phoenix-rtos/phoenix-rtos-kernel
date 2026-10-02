@@ -840,6 +840,15 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 		return -EINVAL;
 	}
 
+	/* The canary below, and later every signal frame, is written into the user stack under
+	 * threads_common.spinlock, where a page fault cannot be served: make the stack resident */
+	if ((process != NULL) && (stack != NULL)) {
+		err = vm_mapPopulate(process->mapp, stack, stacksz);
+		if (err < 0) {
+			return err;
+		}
+	}
+
 	t = vm_kmalloc(sizeof(thread_t));
 	if (t == NULL) {
 		return -ENOMEM;
@@ -1948,11 +1957,10 @@ static int _threads_onAltstack(const thread_t *t, ptr_t sp)
  *
  * t->ustack is the LOW address of the user stack VMA (process.c maps the stack
  * at map->pmap.end - ustacksz and hands that same pointer to threads_canaryInit),
- * so this is a VMA-membership test and NOT a residency test. That distinction is
- * the whole difficulty: the stack is demand-paged, so the top page is routinely
- * not yet resident when a signal arrives, and a "is this page mapped right now"
- * check would silently kill every process that takes a signal early. Comparing
- * against the VMA bound lets the normal case page in exactly as before.
+ * so this is a VMA-membership test and NOT a residency test. The stack is made
+ * resident when the thread is created (proc_threadCreate(), process_load()), as
+ * a fault here could not be served; what this rules out is a frame aimed outside
+ * it.
  *
  * Deliberately no locking and no printing: this runs under
  * threads_common.spinlock, where taking proc->mapp->lock (as vm_mapBelongs does)

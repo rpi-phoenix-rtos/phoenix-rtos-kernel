@@ -606,6 +606,39 @@ static vm_attr_t vm_protToAttr(vm_prot_t prot)
 }
 
 
+/*
+ * Plain anonymous memory is demand-zeroed: mmap() only reserves the range, and each page is
+ * allocated and zeroed by the first access to it (map_pageFault() -> _map_force() -> amap_page()).
+ * Reserving address space then costs no memory -- allocators and JITs reserve far more than they
+ * touch. Mapped in full at mmap() time, as before, are:
+ *  - object-backed memory: files, MAP_PHYSMEM, MAP_CONTIGUOUS (the pages a driver gives a device),
+ *  - memory of another type (MAP_UNCACHED, MAP_DEVICE): DMA buffers, whose physical addresses
+ *    a driver takes with va2pa() and hands to hardware,
+ *  - the kernel map,
+ *  - all anonymous memory of a process that runs an interrupt handler (process->anonEager): the
+ *    handler runs at interrupt level in the process's address space, where a fault cannot be served.
+ * Where the kernel itself touches user memory without being able to take a fault, or passes a
+ * user page's physical address on, it makes the pages resident first (vm_mapPopulate()).
+ */
+static int _map_isDemandZero(const vm_map_t *map, const process_t *process, const vm_object_t *o, vm_flags_t flags)
+{
+#ifndef NOMMU
+	if ((o != NULL) || (map == map_common.kmap) || (process == NULL) || (process->anonEager != 0U)) {
+		return 0;
+	}
+
+	return ((flags & (MAP_UNCACHED | MAP_DEVICE)) == 0U) ? 1 : 0;
+#else
+	/* NOMMU processes map lazily anyway (process->lazy), and there is no fault to serve */
+	(void)map;
+	(void)process;
+	(void)o;
+	(void)flags;
+	return 0;
+#endif
+}
+
+
 void *_vm_mmap(vm_map_t *map, void *vaddr, page_t *p, size_t size, vm_prot_t prot, vm_object_t *o, u64 offs, vm_flags_t flags)
 {
 	vm_attr_t attr;
@@ -660,6 +693,10 @@ void *_vm_mmap(vm_map_t *map, void *vaddr, page_t *p, size_t size, vm_prot_t pro
 	}
 
 	if (process != NULL && process->lazy != 0U) {
+		return vaddr;
+	}
+
+	if (_map_isDemandZero(map, process, o, flags) != 0) {
 		return vaddr;
 	}
 
@@ -798,6 +835,84 @@ int vm_mapForce(vm_map_t *map, void *paddr, vm_prot_t prot)
 }
 
 
+#ifndef NOMMU
+static int _map_populate(vm_map_t *map, const void *vaddr, size_t size)
+{
+	map_entry_t t, *e, *prev;
+	ptr_t start, end, w, stop;
+	int err;
+
+	if ((size == 0U) || ((ptr_t)vaddr >= (ptr_t)map->stop)) {
+		return EOK;
+	}
+
+	/* Clipped to the map, so neither bound can wrap */
+	start = max((ptr_t)vaddr & ~(SIZE_PAGE - 1U), (ptr_t)map->start);
+	end = (size > ((ptr_t)map->stop - (ptr_t)vaddr)) ? (ptr_t)map->stop : round_page((ptr_t)vaddr + size);
+	if (start >= end) {
+		return EOK;
+	}
+
+	/* Any entry overlapping the range, then back to the lowest one */
+	t.vaddr = (void *)start;
+	t.size = end - start;
+	e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &t.linkage));
+	if (e == NULL) {
+		return EOK;
+	}
+
+	for (;;) {
+		prev = lib_treeof(map_entry_t, linkage, lib_rbPrev(&e->linkage));
+		if ((prev == NULL) || (((ptr_t)prev->vaddr + prev->size) <= start)) {
+			break;
+		}
+		e = prev;
+	}
+
+	for (; (e != NULL) && ((ptr_t)e->vaddr < end); e = lib_treeof(map_entry_t, linkage, lib_rbNext(&e->linkage))) {
+		/* Object-backed memory is mapped in full by mmap(); an inaccessible page has nothing to
+		 * populate, and faults whoever touches it */
+		if ((e->object != NULL) || ((e->prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0U)) {
+			continue;
+		}
+
+		stop = min(end, (ptr_t)e->vaddr + e->size);
+		for (w = max(start, (ptr_t)e->vaddr); w < stop; w += SIZE_PAGE) {
+			if (pmap_resolve(&map->pmap, (void *)w) == 0U) {
+				err = _map_force(map, e, (void *)w, e->prot);
+				if (err != EOK) {
+					return err;
+				}
+			}
+		}
+	}
+
+	return EOK;
+}
+#endif
+
+
+int vm_mapPopulate(vm_map_t *map, const void *vaddr, size_t size)
+{
+#ifndef NOMMU
+	int err;
+
+	(void)proc_lockSet(&map->lock);
+	err = _map_populate(map, vaddr, size);
+	(void)proc_lockClear(&map->lock);
+
+	return err;
+#else
+	/* Memory is always resident */
+	(void)map;
+	(void)vaddr;
+	(void)size;
+
+	return EOK;
+#endif
+}
+
+
 static vm_prot_t map_checkProt(vm_prot_t baseProt, vm_prot_t newProt)
 {
 	return (baseProt | newProt) ^ baseProt;
@@ -817,14 +932,33 @@ static int _map_force(vm_map_t *map, map_entry_t *e, void *paddr, vm_prot_t prot
 	if (flagsCheck != 0U) {
 		return -EINVAL;
 	}
-	if ((((prot & PROT_WRITE) != 0U) && ((e->flags & MAP_NEEDSCOPY) != 0U)) || ((e->object == NULL) && (e->amap == NULL))) {
+
+	/* An anonymous page is entered with the entry's full protection, whatever access faulted it
+	 * in -- as mmap() maps it eagerly -- so a demand-zeroed page takes one fault, not one per kind
+	 * of access, and a page made resident for the kernel (vm_mapPopulate()) cannot fault again on
+	 * a write. A page still shared with another process is copied by amap_page() first. */
+	if (e->object == NULL) {
+		prot = e->prot;
+	}
+
+	/* A copy-on-write entry gets an amap of its own before a write, and an anonymous one before
+	 * any access: amap_page() stores the page it zero-fills in the amap, and in an amap still
+	 * shared after fork() that page would be shared as well -- a later write by one process,
+	 * which finds it referenced once, would land in the other process's memory. */
+	if ((((e->flags & MAP_NEEDSCOPY) != 0U) && (((prot & PROT_WRITE) != 0U) || (e->object == NULL))) ||
+			((e->object == NULL) && (e->amap == NULL))) {
 		amapNew = amap_create(e->amap, &e->aoffs, e->size);
 		if (amapNew == NULL) {
 			return -ENOMEM;
 		}
 		e->amap = amapNew;
 
-		e->flags &= ~MAP_NEEDSCOPY;
+		/* Only a write ends copy-on-write. After a read the entry may map a page it still shares
+		 * (read-only), and vm_mprotect() relies on the flag to copy such pages before it makes
+		 * them writable. */
+		if ((prot & PROT_WRITE) != 0U) {
+			e->flags &= ~MAP_NEEDSCOPY;
+		}
 	}
 
 	offs = (ptr_t)paddr - (ptr_t)e->vaddr;
@@ -1253,14 +1387,17 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 			}
 		}
 		for (currVaddr = t.vaddr; currVaddr < (e->vaddr + e->size); currVaddr += SIZE_PAGE) {
+			pa = pmap_resolve(&map->pmap, currVaddr);
 			if (needscopyNonLazy == 0) {
-				pa = pmap_resolve(&map->pmap, currVaddr);
 				if (pa != 0U) {
 					result = pmap_enter(&map->pmap, pa, currVaddr, attr, NULL);
 				}
 			}
-			else {
+			else if ((pa != 0U) || (e->object != NULL)) {
 				result = _map_force(map, e, currVaddr, prot);
+			}
+			else {
+				/* An anonymous page with no frame: its first access copies or zero-fills it */
 			}
 			if (result != EOK) {
 				break;
@@ -1464,6 +1601,15 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 
 		if ((proc == NULL) || (proc->lazy == 0U)) {
 			for (offs = 0; offs < f->size; offs += SIZE_PAGE) {
+				/* The parent keeps its pages mapped writable, so the child copies them now.
+				 * An anonymous page the parent has no frame for is left to the child's first
+				 * access: if it was never touched there is nothing to copy (forcing it would
+				 * allocate it), and if it has data (not accessible, PROT_NONE) the shared
+				 * amap still holds it, counted for both, and _map_force() copies it then. */
+				if ((f->object == NULL) && (pmap_resolve(&src->pmap, (void *)((ptr_t)e->vaddr + offs)) == 0U)) {
+					continue;
+				}
+
 				err = _map_force(dst, f, (void *)((ptr_t)f->vaddr + offs), f->prot);
 				if (err != EOK) {
 					(void)proc_lockClear(&dst->lock);
@@ -1533,19 +1679,29 @@ int vm_mapBelongs(const struct _process_t *proc, const void *ptr, size_t size)
 	ret = map_belongs(proc, ptr, size);
 	LIB_ASSERT_VM(ret == 0, "Fault @0x%p (%zu) path: %s, pid: %d\n", ptr, size, proc->path, process_getPid(proc));
 
+	/* A buffer passes through here before the kernel touches it, and some of those accesses
+	 * cannot take a page fault: a few are made holding the map's own lock (vm_mapinfo()), a
+	 * mutex the fault path takes (vm_pageinfo()) or a spinlock. So a demand-zeroed buffer is
+	 * made resident now, as mmap() used to leave it. A failure is left for that access to
+	 * report: it takes the same fault, and finds the same lack of memory. */
+	if (ret == 0) {
+		(void)vm_mapPopulate(proc->mapp, ptr, size);
+	}
+
 	return ret;
 }
 
 
 /* Anonymous memory resident in the entry: the pages of its own range of the amap. Entries split
  * from one mapping (mprotect, a partial munmap) share its amap at different offsets, so counting
- * the whole amap credits each of them with all of it. (size_t)-1: the entry has no amap. */
+ * the whole amap credits each of them with all of it. An anonymous entry gets its amap on its
+ * first fault, so until then it holds none. (size_t)-1: an object-backed entry with no amap. */
 static size_t map_entryAnonSize(const map_entry_t *e)
 {
 	size_t i, end, sz = 0;
 
 	if (e->amap == NULL) {
-		return (size_t)-1;
+		return (e->object == NULL) ? 0U : (size_t)-1;
 	}
 
 	end = (e->aoffs + e->size) / SIZE_PAGE;

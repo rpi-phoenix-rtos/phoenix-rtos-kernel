@@ -109,6 +109,19 @@ int userintr_setHandler(unsigned int n, userintrFn_t f, void *arg, handle_t c)
 	cond_t *cond = NULL;
 	int id, res;
 
+	/* The handler runs at interrupt level in this process's address space, where a page fault
+	 * cannot be served, and may touch any of its memory. From now on the process's anonymous
+	 * memory is allocated at mmap() time, and what is mapped already is made resident -- both
+	 * before the handler can run. The flag is set first: a concurrent mmap() reads it under the
+	 * map lock, which vm_mapPopulate() takes after it. */
+#ifndef NOMMU
+	process->anonEager = 1U;
+	res = vm_mapPopulate(process->mapp, process->mapp->start, (size_t)((ptr_t)process->mapp->stop - (ptr_t)process->mapp->start));
+	if (res < 0) {
+		return res;
+	}
+#endif
+
 	if (c > 0) {
 		cond = cond_get(c);
 		if (cond == NULL) {

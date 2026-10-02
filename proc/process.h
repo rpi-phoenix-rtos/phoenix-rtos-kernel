@@ -78,6 +78,9 @@ typedef struct _process_t {
 	unsigned int borrowedMap : 1;
 
 	unsigned int lazy : 1;
+	/* Anonymous memory is allocated at mmap() time instead of on first access: set once the
+	 * process runs code at interrupt level (userintr_setHandler()), where a fault cannot be served */
+	unsigned int anonEager : 1;
 	unsigned int lgap : 1;
 	unsigned int rgap : 1;
 	unsigned int posix : 1;

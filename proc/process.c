@@ -228,6 +228,7 @@ int proc_start(startFn_t start, void *arg, const char *path)
 #else
 	process->lazy = 1;
 #endif
+	process->anonEager = 0;
 
 	process->posix = 0;
 	process->borrowedMap = 0;
@@ -619,13 +620,8 @@ static int process_load32(vm_map_t *map, vm_object_t *o, off_t base, void *iehdr
 			 * under map->lock at exec, which intermittently hung over flaky netboot
 			 * NFS.
 			 *
-			 * ⚠ It does NOT make the anon .bss demand-paged, whatever this comment
-			 * used to claim. `process->lazy` is 0 on every MMU build
-			 * (process.c:229 — it is set to 1 only around the ELF-header mmap at
-			 * :814 and restored immediately), so _vm_mmap() eagerly _map_force()s
-			 * every page of both segments (vm/map.c:619-628). The mapping is
-			 * therefore fully populated when exec returns; `lazy` is an NOMMU /
-			 * header-parsing path, not this one. */
+			 * The file-backed segment is mapped in full at exec; the anonymous .bss is
+			 * demand-zeroed like any plain anonymous mapping (see _vm_mmap()). */
 			hal_memset(vaddr + filesz, 0, round_page((ptr_t)vaddr + filesz) - ((ptr_t)vaddr + filesz));
 		}
 		phdr++;
@@ -871,9 +867,14 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 
 	process_tlsAssign(&process->tls, &tlsNew, tbssAddr);
 
-	/* Allocate and map user stack */
+	/* Allocate and map user stack. It is made resident: the scheduler writes signal frames and
+	 * checks the stack canary under its spinlock, where a page fault cannot be served. */
 	stack = vm_mmap(map, map->pmap.end - ustacksz, NULL, ustacksz, PROT_READ | PROT_WRITE | PROT_USER, NULL, -1, MAP_NONE);
 	if (stack == NULL) {
+		return -ENOMEM;
+	}
+
+	if (vm_mapPopulate(map, stack, ustacksz) < 0) {
 		return -ENOMEM;
 	}
 
@@ -2195,6 +2196,12 @@ int process_tlsInit(hal_tls_t *dest, hal_tls_t *source, vm_map_t *map)
 	dest->arm_m_tls = source->arm_m_tls;
 
 	dest->tls_base = (ptr_t)vm_mmap(map, NULL, NULL, dest->tls_sz, PROT_READ | PROT_WRITE | PROT_USER, NULL, 0, MAP_NONE);
+
+	/* Filled in below by the kernel, and all of it is used: no point in faulting it in page by page */
+	if ((dest->tls_base != 0U) && (vm_mapPopulate(map, (void *)dest->tls_base, dest->tls_sz) < 0)) {
+		(void)vm_munmap(map, (void *)dest->tls_base, dest->tls_sz);
+		dest->tls_base = 0U;
+	}
 
 	if (dest->tls_base != 0U) {
 		hal_memcpy((void *)dest->tls_base, (void *)source->tls_base, dest->tdata_sz);

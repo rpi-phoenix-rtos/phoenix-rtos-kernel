@@ -86,6 +86,12 @@ void *_vm_mmap(vm_map_t *map, void *vaddr, page_t *p, size_t size, vm_prot_t pro
 int vm_mapForce(vm_map_t *map, void *paddr, vm_prot_t prot);
 
 
+/* Makes the anonymous pages of [vaddr, vaddr + size) resident. Anonymous memory is demand-zeroed;
+ * this is for memory the kernel accesses where a page fault cannot be served, or whose physical
+ * address it hands on. Unmapped parts of the range are skipped. */
+int vm_mapPopulate(vm_map_t *map, const void *vaddr, size_t size);
+
+
 int vm_mapFlags(vm_map_t *map, void *vaddr);
 
 

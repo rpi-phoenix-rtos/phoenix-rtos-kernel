@@ -1359,6 +1359,10 @@ addr_t syscalls_va2pa(u8 *ustack)
 
 	GETFROMSTACK(ustack, void *, va, 0U);
 
+	/* A demand-zeroed page gets its frame here, so the address is that of the page the process
+	 * will use. An address in no mapping still resolves to 0. */
+	(void)vm_mapPopulate(proc_current()->process->mapp, va, 1U);
+
 	return (pmap_resolve(proc_current()->process->pmapp, (void *)((ptr_t)va & ~0xfffU)) & ~0xfffU) + ((ptr_t)va & 0xfffU);
 }
 
