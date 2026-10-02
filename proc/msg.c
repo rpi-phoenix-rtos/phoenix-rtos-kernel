@@ -26,10 +26,24 @@ enum { msg_rejected = -1, msg_waiting = 0, msg_received, msg_responded };
 /* clang-format on */
 
 
+/* A sender told to exit waits in steps of this long, and reports a request still pending after MSG_EXIT_REPORT_US */
+#define MSG_EXIT_STEP_US   (1000LL * 1000LL)
+#define MSG_EXIT_REPORT_US (2LL * 1000LL * 1000LL)
+
+
+/* What a sender that has been told to exit knows about its wait (proc_sendEx) */
+typedef struct {
+	time_t since;    /* When it noticed, 0 before */
+	time_t deadline; /* End of its next wait step */
+	int reported;
+} msg_exitwait_t;
+
+
 static struct {
 	vm_map_t *kmap;
 	vm_object_t *kernel;
 	unsigned int deviceRefusals;
+	unsigned int exitReports;
 } msg_common;
 
 
@@ -440,6 +454,101 @@ static int msg_opack(kmsg_t *kmsg)
 }
 
 
+/*
+ * Names, once, a request that keeps an exiting process alive: a process is destroyed (and can be waited
+ * for) only once all its threads are gone, and this sender cannot go before its request is answered.
+ * Called by the sender itself with no locks held: printing is not safe from the scheduler or under a
+ * spinlock. receiver and windows are -1 if the request is not in the rid tree.
+ */
+static void msg_reportExitWait(const thread_t *sender, u32 port, const kmsg_t *kmsg, int state, int receiver, int windows, int interruptible)
+{
+	const process_t *proc = sender->process;
+	thread_t *t = NULL;
+	const process_t *server = NULL;
+	const char *what;
+
+	/* Unsynchronised, as msg_reportDevice: a bound, not an exact count */
+	if (msg_common.exitReports >= 16U) {
+		return;
+	}
+	msg_common.exitReports++;
+
+	if (state == msg_waiting) {
+		lib_printf("proc: pid %d (%s) exit waits for tid %d in msgSend to port %u: not received yet, type %d\n",
+				process_getPid(proc), (proc->path != NULL) ? proc->path : "?", proc_getTid(sender), port, kmsg->msg.type);
+		return;
+	}
+
+	if (receiver >= 0) {
+		/* The reference keeps the thread, and so its process, alive while it is printed */
+		t = threads_findThread(receiver);
+		if (t != NULL) {
+			server = t->process;
+		}
+	}
+
+	if (windows < 0) {
+		what = "being answered";
+	}
+	else if (windows != 0) {
+		what = "payload mapped into the server";
+	}
+	else if (interruptible == 0) {
+		what = "uninterruptible kernel request";
+	}
+	else {
+		what = "no payload mapped";
+	}
+
+	lib_printf("proc: pid %d (%s) exit waits for tid %d in msgSend to port %u (server pid %d tid %d %s): "
+			   "received, type %d, %zu/%zu bytes in/out, %s\n",
+			process_getPid(proc), (proc->path != NULL) ? proc->path : "?", proc_getTid(sender), port,
+			(server != NULL) ? process_getPid(server) : -1, receiver,
+			((server != NULL) && (server->path != NULL)) ? server->path : "?",
+			kmsg->msg.type, kmsg->msg.i.size, kmsg->msg.o.size, what);
+
+	if (t != NULL) {
+		threads_put(t);
+	}
+}
+
+
+/*
+ * One step of the wait of a sender that has been told to exit, called by proc_sendEx with no locks
+ * held. state is the request's state as last seen under p->spinlock. Sets ew->deadline, the end of the
+ * next step.
+ */
+static void msg_senderExiting(port_t *p, kmsg_t *kmsg, u32 port, int state, int interruptible, msg_exitwait_t *ew)
+{
+	thread_t *sender = proc_current();
+	time_t now;
+	int receiver = -1, windows = -1;
+
+	proc_gettime(&now, NULL);
+	if (ew->since == 0) {
+		ew->since = now;
+	}
+
+	if ((ew->reported == 0) && ((now - ew->since) >= MSG_EXIT_REPORT_US)) {
+		ew->reported = 1;
+
+		if (state == msg_received) {
+			/* In the rid tree, the request is not being answered, and what proc_recv wrote is complete */
+			(void)proc_lockSet(&p->lock);
+			if ((kmsg->idlinkage.id >= 0) && (lib_idtreeFind(&p->rid, kmsg->idlinkage.id) == &kmsg->idlinkage)) {
+				receiver = kmsg->receiver;
+				windows = ((kmsg->i.w != NULL) || (kmsg->o.w != NULL)) ? 1 : 0;
+			}
+			(void)proc_lockClear(&p->lock);
+		}
+
+		msg_reportExitWait(sender, port, kmsg, state, receiver, windows, interruptible);
+	}
+
+	ew->deadline = now + MSG_EXIT_STEP_US;
+}
+
+
 #ifdef MSG_SEND_WATCHDOG
 #define WD_TIMEOUT wdDeadline
 #else
@@ -454,6 +563,8 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 	thread_t *sender;
 	spinlock_ctx_t sc;
 	int state = msg_rejected;
+	int exiting = 0;
+	msg_exitwait_t ew = { 0 };
 #ifdef MSG_SEND_WATCHDOG
 	/* DIAGNOSTIC (-DMSG_SEND_WATCHDOG=<seconds>): the `premain-hang` bisect ends
 	 * in an open() that never returns, i.e. this round trip. kmsg.state says
@@ -482,6 +593,7 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 	kmsg.dst = NULL;
 	kmsg.threads = NULL;
 	kmsg.state = msg_waiting;
+	kmsg.idlinkage.id = -1; /* No rid until it is received: matches no node of the rid tree */
 
 	kmsg.msg.pid = (sender->process != NULL) ? process_getPid(sender->process) : 0;
 	kmsg.msg.priority = sender->priority;
@@ -507,16 +619,21 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 
 		state = kmsg.state;
 		while ((state != msg_responded) && (state != msg_rejected)) {
-			if (state == msg_received) {
-				/* FIXME: due to allocation of kmsg on sender's kstack, this thread cannot be properly killed (or, more precisely,
-				 * can't leave this while loop) when message is in msg_received state (between calls to proc_recv and proc_respond).
-				 * This uninterruptible wait is a workaround to prevent spinning on proc_threadWaitInterruptible when thread->exit != 0
-				 * and blocking a whole system (p->spinlock is held). When thread is running normally, the code behaves just like with
-				 * interruptible wait, without spinning on while loop on each interrupt in msg_received state.
-				 */
-				err = proc_threadWait(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
+			if (exiting != 0) {
+				/* Told to exit: see msg_senderExiting(). Its wait steps time out, and it stays here until
+				 * the request is answered or failed, as before. */
+				hal_spinlockClear(&p->spinlock, &sc);
+				msg_senderExiting(p, &kmsg, port, state, interruptible, &ew);
+				hal_spinlockSet(&p->spinlock, &sc);
+
+				state = kmsg.state;
+				if ((state == msg_responded) || (state == msg_rejected)) {
+					break;
+				}
+				(void)proc_threadWait(&kmsg.threads, &p->spinlock, ew.deadline, &sc);
+				err = EOK; /* the end of a step is not an error */
 			}
-			else if (interruptible != 0) {
+			else if ((state == msg_waiting) && (interruptible != 0)) {
 				/* WD_TIMEOUT rather than upstream's 0: with MSG_SEND_WATCHDOG
 				 * built in, a send that never gets a response has to come back
 				 * so the watchdog below can report it. It is 0 when the watchdog
@@ -524,7 +641,14 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 				err = proc_threadWaitInterruptible(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
 			}
 			else {
-				err = proc_threadWait(&kmsg.threads, &p->spinlock, 0, &sc);
+				/* A received request (or any request of an uninterruptible sender) is waited for until it is
+				 * answered: the kmsg lives on this stack, and the receiver may hold it. A signal does not end
+				 * this wait, but an exit request does, so that this thread can say what it waits for. */
+				err = proc_threadWaitKillable(&kmsg.threads, &p->spinlock, WD_TIMEOUT, &sc);
+				if (err == -EINTR) {
+					exiting = 1;
+					err = EOK;
+				}
 			}
 
 			state = kmsg.state;
@@ -650,6 +774,7 @@ int proc_recv(u32 port, msg_t *msg, msg_rid_t *rid)
 	kmsg->o.ep = NULL;
 
 	kmsg->dst = proc_current()->process;
+	kmsg->receiver = proc_getTid(proc_current());
 
 	if ((kmsg->msg.i.data >= (void *)kmsg->msg.i.raw) && (kmsg->msg.i.data < (void *)kmsg->msg.i.raw + sizeof(kmsg->msg.i.raw))) {
 		ipacked = 1;

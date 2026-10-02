@@ -39,6 +39,8 @@ typedef struct _kmsg_t {
 	volatile int state;
 
 #ifndef NOMMU
+	int receiver; /* Tid of the thread that received it, for diagnostics */
+
 	struct _kmsg_layout_t {
 		void *bvaddr;
 		size_t boffs;
