@@ -54,6 +54,7 @@ enum {
 	TRACE_EVENT_MSG_SEND = 0x43,
 	TRACE_EVENT_MSG_RECV = 0x44,
 	TRACE_EVENT_MSG_RESPOND = 0x45,
+	TRACE_EVENT_TRACE_STATS = 0x46,
 };
 
 
@@ -100,7 +101,7 @@ void _trace_updateLockEpoch(lock_t *lock);
 
 #define TRACE_EVENT_BODY_CHAN(chan, event_id, ev, ts, ...) \
 	do { \
-		if (trace_isRunning() == 0) { \
+		if (trace_isEnabled(event_id) == 0) { \
 			return; \
 		} \
 		__VA_ARGS__ trace_writeEvent((chan), (event_id), &(ev), sizeof(ev), (ts)); \
@@ -360,7 +361,7 @@ static inline void trace_eventProcessExec(const thread_t *t)
 /* Called from the timer interrupt with the context it interrupted */
 static inline void trace_eventThreadSample(const thread_t *t, cpu_context_t *ctx)
 {
-	if (trace_isRunning() != 0) {
+	if (trace_isEnabled(TRACE_EVENT_THREAD_SAMPLE) != 0) {
 		_trace_sample(t, ctx);
 	}
 }
@@ -369,7 +370,7 @@ static inline void trace_eventThreadSample(const thread_t *t, cpu_context_t *ctx
 /* assumes threads_common.spinlock is set */
 static inline void _trace_eventThreadWait(const thread_t *t)
 {
-	if (trace_isRunning() != 0) {
+	if (trace_isEnabled(TRACE_EVENT_THREAD_WAIT) != 0) {
 		_trace_threadWait(t);
 	}
 }
@@ -378,7 +379,7 @@ static inline void _trace_eventThreadWait(const thread_t *t)
 /* assumes threads_common.spinlock is set; waker may be NULL */
 static inline void _trace_eventThreadWakeup(const thread_t *t, const thread_t *waker, unsigned int cause)
 {
-	if (trace_isRunning() != 0) {
+	if (trace_isEnabled(TRACE_EVENT_THREAD_WAKEUP) != 0) {
 		_trace_threadWakeup(t, waker, cause);
 	}
 }
@@ -387,7 +388,7 @@ static inline void _trace_eventThreadWakeup(const thread_t *t, const thread_t *w
 /* assumes threads_common.spinlock is set */
 static inline void _trace_eventThreadWoken(const thread_t *t)
 {
-	if (trace_isRunning() != 0) {
+	if (trace_isEnabled(TRACE_EVENT_THREAD_WAIT) != 0) {
 		_trace_threadWoken(t);
 	}
 }

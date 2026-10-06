@@ -417,6 +417,24 @@ int hal_cpuCanRead(ptr_t va)
 }
 
 
+int hal_cpuSyscallBefore(ptr_t pc)
+{
+	u32 insn;
+
+	if ((pc < 4U) || (pc >= (ptr_t)VADDR_USR_MAX) || ((pc & 3U) != 0U) || (hal_cpuCanRead(pc - 4U) == 0)) {
+		return -1;
+	}
+
+	/* SVC #imm16: 1101 0100 000 imm16 000 01 */
+	insn = *(volatile u32 *)(pc - 4U);
+	if ((insn & 0xffe0001fU) != 0xd4000001U) {
+		return -1;
+	}
+
+	return (int)((insn >> 5) & 0xffffU);
+}
+
+
 unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned int n)
 {
 	unsigned int depth = 0;

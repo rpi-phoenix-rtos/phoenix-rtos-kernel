@@ -67,6 +67,7 @@ static struct {
 	u64 startTimestamp;
 
 	u64 eventDiscardCount;
+	unsigned int eventMask; /* PERF_TRACE_EV_* recorded, set before tracing is enabled */
 
 	/* Profiling, set before tracing is enabled */
 	perf_trace_cfg_t cfg;
@@ -213,6 +214,55 @@ void _trace_updateLockEpoch(lock_t *lock)
 int trace_isRunning(void)
 {
 	return trace_common.running;
+}
+
+
+/* PERF_TRACE_EV_* class of an event id; thread_sample has its own flag (PERF_TRACE_FLAG_SAMPLE) */
+static unsigned int trace_eventClass(u8 event)
+{
+	static const u8 classes[] = {
+		[TRACE_EVENT_INTERRUPT_ENTER - 0x20] = PERF_TRACE_EV_IRQ,
+		[TRACE_EVENT_INTERRUPT_EXIT - 0x20] = PERF_TRACE_EV_IRQ,
+		[TRACE_EVENT_THREAD_SCHEDULING - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_THREAD_PREEMPTED - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_THREAD_ENQUEUED - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_THREAD_WAKING - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_THREAD_CREATE - 0x20] = PERF_TRACE_EV_THREAD,
+		[TRACE_EVENT_THREAD_END - 0x20] = PERF_TRACE_EV_THREAD,
+		[TRACE_EVENT_SYSCALL_ENTER - 0x20] = PERF_TRACE_EV_SYSCALL,
+		[TRACE_EVENT_SYSCALL_EXIT - 0x20] = PERF_TRACE_EV_SYSCALL,
+		[TRACE_EVENT_SCHED_ENTER - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_SCHED_EXIT - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_LOCK_NAME - 0x20] = PERF_TRACE_EV_LOCK,
+		[TRACE_EVENT_LOCK_SET_ENTER - 0x20] = PERF_TRACE_EV_LOCK,
+		[TRACE_EVENT_LOCK_SET_ACQUIRED - 0x20] = PERF_TRACE_EV_LOCK,
+		[TRACE_EVENT_LOCK_SET_EXIT - 0x20] = PERF_TRACE_EV_LOCK,
+		[TRACE_EVENT_LOCK_CLEAR - 0x20] = PERF_TRACE_EV_LOCK,
+		[TRACE_EVENT_THREAD_PRIORITY - 0x20] = PERF_TRACE_EV_SCHED,
+		[TRACE_EVENT_PROCESS_KILL - 0x20] = PERF_TRACE_EV_THREAD,
+		[TRACE_EVENT_PROCESS_EXEC - 0x20] = PERF_TRACE_EV_THREAD,
+		[TRACE_EVENT_THREAD_SAMPLE - 0x20] = 0xffU,
+		[TRACE_EVENT_THREAD_WAIT - 0x20] = PERF_TRACE_EV_WAIT,
+		[TRACE_EVENT_THREAD_WAKEUP - 0x20] = PERF_TRACE_EV_WAIT,
+		[TRACE_EVENT_MSG_SEND - 0x20] = PERF_TRACE_EV_MSG,
+		[TRACE_EVENT_MSG_RECV - 0x20] = PERF_TRACE_EV_MSG,
+		[TRACE_EVENT_MSG_RESPOND - 0x20] = PERF_TRACE_EV_MSG,
+		[TRACE_EVENT_TRACE_STATS - 0x20] = PERF_TRACE_EV_THREAD,
+	};
+	unsigned int idx = (unsigned int)event - 0x20U;
+
+	return (idx < sizeof(classes)) ? classes[idx] : 0xffU;
+}
+
+
+/* WARN: eventually consistent */
+int trace_isEnabled(u8 event)
+{
+	if (trace_common.running == 0) {
+		return 0;
+	}
+
+	return ((trace_common.eventMask & trace_eventClass(event)) != 0U) ? 1 : 0;
 }
 
 
@@ -382,6 +432,7 @@ typedef struct {
 	u32 queue;
 	u32 timeout; /* us left until the deadline when the wait began, 0: none */
 	u32 blocked; /* us the wait lasted (deferred), 0: written when it began */
+	u16 syscall; /* the syscall the thread waits in, 0xffff: not known */
 	u64 args[4]; /* syscall arguments */
 	u8 nkframes;
 } __attribute__((packed)) trace_waithead_t;
@@ -597,6 +648,7 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	cpu_context_t *uctx;
 	trace_frames_t *f = &trace_common.frames[hal_cpuGetID()];
 	unsigned int nk, i;
+	int ret;
 	u16 nstack;
 	u64 now, left;
 	spinlock_ctx_t sc;
@@ -606,6 +658,7 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	head.queue = (u32)(ptr_t)t->wait;
 	head.timeout = 0;
 	head.blocked = 0;
+	head.syscall = 0xffffU;
 	if (t->wakeup != 0) {
 		now = (u64)hal_timerGetUs();
 		left = ((u64)t->wakeup > now) ? (u64)t->wakeup - now : 1U;
@@ -620,6 +673,11 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	nk = _kernelFrames(t, kfp, f->kframes);
 	head.nkframes = (u8)nk;
 	nstack = (u16)_userRecord(t, uctx, (existing == 0) ? 1 : 0, trace_common.cfg.waitStack, &ureg, f->frames);
+	if ((uctx != NULL) && (existing == 0)) {
+		/* named by the SVC it entered the kernel with, so syscall events are not needed for it */
+		ret = hal_cpuSyscallBefore(hal_cpuGetPC(uctx));
+		head.syscall = (ret >= 0) ? (u16)ret : 0xffffU;
+	}
 
 	parts[0] = (trace_part_t) { &head, sizeof(head) };
 	parts[1] = (trace_part_t) { f->kframes, nk * sizeof(u64) };
@@ -628,11 +686,12 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	parts[4] = (trace_part_t) { &nstack, sizeof(nstack) };
 	parts[5] = (trace_part_t) { (const void *)(ptr_t)ureg.sp, (size_t)nstack * sizeof(u64) };
 
-	if (existing != 0) {
+	if ((existing != 0) && (trace_common.cfg.waitMinUs == 0U)) {
 		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_WAIT, parts, 6, NULL);
 		return;
 	}
 
+	/* deferred: a wait that began before the trace is timed from its start, like any other */
 	if (trace_common.cfg.waitMinUs != 0U) {
 		_stashPut(proc_getTid(t), parts, 6);
 		return;
@@ -779,6 +838,20 @@ static void _emitThreadinfo(void)
 }
 
 
+/* The last event: what the trace lost, so that its reader can tell a complete trace */
+static void _emitStats(void)
+{
+	struct {
+		u32 discarded;    /* events not recorded: their channel was full */
+		u32 waitsDropped; /* deferred waits not recorded: no free slot */
+	} __attribute__((packed)) ev;
+
+	ev.discarded = (trace_common.eventDiscardCount > 0xffffffffU) ? 0xffffffffU : (u32)trace_common.eventDiscardCount;
+	ev.waitsDropped = (trace_common.stashDropped > 0xffffffffU) ? 0xffffffffU : (u32)trace_common.stashDropped;
+	_writeEvent((u8)trace_channel_meta, TRACE_EVENT_TRACE_STATS, &ev, sizeof(ev), NULL);
+}
+
+
 static void _enableTracing(int enable)
 {
 	trace_common.running = enable;
@@ -830,6 +903,7 @@ static int trace_setConfig(unsigned int flags, const void *arg, size_t sz)
 
 	/* No CPU samples now: tracing is not enabled yet */
 	trace_common.cfg = cfg;
+	trace_common.eventMask = (cfg.events == 0U) ? ~0U : cfg.events;
 	hal_memset(trace_common.sampleNext, 0, sizeof(*trace_common.sampleNext) * hal_cpuGetCount());
 
 	return EOK;
@@ -878,6 +952,7 @@ int trace_start(unsigned int flags, const void *arg, size_t sz)
 	trace_common.errorFlags = 0;
 	trace_common.eventDelayCount = 0;
 	trace_common.eventDiscardCount = 0;
+	trace_common.stashDropped = 0;
 
 	/* Without spinlock - trace is not enabled yet, so there's no concurrent access */
 	_emitThreadinfo();
@@ -925,6 +1000,7 @@ int trace_stop(void)
 	hal_spinlockSet(&trace_common.spinlock, &sc);
 	running = trace_common.running;
 	if (trace_common.stopped == 0 && running != 0) {
+		_emitStats();
 		_enableTracing(0);
 		trace_common.stopped = 1;
 		ret = getChannelCount();

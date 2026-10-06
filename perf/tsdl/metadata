@@ -252,6 +252,8 @@ event {
 		u32 timeout;
 		/* us the wait lasted (bits 1, 2), 0: written when it began */
 		u32 blocked;
+		/* the syscall the thread waits in, 0xffff: not known */
+		u16 syscall;
 		/* syscall arguments */
 		u64 args[4];
 		u8 nkframes;
@@ -310,6 +312,18 @@ event {
 		u16 tid;
 		u32 port;
 		u32 mid;
+	};
+};
+
+/* written last, at perf_stop: what the trace lost */
+event {
+	name = trace_stats;
+	id = 0x46;
+	fields := struct {
+		/* events not recorded: their channel was full */
+		u32 discarded;
+		/* deferred waits not recorded: no free slot */
+		u32 waits_dropped;
 	};
 };
 
