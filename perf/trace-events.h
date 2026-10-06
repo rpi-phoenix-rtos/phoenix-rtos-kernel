@@ -65,6 +65,8 @@ enum {
 
 /* thread_wait flags */
 #define TRACE_WAIT_EXISTING (1U << 0) /* the thread was already waiting when the trace started */
+#define TRACE_WAIT_DEFERRED (1U << 1) /* written when the wait ended (event time), blocked = its length */
+#define TRACE_WAIT_OPEN     (1U << 2) /* written when the trace stopped, the thread still waiting */
 
 
 void trace_writeEvent(u8 cpuChan, u8 event, const void *data, size_t sz, u32 *ts);
@@ -79,6 +81,14 @@ void _trace_sample(const thread_t *t, cpu_context_t *ctx);
  * the current thread. Called with threads_common.spinlock set.
  */
 void _trace_threadWait(const thread_t *t);
+
+
+/* t's wait ends (called with threads_common.spinlock set): writes a deferred thread_wait */
+void _trace_threadWoken(const thread_t *t);
+
+
+/* Records thread_wakeup unless the wait it ends is a deferred one too short to be recorded */
+void _trace_threadWakeup(const thread_t *t, const thread_t *waker, unsigned int cause);
 
 
 /*
@@ -368,17 +378,18 @@ static inline void _trace_eventThreadWait(const thread_t *t)
 /* assumes threads_common.spinlock is set; waker may be NULL */
 static inline void _trace_eventThreadWakeup(const thread_t *t, const thread_t *waker, unsigned int cause)
 {
-	struct {
-		u16 tid;
-		u16 waker;
-		u8 cause;
-	} __attribute__((packed)) ev;
+	if (trace_isRunning() != 0) {
+		_trace_threadWakeup(t, waker, cause);
+	}
+}
 
-	TRACE_EVENT_BODY(TRACE_EVENT_THREAD_WAKEUP, ev, NULL, {
-		ev.tid = (u16)proc_getTid(t);
-		ev.waker = (waker != NULL) ? (u16)proc_getTid(waker) : 0U;
-		ev.cause = (u8)cause;
-	});
+
+/* assumes threads_common.spinlock is set */
+static inline void _trace_eventThreadWoken(const thread_t *t)
+{
+	if (trace_isRunning() != 0) {
+		_trace_threadWoken(t);
+	}
 }
 
 
