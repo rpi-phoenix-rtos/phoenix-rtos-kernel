@@ -99,9 +99,4 @@ void usocket_init(void);
 
 
 
-/* Block until an AF_UNIX socket changes readiness or `deadline` (absolute,
- * proc_gettime raw units) passes -- the readiness-woken backend for posix_poll.
- * Returns -EINTR if the calling process is being torn down, else 0. */
-int usocket_pollWait(time_t deadline);
-
 #endif

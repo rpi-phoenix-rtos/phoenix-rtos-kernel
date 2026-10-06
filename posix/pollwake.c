@@ -102,11 +102,11 @@ int pollwake_wait(pollwake_waiter_t *w, time_t deadline)
 	int err;
 
 	/* Always interruptible. A caught signal ends poll() with -EINTR (POSIX), as
-	 * it did before this wait existed: sets with an AF_UNIX socket blocked in the
-	 * interruptible usocket_pollWait(), and sets of server fds only got it from the
-	 * next re-query's interruptible proc_send(), up to 20 ms later. An
-	 * uninterruptible wait here kept that delay (measured 1001.4 ms vs 1000.0 ms
-	 * for the mixed set) and also delayed a thread kill by up to 20 ms. */
+	 * it did before this wait existed: sets with an AF_UNIX socket blocked in an
+	 * interruptible wait on a queue shared by all of them, and sets of server fds
+	 * only got it from the next re-query's interruptible proc_send(), up to 20 ms
+	 * later. An uninterruptible wait here kept that delay (measured 1001.4 ms vs
+	 * 1000.0 ms for the mixed set) and also delayed a thread kill by up to 20 ms. */
 	hal_spinlockSet(&pollwake_common.lock, &sc);
 	err = proc_threadWaitInterruptible(&w->queue, &pollwake_common.lock, deadline, &sc);
 	hal_spinlockClear(&pollwake_common.lock, &sc);

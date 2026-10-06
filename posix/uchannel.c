@@ -30,58 +30,21 @@
 #define UCHANNEL_FRAME_FDS ((size_t)1U << ((sizeof(size_t) * 8U) - 1U))
 
 
-/* Readiness-woken poll() for AF_UNIX, re-applied onto upstream's endpoint/channel
- * model (was posix/unix.c `unix_pollWait` before the rewrite).
+/*
+ * Readiness-woken poll() for AF_UNIX. usocket_poll() is a level-triggered
+ * snapshot that registers nothing, so without a wake-up a poller could only
+ * re-check every POLL_INTERVAL, and every libxcb or WebKit IPC round trip would
+ * pay for it. Every channel state change therefore wakes the pollwake waiters
+ * of the poll() sets that hold an AF_UNIX socket. Each such poller sleeps on a
+ * queue of its own, listed before its first query (posix/pollwake.h), so a
+ * change that lands between a poller's query and its sleep is not lost.
  *
- * Why it has to come back: upstream's posix_poll() is a poll-and-sleep loop with
- * POLL_INTERVAL at 100 ms and usocket_poll() is a pure level-triggered snapshot
- * that never registers a waiter -- so every libxcb round trip would cost up to
- * 100 ms and the X desktop would feel slow. The per-channel rxwait/txwait queues
- * already exist and are broadcast on every state change; all that is missing is a
- * process-wide queue that posix_poll can block on.
- *
- * It lives here, in the lower layer, so uchannel does not have to call up into
- * usocket. The deadline is a fallback that covers non-AF_UNIX fds in the same set
- * and any missed notify, so a lost wakeup can only add latency, never hang.
- *
- * The lock is a private spinlock, deliberately not one of the channel/socket
- * lock_t mutexes: every notify site below already runs inside proc_lockSet() on a
- * channel, and taking a spinlock inside a held mutex is the allowed order.
+ * It is called inside proc_lockSet() on the channel, where taking the pollwake
+ * spinlock is the allowed order.
  */
-static struct {
-	spinlock_t lock;
-	thread_t *queue;
-} uchannel_poll_common;
-
-
-void uchannel_pollInit(void)
-{
-	hal_spinlockCreate(&uchannel_poll_common.lock, "uchannel.poll");
-	uchannel_poll_common.queue = NULL;
-}
-
-
 void uchannel_pollNotify(void)
 {
-	(void)proc_threadBroadcast(&uchannel_poll_common.queue);
-	/* Poll sets that mix AF_UNIX sockets with server-backed fds sleep on a
-	 * pollwake waiter instead of the queue above. */
 	pollwake_notifyUnix();
-}
-
-
-int uchannel_pollWait(time_t deadline)
-{
-	spinlock_ctx_t sc;
-	int err;
-
-	/* Interruptible so a poll() in a process being torn down aborts promptly
-	 * with -EINTR instead of waiting out the fallback deadline. */
-	hal_spinlockSet(&uchannel_poll_common.lock, &sc);
-	err = proc_threadWaitInterruptible(&uchannel_poll_common.queue, &uchannel_poll_common.lock, deadline, &sc);
-	hal_spinlockClear(&uchannel_poll_common.lock, &sc);
-
-	return err;
 }
 
 
@@ -499,8 +462,25 @@ unsigned int uchannel_pollWr(uchannel_t *ch)
 	(void)proc_lockSet(&ch->lock);
 
 	free = _cbuffer_free(&ch->buffer);
-	if ((ch->framed == 0U) ? (free > 0U) : (free > sizeof(size_t))) {
+	if (ch->framed == 0U) {
+		/* a byte stream takes a partial write */
+		if (free > 0U) {
+			events |= UCHANNEL_EV_OUT;
+		}
+	}
+	else if (free >= (ch->buffer.sz - (ch->buffer.sz / 4U))) {
+		/*
+		 * A frame goes in whole or not at all, so "one byte free" would report
+		 * POLLOUT for a message that still does not fit: a sender that waits
+		 * for POLLOUT after EAGAIN (WebKit's IPC) would spin until the reader
+		 * caught up. Writable while at most a quarter of the ring is in use,
+		 * as Linux does for these sockets: any frame of up to three quarters
+		 * of the ring, length word included, then fits.
+		 */
 		events |= UCHANNEL_EV_OUT;
+	}
+	else {
+		/* No action required */
 	}
 
 	if ((ch->flags & (UCHANNEL_SHUT_WR | UCHANNEL_SHUT_RD)) != 0U) {
