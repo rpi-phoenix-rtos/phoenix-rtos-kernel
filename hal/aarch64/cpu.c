@@ -391,6 +391,58 @@ void hal_cpuGetCycles(cycles_t *cb)
 }
 
 
+/* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
+int hal_cpuCanRead(ptr_t va)
+{
+	u64 par, saved;
+
+	/*
+	 * Ask the MMU (`at s1e1r`) instead of walking the tables: no lock is taken, so this works in
+	 * interrupt context. PAR_EL1 is saved and restored as the interrupted code may be between
+	 * its own `at` and the read of PAR_EL1. The A72 has no PAN, so EL0 pages read fine from EL1.
+	 */
+	saved = sysreg_read(par_el1);
+	/* clang-format off */
+	__asm__ volatile ("at s1e1r, %0\n isb" : : "r"(va));
+	/* clang-format on */
+	par = sysreg_read(par_el1);
+	sysreg_write(par_el1, saved);
+
+	if ((par & 1U) != 0U) {
+		return 0;
+	}
+
+	/* PAR_EL1.ATTR is a MAIR attribute: 0b0000xxxx is Device memory, where a read may have side effects */
+	return ((par >> 60) != 0U) ? 1 : 0;
+}
+
+
+unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned int n)
+{
+	unsigned int depth = 0;
+	ptr_t page = ~(ptr_t)0, next; /* no page probed yet: never equal to a page address */
+
+	/* A frame record is {previous fp, return address} at fp: 16 bytes, 16-aligned, in one page */
+	while ((depth < n) && (fp >= lo) && (fp < hi) && ((hi - fp) >= 16U) && ((fp & 0xfU) == 0U)) {
+		if ((fp & ~((ptr_t)SIZE_PAGE - 1U)) != page) {
+			page = fp & ~((ptr_t)SIZE_PAGE - 1U);
+			if (hal_cpuCanRead(page) == 0) {
+				break;
+			}
+		}
+
+		next = *(volatile ptr_t *)fp;
+		ret[depth++] = *(volatile u64 *)(fp + 8U);
+		if (next <= fp) {
+			break; /* the chain must ascend the stack */
+		}
+		fp = next;
+	}
+
+	return depth;
+}
+
+
 /* Value-trap window read by exceptions_watchpointHandler (see exceptions.c).
  * trapHi == 0 means "halt on any store". */
 addr_t hal_wpTrapLo = 0;
