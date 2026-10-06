@@ -170,15 +170,9 @@ size_t uchannel_size(uchannel_t *ch);
 
 
 
-/* Readiness-woken poll() support for AF_UNIX (see uchannel.c). uchannel_pollNotify()
- * is called beside every rxwait/txwait broadcast; uchannel_pollWait() is what
- * posix_poll() blocks on instead of spinning at POLL_INTERVAL. */
-void uchannel_pollInit(void);
-
-
+/* Readiness-woken poll() support for AF_UNIX (see uchannel.c): called beside
+ * every rxwait/txwait broadcast, it wakes the poll() sets that hold an AF_UNIX
+ * socket. */
 void uchannel_pollNotify(void);
-
-
-int uchannel_pollWait(time_t deadline);
 
 #endif

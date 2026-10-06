@@ -1823,19 +1823,9 @@ int usocket_poll(usocket_t *s, unsigned short events)
 }
 
 
-/* posix_poll() blocks here instead of spinning at POLL_INTERVAL. Forwards to the
- * channel layer, which owns the process-wide readiness queue -- posix.c then only
- * ever talks to usocket_*, symmetrically with usocket_poll(). */
-int usocket_pollWait(time_t deadline)
-{
-	return uchannel_pollWait(deadline);
-}
-
-
 void usocket_init(void)
 {
 	lib_idtreeInit(&usocket_common.tree);
 	usocket_common.nextId = 1;
 	(void)proc_lockInit(&usocket_common.lock, &proc_lockAttrDefault, "unix.common");
-	uchannel_pollInit();
 }

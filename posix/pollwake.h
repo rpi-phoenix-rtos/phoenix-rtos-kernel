@@ -44,7 +44,7 @@ typedef struct _pollwake_waiter_t {
 	struct _pollwake_waiter_t *prev;
 	thread_t *queue; /* only the owning thread ever sleeps here */
 	u64 mask;        /* hash buckets of the watched oids */
-	u8 watchUnix;    /* the set also holds an AF_UNIX socket */
+	u8 watchUnix;    /* the set holds an AF_UNIX socket */
 } pollwake_waiter_t;
 
 
