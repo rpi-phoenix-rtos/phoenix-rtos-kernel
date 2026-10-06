@@ -207,4 +207,103 @@ event {
 	};
 };
 
+/*
+ * Profiling events. A frame list is a frame-pointer chain of return addresses, innermost first.
+ * The user part of thread_sample and thread_wait is the user context the thread runs in (sample in
+ * user mode) or entered the kernel with (pc = 0 for a kernel thread), the frame-pointer chain of its
+ * stack, and optionally the top of its stack: nstack words from sp.
+ */
+event {
+	name = thread_sample;
+	id = 0x40;
+	fields := struct {
+		u16 tid;
+		/* 0: user, 1: kernel on behalf of a process, 2: kernel thread */
+		u8 mode;
+		u64 kpc;
+		u8 nkframes;
+		u64 kframes[nkframes];
+		u64 pc;
+		u64 lr;
+		u64 sp;
+		u64 fp;
+		u8 nframes;
+		u64 frames[nframes];
+		u16 nstack;
+		u64 stack[nstack];
+	};
+};
+
+event {
+	name = thread_wait;
+	id = 0x41;
+	fields := struct {
+		u16 tid;
+		/* bit 0: the thread was already waiting when the trace started */
+		u8 flags;
+		/* wait queue (kernel address cropped to 32 bits), 0: sleep */
+		u32 queue;
+		/* us left until the deadline, 0: none */
+		u32 timeout;
+		/* syscall arguments */
+		u64 args[4];
+		u8 nkframes;
+		u64 kframes[nkframes];
+		u64 pc;
+		u64 lr;
+		u64 sp;
+		u64 fp;
+		u8 nframes;
+		u64 frames[nframes];
+		u16 nstack;
+		u64 stack[nstack];
+	};
+};
+
+event {
+	name = thread_wakeup;
+	id = 0x42;
+	fields := struct {
+		u16 tid;
+		/* thread that woke tid, 0: none (timer) */
+		u16 waker;
+		/* 0: explicit wakeup, 1: timeout, 2: signal or exit request, 3: lock handed over */
+		u8 cause;
+	};
+};
+
+/* mid: kernel address of the message (cropped to 32 bits), unique while it is in flight */
+event {
+	name = msg_send;
+	id = 0x43;
+	fields := struct {
+		u16 tid;
+		u32 port;
+		u32 type;
+		u32 mid;
+	};
+};
+
+event {
+	name = msg_recv;
+	id = 0x44;
+	fields := struct {
+		u16 tid;
+		u32 port;
+		u32 mid;
+		/* sender's pid */
+		u16 spid;
+	};
+};
+
+event {
+	name = msg_respond;
+	id = 0x45;
+	fields := struct {
+		u16 tid;
+		u32 port;
+		u32 mid;
+	};
+};
+
 // vim:noexpandtab:ts=2:sw=2

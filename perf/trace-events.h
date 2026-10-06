@@ -46,10 +46,39 @@ enum {
 	TRACE_EVENT_THREAD_PRIORITY = 0x31,
 	TRACE_EVENT_PROCESS_KILL = 0x32,
 	TRACE_EVENT_PROCESS_EXEC = 0x33,
+
+	/* Profiling: where threads run, what they wait for, who wakes them */
+	TRACE_EVENT_THREAD_SAMPLE = 0x40,
+	TRACE_EVENT_THREAD_WAIT = 0x41,
+	TRACE_EVENT_THREAD_WAKEUP = 0x42,
+	TRACE_EVENT_MSG_SEND = 0x43,
+	TRACE_EVENT_MSG_RECV = 0x44,
+	TRACE_EVENT_MSG_RESPOND = 0x45,
 };
 
 
+/* thread_wakeup causes, must mirror tsdl/metadata */
+#define TRACE_WAKEUP_EXPLICIT  0U /* proc_threadWakeup() and friends, by the waker */
+#define TRACE_WAKEUP_TIMEOUT   1U /* the wait's deadline passed */
+#define TRACE_WAKEUP_INTERRUPT 2U /* a signal or an exit request ended the wait */
+#define TRACE_WAKEUP_LOCK      3U /* the waker released a lock and handed it over */
+
+/* thread_wait flags */
+#define TRACE_WAIT_EXISTING (1U << 0) /* the thread was already waiting when the trace started */
+
+
 void trace_writeEvent(u8 cpuChan, u8 event, const void *data, size_t sz, u32 *ts);
+
+
+/* Records thread_sample for t, interrupted at ctx, if sampling is on and this CPU's period is due */
+void _trace_sample(const thread_t *t, cpu_context_t *ctx);
+
+
+/*
+ * Records thread_wait for t, which has just been put to sleep (t->wait, t->wakeup set) and is
+ * the current thread. Called with threads_common.spinlock set.
+ */
+void _trace_threadWait(const thread_t *t);
 
 
 /*
@@ -315,6 +344,99 @@ static inline void trace_eventProcessKill(const process_t *p)
 static inline void trace_eventProcessExec(const thread_t *t)
 {
 	trace_eventThreadMeta(TRACE_EVENT_PROCESS_EXEC, t);
+}
+
+
+/* Called from the timer interrupt with the context it interrupted */
+static inline void trace_eventThreadSample(const thread_t *t, cpu_context_t *ctx)
+{
+	if (trace_isRunning() != 0) {
+		_trace_sample(t, ctx);
+	}
+}
+
+
+/* assumes threads_common.spinlock is set */
+static inline void _trace_eventThreadWait(const thread_t *t)
+{
+	if (trace_isRunning() != 0) {
+		_trace_threadWait(t);
+	}
+}
+
+
+/* assumes threads_common.spinlock is set; waker may be NULL */
+static inline void _trace_eventThreadWakeup(const thread_t *t, const thread_t *waker, unsigned int cause)
+{
+	struct {
+		u16 tid;
+		u16 waker;
+		u8 cause;
+	} __attribute__((packed)) ev;
+
+	TRACE_EVENT_BODY(TRACE_EVENT_THREAD_WAKEUP, ev, NULL, {
+		ev.tid = (u16)proc_getTid(t);
+		ev.waker = (waker != NULL) ? (u16)proc_getTid(waker) : 0U;
+		ev.cause = (u8)cause;
+	});
+}
+
+
+/*
+ * Message events carry the kernel address of the kmsg_t (cropped to 32 bits like lock ids, see
+ * _trace_eventLockName()) so that a send, its receipt and its response can be matched.
+ */
+static inline void trace_eventMsgSend(int tid, u32 port, int type, const void *kmsg)
+{
+	struct {
+		u16 tid;
+		u32 port;
+		u32 type;
+		u32 mid;
+	} __attribute__((packed)) ev;
+
+	TRACE_EVENT_BODY(TRACE_EVENT_MSG_SEND, ev, NULL, {
+		ev.tid = (u16)tid;
+		ev.port = port;
+		ev.type = (u32)type;
+		ev.mid = (u32)(ptr_t)kmsg;
+	});
+}
+
+
+/* The receiver is the current thread */
+static inline void trace_eventMsgRecv(u32 port, const void *kmsg, int srcPid)
+{
+	struct {
+		u16 tid;
+		u32 port;
+		u32 mid;
+		u16 spid;
+	} __attribute__((packed)) ev;
+
+	TRACE_EVENT_BODY(TRACE_EVENT_MSG_RECV, ev, NULL, {
+		ev.tid = (u16)proc_getTid(proc_current());
+		ev.port = port;
+		ev.mid = (u32)(ptr_t)kmsg;
+		ev.spid = (u16)srcPid;
+	});
+}
+
+
+/* The responder is the current thread */
+static inline void trace_eventMsgRespond(u32 port, const void *kmsg)
+{
+	struct {
+		u16 tid;
+		u32 port;
+		u32 mid;
+	} __attribute__((packed)) ev;
+
+	TRACE_EVENT_BODY(TRACE_EVENT_MSG_RESPOND, ev, NULL, {
+		ev.tid = (u16)proc_getTid(proc_current());
+		ev.port = port;
+		ev.mid = (u32)(ptr_t)kmsg;
+	});
 }
 
 

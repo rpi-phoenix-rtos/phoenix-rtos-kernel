@@ -20,7 +20,7 @@
 int _trace_init(vm_map_t *kmap);
 
 
-int trace_start(unsigned flags);
+int trace_start(unsigned int flags, const void *arg, size_t sz);
 
 
 int trace_read(u8 chan, void *buf, size_t bufsz);

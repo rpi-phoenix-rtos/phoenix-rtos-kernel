@@ -168,6 +168,50 @@ static inline int hal_cpuSupervisorMode(cpu_context_t *ctx)
 }
 
 
+/* Context and frame-record access for the perf sampler (perf/trace.c) */
+#define HAL_PERF_FRAMES
+
+
+static inline ptr_t hal_cpuGetPC(const cpu_context_t *ctx)
+{
+	return (ptr_t)ctx->pc;
+}
+
+
+static inline ptr_t hal_cpuGetLR(const cpu_context_t *ctx)
+{
+	return (ptr_t)ctx->x[30];
+}
+
+
+static inline ptr_t hal_cpuGetFP(const cpu_context_t *ctx)
+{
+	return (ptr_t)ctx->x[29];
+}
+
+
+/* n-th argument register (x0..x7): the arguments of the syscall a thread entered the kernel with */
+static inline ptr_t hal_cpuGetArg(const cpu_context_t *ctx, unsigned int n)
+{
+	return (n < 8U) ? (ptr_t)ctx->x[n] : 0U;
+}
+
+
+/*
+ * Returns nonzero if va can be read from EL1 in the current translation regime without a fault and
+ * without side effects (Normal memory, not Device). Takes no lock: usable from interrupt context.
+ */
+int hal_cpuCanRead(ptr_t va);
+
+
+/*
+ * Walks the AAPCS64 frame-record chain from fp and stores up to n return addresses into ret.
+ * Every record must lie in [lo, hi), ascend, and be readable (hal_cpuCanRead()), so a corrupt
+ * or absent chain ends the walk instead of faulting. Returns the number of addresses stored.
+ */
+unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned int n);
+
+
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 static inline unsigned int hal_cpuGetID(void)
 {
