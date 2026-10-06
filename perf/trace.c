@@ -66,10 +66,18 @@ static struct {
 	u64 eventDelayTsOffset; /* offset relative to startTimestamp */
 	u64 startTimestamp;
 
+	u64 eventDiscardCount;
+
 	/* Profiling, set before tracing is enabled */
 	perf_trace_cfg_t cfg;
 	u64 *sampleNext;         /* per CPU: time of its next sample */
 	trace_frames_t *frames; /* per CPU */
+
+	/* Deferred waits (cfg.waitMinUs), guarded by stashLock: threads_common.spinlock -> stashLock -> spinlock */
+	spinlock_t stashLock;
+	struct _trace_stash_t **stash; /* TRACE_STASH_SLOTS, NULL when not deferring */
+	size_t stashSz;                /* payload bytes of a slot */
+	u64 stashDropped;              /* waits not recorded: no free slot */
 } trace_common;
 
 
@@ -139,6 +147,7 @@ static void _writeEventParts(u8 cpuChan, u8 event, const trace_part_t *parts, si
 			try = _trace_bufferWaitUntilAvail(chan, eventSz);
 			if (try < 0) {
 				trace_common.errorFlags |= TRACE_EVENT_DISCARDED;
+				trace_common.eventDiscardCount++;
 				return;
 			}
 		}
@@ -366,6 +375,215 @@ void _trace_sample(const thread_t *t, cpu_context_t *ctx)
 }
 
 
+/* thread_wait payload head; must mirror tsdl/metadata */
+typedef struct {
+	u16 tid;
+	u8 flags;
+	u32 queue;
+	u32 timeout; /* us left until the deadline when the wait began, 0: none */
+	u32 blocked; /* us the wait lasted (deferred), 0: written when it began */
+	u64 args[4]; /* syscall arguments */
+	u8 nkframes;
+} __attribute__((packed)) trace_waithead_t;
+
+
+/*
+ * Deferred waits (cfg.waitMinUs != 0). A wait is recorded when it begins, while its user stack is
+ * the current address space and readable, but into a slot of the waiting thread instead of the
+ * trace. Only when the wait ends (or the trace stops) and has lasted waitMinUs is it written. Most
+ * waits are far shorter than anything worth explaining, so they then cost no trace space.
+ */
+#define TRACE_STASH_SLOTS 1024U
+#define TRACE_STASH_PROBE 8U
+
+typedef struct _trace_stash_t {
+	int tid;
+	int used;
+	u64 start;
+	size_t len;
+	u8 data[]; /* thread_wait payload */
+} trace_stash_t;
+
+
+/* With stashLock set. alloc: a free slot if tid has none */
+static trace_stash_t *_stashFind(int tid, int alloc)
+{
+	trace_stash_t *s, *free = NULL;
+	unsigned int i;
+
+	for (i = 0; i < TRACE_STASH_PROBE; i++) {
+		s = trace_common.stash[((unsigned int)tid + i) % TRACE_STASH_SLOTS];
+		if (s->used == 0) {
+			free = (free == NULL) ? s : free;
+		}
+		else if (s->tid == tid) {
+			return s;
+		}
+	}
+
+	return (alloc != 0) ? free : NULL;
+}
+
+
+static void _stashPut(int tid, const trace_part_t *parts, size_t nparts)
+{
+	trace_stash_t *s;
+	spinlock_ctx_t sc;
+	size_t i, len = 0;
+
+	hal_spinlockSet(&trace_common.stashLock, &sc);
+	s = (trace_common.stash != NULL) ? _stashFind(tid, 1) : NULL;
+	if (s == NULL) {
+		trace_common.stashDropped++;
+	}
+	else {
+		/* parts never exceed stashSz: it is sized from the same limits (_stashAlloc()) */
+		for (i = 0; i < nparts; i++) {
+			hal_memcpy(s->data + len, parts[i].data, parts[i].sz);
+			len += parts[i].sz;
+		}
+		s->tid = tid;
+		s->used = 1;
+		s->start = (u64)hal_timerGetUs();
+		s->len = len;
+	}
+	hal_spinlockClear(&trace_common.stashLock, &sc);
+}
+
+
+/* With stashLock set: writes the stashed wait, now blocked us long */
+static void _stashEmit(trace_stash_t *s, u64 blocked, u8 flags)
+{
+	trace_waithead_t *head = (trace_waithead_t *)s->data;
+	trace_part_t part = { .data = s->data, .sz = s->len };
+	spinlock_ctx_t sc;
+
+	head->flags |= flags;
+	head->blocked = (blocked > 0xffffffffU) ? 0xffffffffU : (u32)blocked;
+
+	hal_spinlockSet(&trace_common.spinlock, &sc);
+	if (trace_common.running != 0) {
+		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_WAIT, &part, 1, NULL);
+	}
+	hal_spinlockClear(&trace_common.spinlock, &sc);
+}
+
+
+void _trace_threadWoken(const thread_t *t)
+{
+	trace_stash_t *s;
+	spinlock_ctx_t sc;
+	u64 blocked;
+
+	hal_spinlockSet(&trace_common.stashLock, &sc);
+	s = (trace_common.stash != NULL) ? _stashFind(proc_getTid(t), 0) : NULL;
+	if (s != NULL) {
+		blocked = (u64)hal_timerGetUs() - s->start;
+		if (blocked >= trace_common.cfg.waitMinUs) {
+			_stashEmit(s, blocked, TRACE_WAIT_DEFERRED);
+		}
+		s->used = 0;
+	}
+	hal_spinlockClear(&trace_common.stashLock, &sc);
+}
+
+
+/* A wakeup that ends a stashed wait shorter than waitMinUs is left out with it */
+static int _stashIsShort(int tid)
+{
+	trace_stash_t *s;
+	spinlock_ctx_t sc;
+	int isShort = 0;
+
+	hal_spinlockSet(&trace_common.stashLock, &sc);
+	s = (trace_common.stash != NULL) ? _stashFind(tid, 0) : NULL;
+	if ((s != NULL) && (((u64)hal_timerGetUs() - s->start) < trace_common.cfg.waitMinUs)) {
+		isShort = 1;
+	}
+	hal_spinlockClear(&trace_common.stashLock, &sc);
+
+	return isShort;
+}
+
+
+/* The trace stops: the waits still going on and long enough are written as open */
+static void _stashFlush(void)
+{
+	trace_stash_t *s;
+	spinlock_ctx_t sc;
+	u64 now = (u64)hal_timerGetUs();
+	unsigned int i;
+
+	hal_spinlockSet(&trace_common.stashLock, &sc);
+	for (i = 0; (trace_common.stash != NULL) && (i < TRACE_STASH_SLOTS); i++) {
+		s = trace_common.stash[i];
+		if ((s->used != 0) && ((now - s->start) >= trace_common.cfg.waitMinUs)) {
+			_stashEmit(s, now - s->start, TRACE_WAIT_DEFERRED | TRACE_WAIT_OPEN);
+		}
+		s->used = 0;
+	}
+	hal_spinlockClear(&trace_common.stashLock, &sc);
+}
+
+
+static void _stashFree(void)
+{
+	trace_stash_t **stash;
+	spinlock_ctx_t sc;
+	unsigned int i;
+
+	hal_spinlockSet(&trace_common.stashLock, &sc);
+	stash = trace_common.stash;
+	trace_common.stash = NULL;
+	hal_spinlockClear(&trace_common.stashLock, &sc);
+
+	if (stash != NULL) {
+		for (i = 0; i < TRACE_STASH_SLOTS; i++) {
+			vm_kfree(stash[i]);
+		}
+		vm_kfree(stash);
+	}
+}
+
+
+static int _stashAlloc(void)
+{
+	trace_stash_t **stash;
+	unsigned int i;
+	size_t sz;
+
+	if (trace_common.cfg.waitMinUs == 0U) {
+		return EOK;
+	}
+
+	/* the largest thread_wait payload under the current configuration */
+	sz = sizeof(trace_waithead_t) + TRACE_KDEPTH * sizeof(u64) + sizeof(trace_ureg_t) +
+			trace_common.cfg.depth * sizeof(u64) + sizeof(u16) + trace_common.cfg.waitStack;
+
+	stash = vm_kmalloc(TRACE_STASH_SLOTS * sizeof(*stash));
+	if (stash == NULL) {
+		return -ENOMEM;
+	}
+	for (i = 0; i < TRACE_STASH_SLOTS; i++) {
+		stash[i] = vm_kmalloc(sizeof(trace_stash_t) + sz);
+		if (stash[i] == NULL) {
+			while (i > 0U) {
+				vm_kfree(stash[--i]);
+			}
+			vm_kfree(stash);
+			return -ENOMEM;
+		}
+		stash[i]->used = 0;
+	}
+
+	trace_common.stashSz = sz;
+	trace_common.stashDropped = 0;
+	trace_common.stash = stash; /* tracing is not enabled yet */
+
+	return EOK;
+}
+
+
 /*
  * Writes thread_wait for t, sleeping. kfp is the kernel frame pointer to walk from. With
  * existing set, t is not the current thread (its user memory is not read) and the trace is being
@@ -373,14 +591,7 @@ void _trace_sample(const thread_t *t, cpu_context_t *ctx)
  */
 static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 {
-	struct {
-		u16 tid;
-		u8 flags;
-		u32 queue;
-		u32 timeout; /* us left until the deadline, 0: none */
-		u64 args[4]; /* syscall arguments */
-		u8 nkframes;
-	} __attribute__((packed)) head;
+	trace_waithead_t head;
 	trace_ureg_t ureg;
 	trace_part_t parts[6];
 	cpu_context_t *uctx;
@@ -394,6 +605,7 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	head.flags = (existing != 0) ? TRACE_WAIT_EXISTING : 0U;
 	head.queue = (u32)(ptr_t)t->wait;
 	head.timeout = 0;
+	head.blocked = 0;
 	if (t->wakeup != 0) {
 		now = (u64)hal_timerGetUs();
 		left = ((u64)t->wakeup > now) ? (u64)t->wakeup - now : 1U;
@@ -418,6 +630,11 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 
 	if (existing != 0) {
 		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_WAIT, parts, 6, NULL);
+		return;
+	}
+
+	if (trace_common.cfg.waitMinUs != 0U) {
+		_stashPut(proc_getTid(t), parts, 6);
 		return;
 	}
 
@@ -470,6 +687,35 @@ void _trace_threadWait(const thread_t *t)
 }
 
 
+void _trace_threadWoken(const thread_t *t)
+{
+	(void)t;
+}
+
+
+static int _stashIsShort(int tid)
+{
+	(void)tid;
+	return 0;
+}
+
+
+static void _stashFlush(void)
+{
+}
+
+
+static void _stashFree(void)
+{
+}
+
+
+static int _stashAlloc(void)
+{
+	return EOK;
+}
+
+
 static void _emitWaiting(void)
 {
 }
@@ -481,6 +727,31 @@ static int _sampleSupported(void)
 }
 
 #endif /* HAL_PERF_FRAMES */
+
+
+void _trace_threadWakeup(const thread_t *t, const thread_t *waker, unsigned int cause)
+{
+	struct {
+		u16 tid;
+		u16 waker;
+		u8 cause;
+	} __attribute__((packed)) ev;
+	spinlock_ctx_t sc;
+
+	if ((trace_common.cfg.waitMinUs != 0U) && (_stashIsShort(proc_getTid(t)) != 0)) {
+		return;
+	}
+
+	ev.tid = (u16)proc_getTid(t);
+	ev.waker = (waker != NULL) ? (u16)proc_getTid(waker) : 0U;
+	ev.cause = (u8)cause;
+
+	hal_spinlockSet(&trace_common.spinlock, &sc);
+	if (trace_common.running != 0) {
+		_writeEvent((u8)trace_channel_event, TRACE_EVENT_THREAD_WAKEUP, &ev, sizeof(ev), NULL);
+	}
+	hal_spinlockClear(&trace_common.spinlock, &sc);
+}
 
 
 static void _emitThreadsCb(void *arg, threadinfo_t *tinfo)
@@ -530,10 +801,11 @@ static int trace_setConfig(unsigned int flags, const void *arg, size_t sz)
 	}
 
 	if (arg != NULL) {
-		if (sz != sizeof(cfg)) {
+		/* an older caller passes fewer fields: the rest stay 0 */
+		if (sz > sizeof(cfg)) {
 			return -EINVAL;
 		}
-		hal_memcpy(&cfg, arg, sizeof(cfg));
+		hal_memcpy(&cfg, arg, sz);
 	}
 
 	if (((flags & PERF_TRACE_FLAG_SAMPLE) != 0U) && (_sampleSupported() == 0)) {
@@ -541,6 +813,11 @@ static int trace_setConfig(unsigned int flags, const void *arg, size_t sz)
 	}
 
 	if ((cfg.depth > PERF_TRACE_DEPTH_MAX) || (cfg.sampleStack > PERF_TRACE_USTACK_MAX) || (cfg.waitStack > PERF_TRACE_USTACK_MAX)) {
+		return -EINVAL;
+	}
+
+	/* deferred waits are kept per thread until they end: their stacks are kept small */
+	if ((cfg.waitMinUs != 0U) && (cfg.waitStack > PERF_TRACE_WAITSTACK_DEFERRED_MAX)) {
 		return -EINVAL;
 	}
 
@@ -574,7 +851,13 @@ int trace_start(unsigned int flags, const void *arg, size_t sz)
 
 	ret = trace_setConfig(flags, arg, sz);
 	if (ret == EOK) {
+		ret = _stashAlloc();
+	}
+	if (ret == EOK) {
 		ret = _trace_bufferStart();
+		if (ret < 0) {
+			_stashFree();
+		}
 	}
 	if (ret < 0) {
 		hal_spinlockSet(&trace_common.spinlock, &sc);
@@ -594,6 +877,7 @@ int trace_start(unsigned int flags, const void *arg, size_t sz)
 	trace_common.prev = trace_common.startTimestamp;
 	trace_common.errorFlags = 0;
 	trace_common.eventDelayCount = 0;
+	trace_common.eventDiscardCount = 0;
 
 	/* Without spinlock - trace is not enabled yet, so there's no concurrent access */
 	_emitThreadinfo();
@@ -635,6 +919,9 @@ int trace_stop(void)
 	int ret = EOK, running;
 	spinlock_ctx_t sc;
 
+	/* while still running: the waits going on now are written as open */
+	_stashFlush();
+
 	hal_spinlockSet(&trace_common.spinlock, &sc);
 	running = trace_common.running;
 	if (trace_common.stopped == 0 && running != 0) {
@@ -657,6 +944,7 @@ int trace_finish(void)
 	int ret = EOK;
 	u8 errorFlags = 0;
 	u64 eventDelayCount = 0;
+	u64 eventDiscardCount = 0;
 	u64 eventDelayTimestamp = 0;
 	u64 startTimestamp = 0;
 	u64 stopTimestamp = 0;
@@ -667,6 +955,7 @@ int trace_finish(void)
 		trace_common.stopped = 0;
 		eventDelayCount = trace_common.eventDelayCount;
 		trace_common.eventDelayCount = 0;
+		eventDiscardCount = trace_common.eventDiscardCount;
 
 		startTimestamp = trace_common.startTimestamp;
 		stopTimestamp = startTimestamp + _getUsFromStart();
@@ -695,9 +984,16 @@ int trace_finish(void)
 		}
 
 		if ((errorFlags & TRACE_EVENT_DISCARDED) != 0U) {
-			lib_printf("kernel (%s:%d): event discard detected\n", __func__, __LINE__);
+			lib_printf("kernel (%s:%d): event discard detected (%llu events: a channel was full - read faster or record less)\n",
+					__func__, __LINE__, eventDiscardCount);
 		}
 
+		if (trace_common.stashDropped != 0U) {
+			lib_printf("kernel (%s:%d): %llu waits not recorded (more threads waiting than wait slots)\n", __func__, __LINE__,
+					trace_common.stashDropped);
+		}
+
+		_stashFree();
 		ret = _trace_bufferFinish();
 	}
 
@@ -714,6 +1010,8 @@ int _trace_init(vm_map_t *kmap)
 	trace_common.epoch = 0;
 
 	hal_spinlockCreate(&trace_common.spinlock, "trace.spinlock");
+	hal_spinlockCreate(&trace_common.stashLock, "trace.stashLock");
+	trace_common.stash = NULL;
 
 	trace_common.sampleNext = vm_kmalloc(sizeof(*trace_common.sampleNext) * hal_cpuGetCount());
 	trace_common.frames = vm_kmalloc(sizeof(*trace_common.frames) * hal_cpuGetCount());

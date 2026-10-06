@@ -214,6 +214,7 @@ static void _threads_enqueued(thread_t *t)
 static void _threads_waking(thread_t *t)
 {
 	_threads_updateWaits(t, event_waking);
+	_trace_eventThreadWoken(t);
 	trace_eventThreadWaking(proc_getTid(t));
 }
 

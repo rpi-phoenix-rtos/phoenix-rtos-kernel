@@ -239,12 +239,19 @@ event {
 	id = 0x41;
 	fields := struct {
 		u16 tid;
-		/* bit 0: the thread was already waiting when the trace started */
+		/*
+		 * bit 0: the thread was already waiting when the trace started
+		 * bit 1: written when the wait ended (perf_trace_cfg_t.waitMinUs): it began blocked us
+		 *        before the event
+		 * bit 2: written when the trace stopped, the thread still waiting
+		 */
 		u8 flags;
 		/* wait queue (kernel address cropped to 32 bits), 0: sleep */
 		u32 queue;
-		/* us left until the deadline, 0: none */
+		/* us left until the deadline when the wait began, 0: none */
 		u32 timeout;
+		/* us the wait lasted (bits 1, 2), 0: written when it began */
+		u32 blocked;
 		/* syscall arguments */
 		u64 args[4];
 		u8 nkframes;
