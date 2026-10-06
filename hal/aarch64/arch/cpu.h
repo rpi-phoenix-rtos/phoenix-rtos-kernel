@@ -212,6 +212,13 @@ int hal_cpuCanRead(ptr_t va);
 unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned int n);
 
 
+/*
+ * Returns the syscall number of the SVC that ends just before pc (the user pc a syscall entered
+ * the kernel with), or -1 if the instruction there is not an SVC or cannot be read.
+ */
+int hal_cpuSyscallBefore(ptr_t pc);
+
+
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 static inline unsigned int hal_cpuGetID(void)
 {

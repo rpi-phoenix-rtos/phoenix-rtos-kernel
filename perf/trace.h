@@ -35,4 +35,8 @@ int trace_finish(void);
 int trace_isRunning(void);
 
 
+/* WARN: eventually consistent. Nonzero if the trace runs and records events of this id */
+int trace_isEnabled(u8 event);
+
+
 #endif

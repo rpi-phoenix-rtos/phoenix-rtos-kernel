@@ -33,6 +33,19 @@ typedef enum { trace_channel_meta, trace_channel_event, trace_channel_count } tr
 #define PERF_TRACE_WAITSTACK_DEFERRED_MAX 1024U /* most waitStack bytes when waitMinUs != 0 */
 
 
+/* Event classes of perf_trace_cfg_t.events */
+#define PERF_TRACE_EV_THREAD  (1U << 0) /* thread_create/end, process_exec/kill, trace_stats */
+#define PERF_TRACE_EV_SCHED   (1U << 1) /* scheduling, preempted, enqueued, waking, sched_enter/exit, priority */
+#define PERF_TRACE_EV_SYSCALL (1U << 2) /* syscall_enter/exit */
+#define PERF_TRACE_EV_LOCK    (1U << 3) /* lock_name, lock_set_*, lock_clear */
+#define PERF_TRACE_EV_IRQ     (1U << 4) /* interrupt_enter/exit */
+#define PERF_TRACE_EV_WAIT    (1U << 5) /* thread_wait, thread_wakeup */
+#define PERF_TRACE_EV_MSG     (1U << 6) /* msg_send/recv/respond */
+
+/* What a profiler needs: who runs (thread_sample, PERF_TRACE_FLAG_SAMPLE), what blocks, who serves */
+#define PERF_TRACE_EV_PROFILE (PERF_TRACE_EV_THREAD | PERF_TRACE_EV_WAIT | PERF_TRACE_EV_MSG)
+
+
 /*
  * Optional argument of perf_start(perf_mode_trace, ...). Without it (arg == NULL) sampling, when
  * requested, uses the defaults below, no user stack is copied and every wait is recorded. Fields
@@ -49,6 +62,11 @@ typedef struct {
 	 * shorter ones are left out: most waits are far shorter than a stall, and this drops them.
 	 */
 	unsigned int waitMinUs;
+	/*
+	 * Event classes to record (PERF_TRACE_EV_*), 0: all of them. Scheduling, syscall, lock and
+	 * interrupt events come at the rate of those operations, so a profile leaves them out.
+	 */
+	unsigned int events;
 } perf_trace_cfg_t;
 
 
