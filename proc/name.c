@@ -668,8 +668,20 @@ int proc_write(oid_t oid, off_t *offs, void *buf, size_t sz, unsigned int mode)
 		err = msg->o.err;
 	}
 
-	if (err >= 0) {
-		*offs = msg->o.io.offs;
+	if (err > 0) {
+		/*
+		 * The server reports the offset after the write in o.io.offs, which is how O_APPEND
+		 * learns where the data went. A server that predates that field leaves it as we sent
+		 * it (zero), and no real write of err bytes can end below offset err: advance by the
+		 * byte count instead, or every sequential write to such a server (block devices,
+		 * drivers) would land at offset 0.
+		 */
+		if (msg->o.io.offs >= (off_t)err) {
+			*offs = msg->o.io.offs;
+		}
+		else {
+			*offs += err;
+		}
 	}
 
 	vm_kfree(msg);
