@@ -207,6 +207,7 @@ static void _threads_enqueued(thread_t *t)
 {
 	_threads_updateWaits(t, event_enqueued);
 	trace_eventThreadEnqueued(proc_getTid(t));
+	_trace_eventThreadWait(t);
 }
 
 
@@ -294,6 +295,9 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 	spinlock_ctx_t sc;
 	unsigned int myCpuId = hal_cpuGetID();
 
+	/* Only this CPU changes its current thread, and not while it handles an interrupt */
+	trace_eventThreadSample(threads_common.current[myCpuId], context);
+
 	/* parasoft-begin-suppress MISRAC2012-RULE_14_3 "hal_cpuGetID()'s return value might
 	 * not be known at compile time for different architectures" */
 	if (myCpuId != 0U) {
@@ -321,6 +325,7 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 			break;
 		}
 
+		_trace_eventThreadWakeup(t, NULL, TRACE_WAKEUP_TIMEOUT);
 		_proc_threadDequeue(t);
 		hal_cpuSetReturnValue(t->context, (void *)-ETIME);
 	}
@@ -1103,6 +1108,9 @@ int proc_threadPriority(thread_t *t, int val, int *res)
 
 static void _thread_interrupt(thread_t *t)
 {
+	if (t->state == SLEEP) {
+		_trace_eventThreadWakeup(t, _proc_current(), TRACE_WAKEUP_INTERRUPT);
+	}
 	_proc_threadDequeue(t);
 	hal_cpuSetReturnValue(t->context, (void *)-EINTR);
 }
@@ -1484,6 +1492,7 @@ static int _proc_threadWakeup(thread_t **queue)
 			*queue = NULL;
 			return 0;
 		}
+		_trace_eventThreadWakeup(*queue, _proc_current(), TRACE_WAKEUP_EXPLICIT);
 		_proc_threadDequeue(*queue);
 	}
 	else {
@@ -2860,6 +2869,7 @@ static int _proc_lockUnlock(lock_t *lock, int doForceUnlock)
 		if (lockPriority < lock->owner->priority) {
 			_proc_threadSetPriority(lock->queue, lockPriority);
 		}
+		_trace_eventThreadWakeup(lock->owner, current, TRACE_WAKEUP_LOCK);
 		_proc_threadDequeue(lock->owner);
 		LIST_ADD(&lock->owner->locks, lock);
 		ret = 1;
@@ -3460,6 +3470,28 @@ void proc_threadsIter(unsigned int flags, proc_threadsListFn_t cb, void *arg)
 			 */
 			cb(arg, &info);
 		}
+
+		t = lib_treeof(thread_t, idlinkage, lib_idtreeNext(&t->idlinkage.linkage));
+	}
+
+	(void)proc_lockClear(&threads_common.lock);
+}
+
+
+void proc_threadsIterWaiting(void (*cb)(const thread_t *t, void *arg), void *arg)
+{
+	thread_t *t;
+	spinlock_ctx_t sc;
+
+	(void)proc_lockSet(&threads_common.lock);
+
+	t = lib_treeof(thread_t, idlinkage, lib_rbMinimum(threads_common.id.root));
+	while (t != NULL) {
+		hal_spinlockSet(&threads_common.spinlock, &sc);
+		if (t->state == SLEEP) {
+			cb(t, arg);
+		}
+		hal_spinlockClear(&threads_common.spinlock, &sc);
 
 		t = lib_treeof(thread_t, idlinkage, lib_idtreeNext(&t->idlinkage.linkage));
 	}

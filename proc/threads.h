@@ -177,6 +177,10 @@ typedef void (*proc_threadsListFn_t)(void *arg, threadinfo_t *info);
 void proc_threadsIter(unsigned int flags, proc_threadsListFn_t cb, void *arg);
 
 
+/* Calls cb for every sleeping thread, with threads_common.spinlock set */
+void proc_threadsIterWaiting(void (*cb)(const thread_t *t, void *arg), void *arg);
+
+
 int proc_threadsInfo(int tid, unsigned int flags, int n, threadinfo_t *info);
 
 

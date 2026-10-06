@@ -15,6 +15,7 @@
 #include "hal/timer.h"
 #include "lib/lib.h"
 #include "proc.h"
+#include "perf/trace-events.h"
 
 
 #define FLOOR(x) ((x) & ~(SIZE_PAGE - 1U))
@@ -652,6 +653,7 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 		err = -EINVAL;
 	}
 	else {
+		trace_eventMsgSend(proc_getTid(sender), port, kmsg.msg.type, &kmsg);
 		LIST_ADD(&p->kmessages, &kmsg);
 		(void)proc_threadWakeup(&p->threads);
 
@@ -792,6 +794,7 @@ int proc_recv(u32 port, msg_t *msg, msg_rid_t *rid)
 		if (err == EOK) {
 			LIST_REMOVE(&p->kmessages, kmsg);
 			kmsg->state = msg_received;
+			trace_eventMsgRecv(port, kmsg, kmsg->msg.pid);
 		}
 	}
 	hal_spinlockClear(&p->spinlock, &sc);
@@ -913,6 +916,7 @@ int proc_respond(u32 port, msg_t *msg, msg_rid_t rid)
 	kmsg->msg.o.err = msg->o.err;
 
 	hal_spinlockSet(&p->spinlock, &sc);
+	trace_eventMsgRespond(port, kmsg);
 	kmsg->state = msg_responded;
 	kmsg->src = proc_current()->process;
 	(void)proc_threadWakeup(&kmsg->threads);

@@ -27,7 +27,7 @@ int perf_start(perf_mode_t mode, unsigned flags, void *arg, size_t sz)
 {
 	switch (mode) {
 		case perf_mode_trace:
-			return trace_start(flags);
+			return trace_start(flags, arg, sz);
 		default:
 			return -ENOSYS;
 	}
