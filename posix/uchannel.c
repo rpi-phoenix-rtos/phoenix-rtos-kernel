@@ -462,8 +462,25 @@ unsigned int uchannel_pollWr(uchannel_t *ch)
 	(void)proc_lockSet(&ch->lock);
 
 	free = _cbuffer_free(&ch->buffer);
-	if ((ch->framed == 0U) ? (free > 0U) : (free > sizeof(size_t))) {
+	if (ch->framed == 0U) {
+		/* a byte stream takes a partial write */
+		if (free > 0U) {
+			events |= UCHANNEL_EV_OUT;
+		}
+	}
+	else if (free >= (ch->buffer.sz - (ch->buffer.sz / 4U))) {
+		/*
+		 * A frame goes in whole or not at all, so "one byte free" would report
+		 * POLLOUT for a message that still does not fit: a sender that waits
+		 * for POLLOUT after EAGAIN (WebKit's IPC) would spin until the reader
+		 * caught up. Writable while at most a quarter of the ring is in use,
+		 * as Linux does for these sockets: any frame of up to three quarters
+		 * of the ring, length word included, then fits.
+		 */
 		events |= UCHANNEL_EV_OUT;
+	}
+	else {
+		/* No action required */
 	}
 
 	if ((ch->flags & (UCHANNEL_SHUT_WR | UCHANNEL_SHUT_RD)) != 0U) {
