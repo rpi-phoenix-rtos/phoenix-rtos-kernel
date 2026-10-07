@@ -67,6 +67,8 @@ typedef struct {
 	 * interrupt events come at the rate of those operations, so a profile leaves them out.
 	 */
 	unsigned int events;
+	/* deferred waits (waitMinUs): only waits of at least this long carry a user stack (waitStack) */
+	unsigned int waitStackMinUs;
 } perf_trace_cfg_t;
 
 

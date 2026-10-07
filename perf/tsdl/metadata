@@ -220,7 +220,17 @@ event {
 		u16 tid;
 		/* 0: user, 1: kernel on behalf of a process, 2: kernel thread */
 		u8 mode;
+		/* bit 0 (skid): kpc follows an instruction that unmasks interrupts, the timer interrupt
+		 * was held off until then: the work was done by the code before it (klr, kframes) */
+		u8 kflags;
 		u64 kpc;
+		u64 klr;
+		/* mode 1: the syscall the thread is in, 0xffff: none */
+		u16 syscall;
+		/* mode 1, no syscall: the exception the thread entered with (ESR.EC; 0x24: data abort,
+		 * 0x20: instruction abort), 0xff: none; kfar: its fault address */
+		u8 eclass;
+		u64 kfar;
 		u8 nkframes;
 		u64 kframes[nkframes];
 		u64 pc;
@@ -244,6 +254,9 @@ event {
 		 * bit 1: written when the wait ended (perf_trace_cfg_t.waitMinUs): it began blocked us
 		 *        before the event
 		 * bit 2: written when the trace stopped, the thread still waiting
+		 * bit 3: where the thread's previous recorded wait was: kframes, frames and stack left out
+		 *        (nkframes = nframes = nstack = 0), see that wait
+		 * A deferred wait shorter than perf_trace_cfg_t.waitStackMinUs has nstack = 0.
 		 */
 		u8 flags;
 		/* wait queue (kernel address cropped to 32 bits), 0: sleep */

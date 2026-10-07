@@ -349,6 +349,38 @@ static void exceptions_dumpUserStack(exc_context_t *ctx)
 }
 
 
+/*
+ * An exception from EL0 saves the context at the top of the kernel stack, and _exceptions_dispatch
+ * pushes ESR and FAR just below it (exc_context_t); a syscall pushes nothing there, so the caller
+ * must have ruled a syscall out (hal_cpuSyscallBefore()). Only classes EL0 can raise are accepted.
+ */
+int hal_cpuExceptionInfo(const cpu_context_t *uctx, unsigned int *eclass, ptr_t *far)
+{
+	const exc_context_t *ctx = (const exc_context_t *)(const void *)((const u8 *)uctx - __builtin_offsetof(exc_context_t, cpuCtx));
+	unsigned int ec = (unsigned int)(ctx->esr >> 26) & 0x3fU;
+
+	switch (ec) {
+		case 0x00U: /* unknown (undefined instruction) */
+		case 0x07U: /* FP/SIMD access */
+		case 0x0eU: /* illegal execution state */
+		case 0x20U: /* instruction abort from EL0 */
+		case 0x22U: /* PC alignment */
+		case 0x24U: /* data abort from EL0 */
+		case 0x26U: /* SP alignment */
+		case 0x2cU: /* FP exception */
+		case 0x30U: /* breakpoint from EL0 */
+		case 0x32U: /* software step from EL0 */
+		case 0x34U: /* watchpoint from EL0 */
+		case 0x3cU: /* BRK */
+			*eclass = ec;
+			*far = (ptr_t)ctx->far;
+			return 0;
+		default:
+			return -1;
+	}
+}
+
+
 static void exceptions_defaultHandler(unsigned int n, exc_context_t *ctx)
 {
 	char buff[SIZE_CTXDUMP];

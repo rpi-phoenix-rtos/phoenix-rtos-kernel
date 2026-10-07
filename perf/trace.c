@@ -366,20 +366,28 @@ static size_t _userRecord(const thread_t *t, cpu_context_t *uctx, int readMem, s
 
 void _trace_sample(const thread_t *t, cpu_context_t *ctx)
 {
+	/* must mirror tsdl/metadata */
 	struct {
 		u16 tid;
-		u8 mode; /* 0: user, 1: kernel on behalf of a process, 2: kernel thread */
+		u8 mode;    /* 0: user, 1: kernel on behalf of a process, 2: kernel thread */
+		u8 kflags;  /* TRACE_SAMPLE_SKID: taken where interrupts were unmasked */
 		u64 kpc;
+		u64 klr;
+		u16 syscall; /* mode 1: the syscall the thread is in, 0xffff: none (see eclass) */
+		u8 eclass;   /* mode 1, not in a syscall: the exception it entered with (ESR.EC), 0xff: none */
+		u64 kfar;    /* the fault address of that exception */
 		u8 nkframes;
 	} __attribute__((packed)) head;
 	trace_ureg_t ureg;
 	trace_part_t parts[6];
 	cpu_context_t *uctx;
 	trace_frames_t *f;
-	unsigned int cpu = hal_cpuGetID(), nk = 0;
+	unsigned int cpu = hal_cpuGetID(), nk = 0, eclass;
+	ptr_t far;
 	u16 nstack;
 	u64 now;
-	spinlock_ctx_t sc;
+	int sc;
+	spinlock_ctx_t lsc;
 
 	if ((t == NULL) || ((trace_common.flags & PERF_TRACE_FLAG_SAMPLE) == 0U)) {
 		return;
@@ -394,16 +402,43 @@ void _trace_sample(const thread_t *t, cpu_context_t *ctx)
 
 	f = &trace_common.frames[cpu];
 	head.tid = (u16)proc_getTid(t);
+	head.kflags = 0;
+	head.kpc = 0;
+	head.klr = 0;
+	head.syscall = 0xffffU;
+	head.eclass = 0xffU;
+	head.kfar = 0;
 	if (hal_cpuSupervisorMode(ctx) == 0) {
 		head.mode = 0;
-		head.kpc = 0;
 		uctx = ctx;
 	}
 	else {
 		head.mode = (t->process != NULL) ? 1U : 2U;
 		head.kpc = hal_cpuGetPC(ctx);
+		head.klr = hal_cpuGetLR(ctx);
 		nk = _kernelFrames(t, hal_cpuGetFP(ctx), f->kframes);
 		uctx = _userContext(t);
+
+		/*
+		 * The timer interrupt is taken only where the kernel unmasks interrupts, mostly the end of
+		 * a spinlock section, so such a sample's pc is where the work ended, not where it was done:
+		 * its caller (klr, kframes) says which section it was.
+		 */
+		if (hal_cpuIrqUnmaskedBefore(head.kpc) != 0) {
+			head.kflags |= TRACE_SAMPLE_SKID;
+		}
+
+		/* why the thread is in the kernel: the syscall, or the exception (a page fault) */
+		if (uctx != NULL) {
+			sc = hal_cpuSyscallBefore(hal_cpuGetPC(uctx));
+			if (sc >= 0) {
+				head.syscall = (u16)sc;
+			}
+			else if (hal_cpuExceptionInfo(uctx, &eclass, &far) == 0) {
+				head.eclass = (u8)eclass;
+				head.kfar = far;
+			}
+		}
 	}
 	head.nkframes = (u8)nk;
 
@@ -417,11 +452,11 @@ void _trace_sample(const thread_t *t, cpu_context_t *ctx)
 	parts[4] = (trace_part_t) { &nstack, sizeof(nstack) };
 	parts[5] = (trace_part_t) { (const void *)(ptr_t)ureg.sp, (size_t)nstack * sizeof(u64) };
 
-	hal_spinlockSet(&trace_common.spinlock, &sc);
+	hal_spinlockSet(&trace_common.spinlock, &lsc);
 	if (trace_common.running != 0) {
 		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_SAMPLE, parts, 6, NULL);
 	}
-	hal_spinlockClear(&trace_common.spinlock, &sc);
+	hal_spinlockClear(&trace_common.spinlock, &lsc);
 }
 
 
@@ -452,6 +487,15 @@ typedef struct _trace_stash_t {
 	int used;
 	u64 start;
 	size_t len;
+	size_t uregOff;  /* offset of the user part (trace_ureg_t) in data */
+	size_t stackOff; /* offset of nstack in data */
+	u64 sig;         /* where the wait is: syscall, user pc/lr/caller, kernel callers */
+
+	/* The last wait this slot wrote, kept while the slot is free: repeats are written short */
+	int lastTid;
+	u64 lastSig;
+	int lastHadStack;
+
 	u8 data[]; /* thread_wait payload */
 } trace_stash_t;
 
@@ -476,7 +520,8 @@ static trace_stash_t *_stashFind(int tid, int alloc)
 }
 
 
-static void _stashPut(int tid, const trace_part_t *parts, size_t nparts)
+/* parts: head, kframes, ureg, frames, nstack, stack (as _threadWaitRecord() builds them) */
+static void _stashPut(int tid, const trace_part_t *parts, size_t nparts, u64 sig)
 {
 	trace_stash_t *s;
 	spinlock_ctx_t sc;
@@ -490,9 +535,16 @@ static void _stashPut(int tid, const trace_part_t *parts, size_t nparts)
 	else {
 		/* parts never exceed stashSz: it is sized from the same limits (_stashAlloc()) */
 		for (i = 0; i < nparts; i++) {
+			if (i == 2U) {
+				s->uregOff = len;
+			}
+			else if (i == 4U) {
+				s->stackOff = len;
+			}
 			hal_memcpy(s->data + len, parts[i].data, parts[i].sz);
 			len += parts[i].sz;
 		}
+		s->sig = sig;
 		s->tid = tid;
 		s->used = 1;
 		s->start = (u64)hal_timerGetUs();
@@ -502,19 +554,49 @@ static void _stashPut(int tid, const trace_part_t *parts, size_t nparts)
 }
 
 
-/* With stashLock set: writes the stashed wait, now blocked us long */
+/*
+ * With stashLock set: writes the stashed wait, now blocked us long. Most waits are a thread
+ * waiting where it waited last time (an event loop, a worker), so a wait in the same place as the
+ * previous one its thread wrote leaves out its frames and stack (TRACE_WAIT_REPEAT), and a wait
+ * shorter than waitStackMinUs leaves out its stack: the stack is for explaining the long ones.
+ */
 static void _stashEmit(trace_stash_t *s, u64 blocked, u8 flags)
 {
-	trace_waithead_t *head = (trace_waithead_t *)s->data;
-	trace_part_t part = { .data = s->data, .sz = s->len };
+	trace_waithead_t head;
+	trace_ureg_t ureg;
+	trace_part_t parts[3];
 	spinlock_ctx_t sc;
+	size_t nparts;
+	int withStack = (blocked >= trace_common.cfg.waitStackMinUs) ? 1 : 0;
+	const u16 nostack = 0;
 
-	head->flags |= flags;
-	head->blocked = (blocked > 0xffffffffU) ? 0xffffffffU : (u32)blocked;
+	hal_memcpy(&head, s->data, sizeof(head));
+	head.flags |= flags;
+	head.blocked = (blocked > 0xffffffffU) ? 0xffffffffU : (u32)blocked;
+
+	if ((s->lastTid == s->tid) && (s->lastSig == s->sig) && ((s->lastHadStack != 0) || (withStack == 0))) {
+		head.flags |= TRACE_WAIT_REPEAT;
+		head.nkframes = 0;
+		hal_memcpy(&ureg, s->data + s->uregOff, sizeof(ureg));
+		ureg.nframes = 0;
+		parts[0] = (trace_part_t) { &head, sizeof(head) };
+		parts[1] = (trace_part_t) { &ureg, sizeof(ureg) };
+		parts[2] = (trace_part_t) { &nostack, sizeof(nostack) };
+		nparts = 3;
+	}
+	else {
+		parts[0] = (trace_part_t) { &head, sizeof(head) };
+		parts[1] = (trace_part_t) { s->data + sizeof(head), (withStack != 0) ? (s->len - sizeof(head)) : (s->stackOff - sizeof(head)) };
+		parts[2] = (trace_part_t) { &nostack, (withStack != 0) ? 0U : sizeof(nostack) };
+		nparts = 3;
+		s->lastTid = s->tid;
+		s->lastSig = s->sig;
+		s->lastHadStack = withStack;
+	}
 
 	hal_spinlockSet(&trace_common.spinlock, &sc);
 	if (trace_common.running != 0) {
-		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_WAIT, &part, 1, NULL);
+		_writeEventParts((u8)trace_channel_event, TRACE_EVENT_THREAD_WAIT, parts, nparts, NULL);
 	}
 	hal_spinlockClear(&trace_common.spinlock, &sc);
 }
@@ -625,6 +707,7 @@ static int _stashAlloc(void)
 			return -ENOMEM;
 		}
 		stash[i]->used = 0;
+		stash[i]->lastTid = -1;
 	}
 
 	trace_common.stashSz = sz;
@@ -649,6 +732,7 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 	trace_frames_t *f = &trace_common.frames[hal_cpuGetID()];
 	unsigned int nk, i;
 	int ret;
+	u64 sig;
 	u16 nstack;
 	u64 now, left;
 	spinlock_ctx_t sc;
@@ -693,7 +777,10 @@ static void _threadWaitRecord(const thread_t *t, ptr_t kfp, int existing)
 
 	/* deferred: a wait that began before the trace is timed from its start, like any other */
 	if (trace_common.cfg.waitMinUs != 0U) {
-		_stashPut(proc_getTid(t), parts, 6);
+		/* where the wait is, to tell a repeat (see _stashEmit()) */
+		sig = ((u64)head.syscall << 48) ^ ureg.pc ^ (ureg.lr << 1) ^ ((ureg.nframes != 0U) ? (f->frames[0] << 2) : 0U) ^
+				((nk > 0U) ? (f->kframes[0] << 3) : 0U) ^ ((nk > 1U) ? (f->kframes[1] << 4) : 0U);
+		_stashPut(proc_getTid(t), parts, 6, sig);
 		return;
 	}
 

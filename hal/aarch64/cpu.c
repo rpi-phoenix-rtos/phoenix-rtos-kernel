@@ -435,6 +435,21 @@ int hal_cpuSyscallBefore(ptr_t pc)
 }
 
 
+int hal_cpuIrqUnmaskedBefore(ptr_t pc)
+{
+	u32 insn;
+
+	if ((pc < (ptr_t)VADDR_KERNEL + 4U) || ((pc & 3U) != 0U) || (hal_cpuCanRead(pc - 4U) == 0)) {
+		return 0;
+	}
+
+	insn = *(volatile u32 *)(pc - 4U);
+
+	/* MSR DAIF, Xt (restoring a saved mask) or MSR DAIFClr, #imm */
+	return (((insn & 0xffffffe0U) == 0xd51b4220U) || ((insn & 0xfffff0ffU) == 0xd50340ffU)) ? 1 : 0;
+}
+
+
 unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned int n)
 {
 	unsigned int depth = 0;
