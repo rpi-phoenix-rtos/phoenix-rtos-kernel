@@ -84,10 +84,6 @@ static void process_destroy(process_t *p)
 
 	trace_eventProcessKill(p);
 
-	if (p->posix != 0U) {
-		posix_died(process_getPid(p), p->exit);
-	}
-
 	/* Destroy resources (especially rtInth) before changing map to prevent race */
 	proc_resourcesDestroy(p);
 
@@ -104,6 +100,14 @@ static void process_destroy(process_t *p)
 		if (imapp != NULL) {
 			vm_mapDestroy(p, imapp);
 		}
+	}
+
+	/* Only now the parent learns of the death (waitpid() returns, SIGCHLD): the memory is free
+	 * again by then, as POSIX programs expect of a process that has exited. Told before the
+	 * address space was destroyed, a parent saw a 3 GB child's memory come back over 2 s more
+	 * on the Pi 4, and could fail to allocate it meanwhile. */
+	if (p->posix != 0U) {
+		posix_died(process_getPid(p), p->exit);
 	}
 
 	proc_portsDestroy(p, (borrowed == 0U) ? 1 : 0);
