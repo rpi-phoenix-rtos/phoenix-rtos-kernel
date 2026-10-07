@@ -13,13 +13,81 @@
 
 #include "hal/hal.h"
 #include "include/errno.h"
+#include "include/file.h"
 #include "lib/lib.h"
 #include "page.h"
 #include "kmalloc.h"
 #include "object.h"
 #include "map.h"
+#include "proc/proc.h"
 #include "proc/name.h"
 #include "proc/threads.h"
+
+
+/*
+ * File object cache
+ *
+ * Without it, the pages of a file object are freed with its last reference, so every exec of a
+ * program and every mmap() of a file that nothing maps at the moment reads it from the server
+ * again (on the NFS root, one round trip of ~3 ms per 16-page read-ahead cluster: ~7.5 s per start
+ * of a 330 MB browser). With it, an unreferenced file object keeps its pages, stays in the tree and
+ * goes on an LRU list; vm_objectGet() of its oid reuses it.
+ *
+ * What is cached: an object of a regular file (the server answers mtGetAttr(atType) with otFile)
+ * whose size, mtime and ctime the server reports (mtGetAttrAll), and whose pages were never
+ * writable in memory: a mapping with PROT_WRITE without MAP_NEEDSCOPY (any writable mmap() of a
+ * file -- MAP_SHARED and MAP_PRIVATE are the same here) or an mprotect() to PROT_WRITE writes the
+ * object's pages, which are never written back; today such changes vanish with the last mapping,
+ * and they must not outlive it in the cache (vm_objectWritable()). Never cached: export windows,
+ * contiguous objects, anonymous memory, the kernel object.
+ *
+ * Staleness. A cached object is reused only if it still describes the file:
+ *  - Changes the kernel passes on: proc_send() reports every mtWrite, mtTruncate, mtSetAttr and
+ *    mtDestroy of an oid, and the oid of every mtCreate response (a server may give a new file the
+ *    id of a removed one -- dummyfs and ext2 do), to vm_objectNotify(). A cached object of that oid
+ *    is freed at once; a referenced one is marked stale, so it is freed rather than cached when its
+ *    last reference goes (and after mtCreate it also leaves the tree, so the new file never shares
+ *    the old file's pages). Every write() and truncate of a file on this system goes this way.
+ *  - Changes nobody tells the kernel about (another NFS client, e.g. the build host overwriting a
+ *    binary on the export): before an unreferenced object is reused, the server is asked for size,
+ *    mtime and ctime again (one mtGetAttrAll) and the object is reused only if all three are the
+ *    ones it was created with. The times are in seconds: a rewrite by another client to the same
+ *    size within the second the object was created in is not seen, nor one younger than the NFS
+ *    server's attribute cache (100 ms). Such a rewrite is not seen by a referenced object today
+ *    either.
+ *  - A server that goes away: its cached objects are freed when its port is released.
+ *
+ * Memory. Cached pages are free memory as far as anybody else is concerned: vm_pageAlloc() and
+ * page_map() call vm_objectReclaim() when the allocator has nothing left and retry, so a cached
+ * page never causes an allocation failure; meminfo reports them as free. The cache is also capped
+ * (VM_OBJCACHE_PERCENT of RAM) and given up while free memory is below 1/VM_OBJCACHE_LOWWATER of it.
+ *
+ * Locking. object_common.lock is taken under a map's lock (fault path, vm_objectWritable()) and
+ * under kmalloc_common.lock (a zone created by vm_kmalloc() allocates pages: vm_pageAlloc() ->
+ * vm_objectReclaim()); it is held only around list and tree changes, and nothing allocates, sends
+ * a message or takes a map, amap or kmalloc lock under it. Pages are freed (pages_info.lock) with
+ * object_common.lock held or not; pages_info.lock is never held while object_common.lock is taken
+ * (the allocator drops it before reclaiming). vm_objectReclaim() never frees kernel heap -- it can
+ * run under kmalloc_common.lock -- so the header of an object it evicts goes on a list that
+ * vm_objectGet() and vm_objectPut() free (object_reap()).
+ */
+
+#ifndef VM_OBJCACHE
+#define VM_OBJCACHE 0
+#endif
+
+/* Upper bound of the pages kept by unreferenced objects, in percent of the memory free at boot */
+#ifndef VM_OBJCACHE_PERCENT
+#define VM_OBJCACHE_PERCENT 25U
+#endif
+
+/* No object is kept while free memory is below 1/VM_OBJCACHE_LOWWATER of the memory free at boot */
+#ifndef VM_OBJCACHE_LOWWATER
+#define VM_OBJCACHE_LOWWATER 32U
+#endif
+
+/* otFile of <sys/file.h> */
+#define OBJECT_OTFILE 1
 
 
 static struct {
@@ -28,7 +96,23 @@ static struct {
 	vm_map_t *kmap;
 	vm_object_t *exports; /* published export windows, see vm_objectExport() */
 	lock_t lock;
+
+	/* File object cache */
+	vm_object_t *lru;   /* unreferenced cached objects, least recently released first */
+	vm_object_t *reaped; /* evicted by vm_objectReclaim(): pages freed, header not yet (via next) */
+	size_t cached;      /* pages held by the objects on lru */
+	size_t cacheMax;    /* bound of cached, in pages */
+	size_t lowWater;    /* free memory below which nothing is kept, in pages */
 } object_common;
+
+
+/* What a server says about a file, for the cache */
+typedef struct {
+	int valid; /* a regular file whose size and times the server reported */
+	off_t size;
+	long long mtime;
+	long long ctime;
+} object_attrs_t;
 
 
 /* An anonymous contiguous object (vm_objectContiguous) carries this oid and is never in the tree */
@@ -71,45 +155,265 @@ static int object_cmp(rbnode_t *n1, rbnode_t *n2)
 }
 
 
-int vm_objectGet(vm_object_t **o, oid_t oid)
+static vm_object_t *_object_find(oid_t oid)
 {
-	vm_object_t t, *no = NULL;
-	size_t i, n;
-	off_t sz;
-	int err = -ENOMEM;
+	vm_object_t t;
 
-	t.oid.port = oid.port;
-	t.oid.id = oid.id;
+	hal_memcpy(&t.oid, &oid, sizeof(oid));
+
+	return lib_treeof(vm_object_t, linkage, lib_rbFind(&object_common.tree, &t.linkage));
+}
+
+
+/* Frees the pages of a file object (not of an export window or a contiguous object) */
+static void object_freePages(vm_object_t *o)
+{
+	size_t i;
+
+	for (i = 0; i < round_page(o->size) / SIZE_PAGE; ++i) {
+		if (o->pages[i] != NULL) {
+			vm_pageFree(o->pages[i]);
+			o->pages[i] = NULL;
+		}
+	}
+}
+
+
+#if VM_OBJCACHE
+
+/*
+ * Asks the server about a file: size, mtime and ctime of a regular file, or valid == 0. With
+ * probe, it asks the type with mtGetAttr first: every server whose objects can be mapped answers
+ * mtGetAttr (vm_objectGet() has always asked it the size), not necessarily mtGetAttrAll.
+ */
+static void object_attrs(oid_t oid, int probe, object_attrs_t *a)
+{
+	struct {
+		msg_t msg;
+		struct _attrAll attrs;
+	} *q;
+	int err = EOK;
+
+	a->valid = 0;
+
+	q = vm_kmalloc(sizeof(*q));
+	if (q == NULL) {
+		return;
+	}
+
+	if (probe != 0) {
+		hal_memset(&q->msg, 0, sizeof(q->msg));
+		q->msg.type = mtGetAttr;
+		hal_memcpy(&q->msg.oid, &oid, sizeof(oid));
+		q->msg.i.attr.type = atType;
+
+		err = proc_send(oid.port, &q->msg);
+		if (err == EOK) {
+			err = q->msg.o.err;
+		}
+		if ((err == EOK) && (q->msg.o.attr.val != OBJECT_OTFILE)) {
+			err = -EINVAL;
+		}
+	}
+
+	if (err == EOK) {
+		hal_memset(q, 0, sizeof(*q));
+		/* A server that leaves an attribute untouched must not report it as 0 */
+		q->attrs.type.err = -ENOSYS;
+		q->attrs.size.err = -ENOSYS;
+		q->attrs.mTime.err = -ENOSYS;
+		q->attrs.cTime.err = -ENOSYS;
+
+		q->msg.type = mtGetAttrAll;
+		hal_memcpy(&q->msg.oid, &oid, sizeof(oid));
+		q->msg.o.data = &q->attrs;
+		q->msg.o.size = sizeof(q->attrs);
+
+		err = proc_send(oid.port, &q->msg);
+		if (err == EOK) {
+			err = q->msg.o.err;
+		}
+		if ((err == EOK) && (q->attrs.type.err == EOK) && (q->attrs.type.val == OBJECT_OTFILE) &&
+				(q->attrs.size.err == EOK) && (q->attrs.size.val >= 0) &&
+				(q->attrs.mTime.err == EOK) && (q->attrs.cTime.err == EOK)) {
+			a->valid = 1;
+			a->size = (off_t)q->attrs.size.val;
+			a->mtime = q->attrs.mTime.val;
+			a->ctime = q->attrs.cTime.val;
+		}
+	}
+
+	vm_kfree(q);
+}
+
+
+/* Takes a cached object off the LRU, to be used again. Called with object_common.lock held. */
+static void _object_uncache(vm_object_t *o)
+{
+	LIST_REMOVE(&object_common.lru, o);
+	object_common.cached -= o->resident;
+	o->flags &= (u8)~VM_OBJ_CACHED;
+	o->next = NULL;
+	o->prev = NULL;
+}
+
+
+/* Takes a cached object off the LRU and out of the tree, to be freed. Called with
+ * object_common.lock held. */
+static void _object_evict(vm_object_t *o)
+{
+	_object_uncache(o);
+	lib_rbRemove(&object_common.tree, &o->linkage);
+}
+
+
+/* Frees the objects of a list made by _object_trim() */
+static void object_freeList(vm_object_t *o)
+{
+	vm_object_t *next;
+
+	while (o != NULL) {
+		next = o->next;
+		object_freePages(o);
+		vm_kfree(o);
+		o = next;
+	}
+}
+
+
+/* Evicts objects until the cache is within its bounds; returns them as a list to free once the
+ * lock is dropped. Called with object_common.lock held. */
+static vm_object_t *_object_trim(void)
+{
+	vm_object_t *o, *list = NULL;
+	size_t freesz, need = 0, got = 0;
+
+	/* Free memory moves only when the list is freed: evict what lifts it to the low watermark */
+	vm_pageGetStats(&freesz);
+	freesz /= SIZE_PAGE;
+	if (freesz < object_common.lowWater) {
+		need = object_common.lowWater - freesz;
+	}
+
+	while ((object_common.lru != NULL) && ((object_common.cached > object_common.cacheMax) || (got < need))) {
+		o = object_common.lru;
+		_object_evict(o);
+		got += o->resident;
+		o->next = list;
+		list = o;
+	}
+
+	return list;
+}
+
+
+/* Keeps an object whose last reference was dropped. Returns nonzero if it is now cached. Called
+ * with object_common.lock held. */
+static int _object_cachePut(vm_object_t *o)
+{
+	size_t i, n = 0;
+
+	if ((o->flags & (VM_OBJ_CACHEABLE | VM_OBJ_STALE | VM_OBJ_UNLINKED)) != VM_OBJ_CACHEABLE) {
+		return 0;
+	}
+
+	for (i = 0; i < round_page(o->size) / SIZE_PAGE; ++i) {
+		if (o->pages[i] != NULL) {
+			n++;
+		}
+	}
+
+	if ((n == 0U) || (n > object_common.cacheMax)) {
+		return 0;
+	}
+
+	o->resident = n;
+	o->flags |= (u8)VM_OBJ_CACHED;
+	LIST_ADD(&object_common.lru, o);
+	object_common.cached += n;
+
+	return 1;
+}
+
+
+/* Frees the headers of objects evicted by vm_objectReclaim(). Not called under any lock. */
+static void object_reap(void)
+{
+	vm_object_t *o, *next;
+
+	if (object_common.reaped == NULL) {
+		return;
+	}
 
 	(void)proc_lockSet(&object_common.lock);
-	*o = lib_treeof(vm_object_t, linkage, lib_rbFind(&object_common.tree, &t.linkage));
+	o = object_common.reaped;
+	object_common.reaped = NULL;
+	(void)proc_lockClear(&object_common.lock);
 
-	if (*o == NULL) {
-		/* Take off the lock to avoid a deadlock in vm_kmalloc */
-		(void)proc_lockClear(&object_common.lock);
+	while (o != NULL) {
+		next = o->next;
+		vm_kfree(o);
+		o = next;
+	}
+}
 
-		sz = proc_size(oid);
-		if (sz < 0) {
-			err = (int)sz;
-		}
-		/* parasoft-suppress-next-line MISRAC2012-RULE_14_3 "size_t depends on architecture" */
-		else if ((sizeof(off_t) <= sizeof(size_t)) || (sz <= (off_t)((size_t)-1))) {
-			n = round_page((size_t)sz) / SIZE_PAGE;
-			no = (vm_object_t *)vm_kmalloc(sizeof(vm_object_t) + n * sizeof(page_t *));
-		}
-		else {
-			/* No action required */
-		}
+#endif /* VM_OBJCACHE */
 
 
-		(void)proc_lockSet(&object_common.lock);
-		/* Check again, somebody could've added the object in the meantime */
-		*o = lib_treeof(vm_object_t, linkage, lib_rbFind(&object_common.tree, &t.linkage));
-		if (*o == NULL) {
-			if (no == NULL) {
+int vm_objectGet(vm_object_t **o, oid_t oid)
+{
+	vm_object_t *no = NULL;
+	object_attrs_t a;
+	size_t i, n = 0;
+	off_t sz = 0;
+	int err = -ENOMEM;
+#if VM_OBJCACHE
+	vm_object_t *old = NULL; /* stale cached objects to free, via next */
+	int asked = 0;
+#endif
+
+	hal_memset(&a, 0, sizeof(a));
+
+#if VM_OBJCACHE
+	object_reap();
+#endif
+
+	(void)proc_lockSet(&object_common.lock);
+
+	for (;;) {
+		*o = _object_find(oid);
+
+#if VM_OBJCACHE
+		if ((*o != NULL) && (((*o)->flags & VM_OBJ_CACHED) != 0U)) {
+			if (asked == 0) {
+				/* Ask the server whether the cached pages are still the file's, then look again:
+				 * meanwhile the object may have been evicted, reused or found stale */
 				(void)proc_lockClear(&object_common.lock);
-				return err;
+				object_attrs(oid, 0, &a);
+				asked = 1;
+				(void)proc_lockSet(&object_common.lock);
+				continue;
 			}
+
+			if ((a.valid != 0) && (a.size == (off_t)(*o)->size) && (a.mtime == (*o)->mtime) && (a.ctime == (*o)->ctime)) {
+				/* Still the file it was cached from: reuse it */
+				_object_uncache(*o);
+				break;
+			}
+
+			/* The file changed (or the server could not say): start afresh */
+			_object_evict(*o);
+			(*o)->next = old;
+			old = *o;
+			*o = NULL;
+		}
+#endif
+
+		if (*o != NULL) {
+			break;
+		}
+
+		if (no != NULL) {
 			*o = no;
 			no = NULL;
 			hal_memcpy(&(*o)->oid, &oid, sizeof(oid));
@@ -122,19 +426,66 @@ int vm_objectGet(vm_object_t **o, oid_t oid)
 			(*o)->parent = NULL;
 			(*o)->next = NULL;
 			(*o)->prev = NULL;
+			(*o)->mtime = a.mtime;
+			(*o)->ctime = a.ctime;
+			(*o)->resident = 0;
 
 			for (i = 0; i < n; ++i) {
 				(*o)->pages[i] = NULL;
 			}
 
+#if VM_OBJCACHE
+			if ((a.valid != 0) && (a.size == sz) && (oid.port != 0U)) {
+				(*o)->flags = (u8)VM_OBJ_CACHEABLE;
+			}
+#endif
+
 			(void)lib_rbInsert(&object_common.tree, &(*o)->linkage);
+			break;
 		}
+
+		/* Take off the lock to avoid a deadlock in vm_kmalloc */
+		(void)proc_lockClear(&object_common.lock);
+
+#if VM_OBJCACHE
+		if (a.valid == 0) {
+			object_attrs(oid, 1, &a);
+			asked = 1;
+		}
+		sz = (a.valid != 0) ? a.size : proc_size(oid);
+#else
+		sz = proc_size(oid);
+#endif
+		if (sz < 0) {
+			err = (int)sz;
+		}
+		/* parasoft-suppress-next-line MISRAC2012-RULE_14_3 "size_t depends on architecture" */
+		else if ((sizeof(off_t) <= sizeof(size_t)) || (sz <= (off_t)((size_t)-1))) {
+			n = round_page((size_t)sz) / SIZE_PAGE;
+			no = (vm_object_t *)vm_kmalloc(sizeof(vm_object_t) + n * sizeof(page_t *));
+		}
+		else {
+			/* No action required */
+		}
+
+		if (no == NULL) {
+#if VM_OBJCACHE
+			object_freeList(old);
+#endif
+			return err;
+		}
+
+		/* Check again, somebody could've added the object in the meantime */
+		(void)proc_lockSet(&object_common.lock);
 	}
 
 	(*o)->refs++;
 	(void)proc_lockClear(&object_common.lock);
 
-	/* Did we allocate an object we didn't need in the end? */
+	/* Stale cached objects, and one we allocated and didn't need in the end */
+#if VM_OBJCACHE
+	object_freeList(old);
+#endif
 	if (no != NULL) {
 		vm_kfree(no);
 	}
@@ -157,7 +508,9 @@ vm_object_t *vm_objectRef(vm_object_t *o)
 
 int vm_objectPut(vm_object_t *o)
 {
-	unsigned int i;
+#if VM_OBJCACHE
+	vm_object_t *evicted;
+#endif
 
 	if ((o == NULL) || (o == VM_OBJ_PHYSMEM)) {
 		return EOK;
@@ -179,7 +532,19 @@ int vm_objectPut(vm_object_t *o)
 		}
 	}
 	else if (object_isContiguous(o) == 0) {
-		lib_rbRemove(&object_common.tree, &o->linkage);
+#if VM_OBJCACHE
+		if (_object_cachePut(o) != 0) {
+			/* Kept with its pages; make room for it if needed */
+			evicted = _object_trim();
+			(void)proc_lockClear(&object_common.lock);
+			object_freeList(evicted);
+			object_reap();
+			return EOK;
+		}
+#endif
+		if ((o->flags & VM_OBJ_UNLINKED) == 0U) {
+			lib_rbRemove(&object_common.tree, &o->linkage);
+		}
 	}
 	else {
 		/* No action required */
@@ -195,16 +560,127 @@ int vm_objectPut(vm_object_t *o)
 		vm_pageFree(o->pages[0]);
 	}
 	else {
-		for (i = 0; i < round_page(o->size) / SIZE_PAGE; ++i) {
-			if (o->pages[i] != NULL) {
-				vm_pageFree(o->pages[i]);
-			}
-		}
+		object_freePages(o);
 	}
 
 	vm_kfree(o);
 
 	return EOK;
+}
+
+
+void vm_objectWritable(vm_object_t *o)
+{
+#if VM_OBJCACHE
+	/* VM_OBJ_CACHEABLE is set before an object enters the tree and only ever cleared after */
+	if ((o != NULL) && (o != VM_OBJ_PHYSMEM) && ((o->flags & VM_OBJ_CACHEABLE) != 0U)) {
+		(void)proc_lockSet(&object_common.lock);
+		o->flags &= (u8)~VM_OBJ_CACHEABLE;
+		(void)proc_lockClear(&object_common.lock);
+	}
+#else
+	(void)o;
+#endif
+}
+
+
+void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
+{
+#if VM_OBJCACHE
+	vm_object_t *o, *victim = NULL;
+	const oid_t *target;
+
+	switch (type) {
+		case mtWrite:
+		case mtTruncate:
+		case mtSetAttr:
+		case mtDestroy:
+			target = oid;
+			break;
+
+		case mtCreate:
+			target = res;
+			break;
+
+		default:
+			return;
+	}
+
+	/* Nothing cached and nothing ever was: no lock on the write path */
+	if ((target == NULL) || (object_common.cacheMax == 0U)) {
+		return;
+	}
+
+	(void)proc_lockSet(&object_common.lock);
+	o = _object_find(*target);
+	if ((o != NULL) && ((o->flags & VM_OBJ_EXPORT) == 0U) && (o != object_common.kernel)) {
+		if ((o->flags & VM_OBJ_CACHED) != 0U) {
+			_object_evict(o);
+			victim = o;
+		}
+		else {
+			o->flags |= (u8)VM_OBJ_STALE;
+			if (type == mtCreate) {
+				/* The id names a new file now: the next mapping of it must not get these pages */
+				lib_rbRemove(&object_common.tree, &o->linkage);
+				o->flags |= (u8)VM_OBJ_UNLINKED;
+			}
+		}
+	}
+	(void)proc_lockClear(&object_common.lock);
+
+	if (victim != NULL) {
+		object_freePages(victim);
+		vm_kfree(victim);
+	}
+#else
+	(void)type;
+	(void)oid;
+	(void)res;
+#endif
+}
+
+
+int vm_objectReclaim(void)
+{
+#if VM_OBJCACHE
+	vm_object_t *o;
+
+	/* Nothing cached (also before _object_init()); and never under our own lock, which no
+	 * allocation is made under -- this is a guard, not a path */
+	if ((object_common.cached == 0U) || (object_common.lock.owner == proc_current())) {
+		return 0;
+	}
+
+	(void)proc_lockSet(&object_common.lock);
+	o = object_common.lru;
+	if (o != NULL) {
+		_object_evict(o);
+	}
+	(void)proc_lockClear(&object_common.lock);
+
+	if (o == NULL) {
+		return 0;
+	}
+
+	object_freePages(o);
+
+	/* The caller may hold kmalloc_common.lock: leave the header to object_reap() */
+	(void)proc_lockSet(&object_common.lock);
+	o->next = object_common.reaped;
+	object_common.reaped = o;
+	(void)proc_lockClear(&object_common.lock);
+
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+
+size_t vm_objectCachedPages(void)
+{
+	return object_common.cached;
 }
 
 
@@ -573,6 +1049,9 @@ vm_object_t *vm_objectContiguous(size_t size)
 int vm_objectExport(vm_map_t *map, oid_t oid, void *vaddr, size_t size)
 {
 	vm_object_t *o, *parent;
+#if VM_OBJCACHE
+	vm_object_t *stale;
+#endif
 	vm_flags_t flags;
 	u64 offs;
 	size_t i, n;
@@ -621,9 +1100,22 @@ int vm_objectExport(vm_map_t *map, oid_t oid, void *vaddr, size_t size)
 	}
 
 	(void)proc_lockSet(&object_common.lock);
+#if VM_OBJCACHE
+	/* An unreferenced file object under this oid would have been freed without the cache */
+	stale = _object_find(oid);
+	if ((stale != NULL) && ((stale->flags & VM_OBJ_CACHED) != 0U)) {
+		_object_evict(stale);
+	}
+	else {
+		stale = NULL;
+	}
+#endif
 	/* -EEXIST also covers a file object that an early mmap() created under this oid */
 	if (lib_rbInsert(&object_common.tree, &o->linkage) < 0) {
 		(void)proc_lockClear(&object_common.lock);
+#if VM_OBJCACHE
+		object_freeList(stale);
+#endif
 		(void)vm_objectPut(parent);
 		vm_kfree(o);
 		return -EEXIST;
@@ -631,6 +1123,10 @@ int vm_objectExport(vm_map_t *map, oid_t oid, void *vaddr, size_t size)
 	LIST_ADD(&object_common.exports, o);
 	parent->flags |= (u8)VM_OBJ_SHARED;
 	(void)proc_lockClear(&object_common.lock);
+
+#if VM_OBJCACHE
+	object_freeList(stale);
+#endif
 
 	return EOK;
 }
@@ -690,6 +1186,37 @@ void vm_objectUnexportPort(u32 port)
 		 * stay with whoever still maps them. */
 		lib_printf("vm: port %u released with %u memory export(s) still published, withdrawn\n", port, n);
 	}
+
+#if VM_OBJCACHE
+	{
+		vm_object_t *list = NULL;
+
+		/* Forget the files of the server that owned the port: a new port with the same id
+		 * must not find them */
+		(void)proc_lockSet(&object_common.lock);
+		for (;;) {
+			o = object_common.lru;
+			if (o != NULL) {
+				while (o->oid.port != port) {
+					o = o->next;
+					if (o == object_common.lru) {
+						o = NULL;
+						break;
+					}
+				}
+			}
+			if (o == NULL) {
+				break;
+			}
+			_object_evict(o);
+			o->next = list;
+			list = o;
+		}
+		(void)proc_lockClear(&object_common.lock);
+
+		object_freeList(list);
+	}
+#endif
 }
 
 
@@ -739,6 +1266,17 @@ int _object_init(vm_map_t *kmap, vm_object_t *kernel)
 	(void)lib_rbInsert(&object_common.tree, &kernel->linkage);
 
 	(void)vm_objectGet(&o, kernel->oid);
+
+#if VM_OBJCACHE
+	{
+		size_t freesz;
+
+		vm_pageGetStats(&freesz);
+		object_common.cacheMax = (freesz / SIZE_PAGE) / 100U * VM_OBJCACHE_PERCENT;
+		object_common.lowWater = (freesz / SIZE_PAGE) / VM_OBJCACHE_LOWWATER;
+		lib_printf("vm: Caching unreferenced file objects, up to %zu KB\n", object_common.cacheMax * (SIZE_PAGE / 1024U));
+	}
+#endif
 
 	return EOK;
 }

@@ -32,8 +32,14 @@ typedef struct _vm_object_t {
 
 	/* Memory export (vm_objectExport); NULL for any other object */
 	struct _vm_object_t *parent;  /* object owning the pages of an export window */
-	struct _vm_object_t *next;    /* list of published exports */
+	struct _vm_object_t *next;    /* list of published exports (export window), or the cache LRU (file object) */
 	struct _vm_object_t *prev;
+
+	/* File object cache (VM_OBJCACHE): what the server said about the file when this object
+	 * was created, compared again before an unreferenced object is reused */
+	long long mtime;
+	long long ctime;
+	size_t resident; /* pages held while cached */
 
 	page_t *pages[];
 } vm_object_t;
@@ -46,6 +52,13 @@ typedef struct _vm_object_t {
 #define VM_OBJ_EXPORT    (1U << 0) /* export window: pages borrowed from parent, memtype enforced */
 #define VM_OBJ_PUBLISHED (1U << 1) /* export window reachable by oid (in the object tree) */
 #define VM_OBJ_SHARED    (1U << 2) /* pages are exported: mappings are shared, not COW, across fork */
+
+/* vm_object_t.flags of a file object, see "File object cache" in object.c */
+#define VM_OBJ_CACHEABLE  (1U << 3) /* a regular file with recorded mtime/ctime, pages never written in memory */
+#define VM_OBJ_CACHED     (1U << 4) /* unreferenced, on the cache LRU */
+#define VM_OBJ_STALE      (1U << 5) /* the file changed after pages were read: never cached, never reused */
+#define VM_OBJ_VALIDATING (1U << 6) /* taken from the cache, not yet checked against the server */
+#define VM_OBJ_UNLINKED   (1U << 7) /* removed from the tree while still referenced (it was stale) */
 
 
 vm_object_t *vm_objectRef(vm_object_t *o);
@@ -91,6 +104,29 @@ int vm_objectMapCheck(const vm_object_t *o, u64 offs, size_t size, vm_flags_t fl
 
 /* Returns nonzero if mappings of o must stay shared across fork. */
 int vm_objectShared(const vm_object_t *o);
+
+
+/*
+ * File object cache. An object whose last reference is dropped keeps its pages, so mapping the
+ * same file again finds them in memory. All three are no-ops when the cache is compiled out.
+ */
+
+/* A mapping of o can write its pages in memory: never cache o. Called with the map lock held. */
+void vm_objectWritable(vm_object_t *o);
+
+
+/* The kernel passed a message of type to a server about oid (the file changed, or the id now
+ * names another file): forget what is cached about oid. res is the response's oid of mtCreate. */
+void vm_objectNotify(int type, const oid_t *oid, const oid_t *res);
+
+
+/* Frees the pages of the least recently used cached object. Returns nonzero if it freed anything.
+ * Called by the page allocator when an allocation fails; never allocates or frees kernel heap. */
+int vm_objectReclaim(void);
+
+
+/* Number of pages held by unreferenced cached objects (a hint, read without the lock) */
+size_t vm_objectCachedPages(void);
 
 
 int _object_init(struct _vm_map_t *kmap, vm_object_t *kernel);
