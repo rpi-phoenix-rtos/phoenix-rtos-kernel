@@ -285,6 +285,11 @@ static void *_map_map(vm_map_t *map, void *vaddr, process_t *proc, size_t size, 
 		return NULL;
 	}
 
+	/* Without MAP_NEEDSCOPY a writable mapping writes the object's own pages */
+	if (((prot & PROT_WRITE) != 0U) && ((flags & MAP_NEEDSCOPY) == 0U)) {
+		vm_objectWritable(o);
+	}
+
 	rmerge = (next != NULL && v + size == next->vaddr && next->object == o && next->flags == flags && next->prot == prot && next->protOrig == prot) ? 1U : 0U;
 	lmerge = (prev != NULL && v == prev->vaddr + prev->size && prev->object == o && prev->flags == flags && prev->prot == prot && prev->protOrig == prot) ? 1U : 0U;
 
@@ -1374,6 +1379,12 @@ int vm_mprotect(vm_map_t *map, void *vaddr, size_t len, vm_prot_t prot)
 		}
 
 		e->prot = prot;
+
+		/* A resident page is entered writable below, and it may be the object's own even in an
+		 * entry that has an amap (a page only read so far) */
+		if ((prot & PROT_WRITE) != 0U) {
+			vm_objectWritable(e->object);
+		}
 
 		attr = (vm_protToAttr(e->prot) | vm_flagsToAttr(e->flags));
 		needscopyNonLazy = 0;

@@ -18,6 +18,7 @@
 #include "include/errno.h"
 #include "include/mman.h"
 #include "page.h"
+#include "object.h"
 #include "hal/types.h"
 
 
@@ -92,9 +93,18 @@ page_t *vm_pageAlloc(size_t size, vm_flags_t flags)
 {
 	page_t *p;
 
-	(void)proc_lockSet(&pages_info.lock);
-	p = _page_alloc(size, flags);
-	(void)proc_lockClear(&pages_info.lock);
+	/* Pages of unreferenced file objects are free memory to everybody else: give them up
+	 * (vm_objectReclaim() frees one object's pages per call) until the allocation succeeds */
+	for (;;) {
+		(void)proc_lockSet(&pages_info.lock);
+		p = _page_alloc(size, flags);
+		(void)proc_lockClear(&pages_info.lock);
+
+		if ((p != NULL) || (size > pages_info.totalsz) || (vm_objectReclaim() == 0)) {
+			break;
+		}
+	}
+
 	return p;
 }
 
@@ -340,9 +350,17 @@ int page_map(pmap_t *pmap, void *vaddr, addr_t pa, vm_attr_t attr)
 {
 	int err;
 
-	(void)proc_lockSet(&pages_info.lock);
-	err = _page_map(pmap, vaddr, pa, attr);
-	(void)proc_lockClear(&pages_info.lock);
+	/* A page table is allocated under pages_info.lock: reclaim cached file pages with it
+	 * dropped (see vm_pageAlloc()). A retry continues where pmap_enter() stopped. */
+	for (;;) {
+		(void)proc_lockSet(&pages_info.lock);
+		err = _page_map(pmap, vaddr, pa, attr);
+		(void)proc_lockClear(&pages_info.lock);
+
+		if ((err != -ENOMEM) || (vm_objectReclaim() == 0)) {
+			break;
+		}
+	}
 
 	return err;
 }
@@ -383,6 +401,7 @@ void vm_pageinfo(meminfo_t *info)
 	int size = 0;
 	int mapsz = info->page.mapsz;
 	pageinfo_t *map = info->page.map;
+	size_t cached = vm_objectCachedPages() * SIZE_PAGE;
 
 	if (mapsz != -1) {
 		/* mapsz * sizeof(map[0]) would overflow */
@@ -397,8 +416,10 @@ void vm_pageinfo(meminfo_t *info)
 
 	(void)proc_lockSet(&pages_info.lock);
 
-	info->page.alloc = (unsigned int)pages_info.allocsz;
-	info->page.free = (unsigned int)(pages_info.totalsz - pages_info.allocsz);
+	/* Cached pages of unreferenced file objects are given up on demand: report them as free */
+	cached = min(cached, pages_info.allocsz);
+	info->page.alloc = (unsigned int)(pages_info.allocsz - cached);
+	info->page.free = (unsigned int)(pages_info.totalsz - pages_info.allocsz + cached);
 	info->page.boot = (unsigned int)pages_info.bootsz;
 	info->page.sz = (unsigned int)sizeof(page_t);
 

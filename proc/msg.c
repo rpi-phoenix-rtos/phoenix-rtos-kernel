@@ -733,6 +733,11 @@ static int proc_sendEx(u32 port, msg_t *msg, int interruptible)
 	hal_spinlockClear(&p->spinlock, &sc);
 	port_put(p, 0);
 
+	/* A file written, truncated or changed, or a new file under an id that may have named another
+	 * one: the pages the vm keeps of it are stale. Whatever the outcome -- a server can change a
+	 * file and still fail the request. */
+	vm_objectNotify(kmsg.msg.type, &kmsg.msg.oid, (state == msg_responded) ? &kmsg.msg.o.create.oid : NULL);
+
 	if (err == EOK) {
 		hal_memcpy(msg->o.raw, kmsg.msg.o.raw, sizeof(msg->o.raw));
 		msg->o.err = kmsg.msg.o.err;

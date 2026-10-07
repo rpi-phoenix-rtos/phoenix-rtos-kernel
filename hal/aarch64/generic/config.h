@@ -35,6 +35,12 @@
 #define NUM_CPUS        4U
 #define SIZE_INTERRUPTS 256U
 
+/* Keep the pages of unreferenced file objects for the next mapping of the file ("File object
+ * cache" in vm/object.c). A board can opt out with -DVM_OBJCACHE=0. */
+#ifndef VM_OBJCACHE
+#define VM_OBJCACHE 1
+#endif
+
 #ifndef PL011_TTY_BASE
 #define PL011_TTY_BASE 0x09000000u
 #endif
