@@ -277,8 +277,11 @@ static void _page_initSizes(void)
 		}
 
 		/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "idx is limited to min(SIZE_VM_SIZES - 1U, bits in p-> addr")*/
+		/* Free pages that follow without a hole in physical memory (the page_t of the first page
+		 * after a hole is the next one in pages_info.pages) */
 		for (k = 0U; (k < (((u64)1 << idx) / SIZE_PAGE) - 1U) && (i + k < ((pages_info.totalsz / SIZE_PAGE) - 1U)); k++) {
-			if ((pages_info.pages[i + k + 1U].flags & PAGE_FREE) == 0U) {
+			if (((pages_info.pages[i + k + 1U].flags & PAGE_FREE) == 0U) ||
+					(pages_info.pages[i + k + 1U].addr != (p->addr + (k + 1U) * SIZE_PAGE))) {
 				break;
 			}
 		}
