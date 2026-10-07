@@ -19,7 +19,7 @@
 
 
 /*
- * A descriptor served by another process (a device, a pipe, an inet socket)
+ * A descriptor served by another process (a device, a FIFO, an inet socket)
  * reports its readiness only when asked: posix_poll() sends it an atPollStatus
  * query. Without a way back, a poller whose query found nothing ready can only
  * sleep and ask again, which is what the POLL_INTERVAL loop does.
@@ -34,6 +34,10 @@
  * its bit set, BEFORE the query is sent, and it sleeps on a queue of its own.
  * A notify that arrives while the poller is still busy therefore leaves
  * wakeupPending in that queue, and the sleep that follows returns at once.
+ *
+ * An anonymous pipe lives in the kernel but uses the same mechanism: its oid
+ * names no server, and its channel calls pollwake_notify() on every state
+ * change (posix/pipe.h).
  *
  * Servers that never call pollNotify() are not affected: the poller still
  * sleeps at most POLL_INTERVAL and asks again, exactly as before. A hash
