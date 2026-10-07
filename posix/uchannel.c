@@ -48,6 +48,22 @@ void uchannel_pollNotify(void)
 }
 
 
+/*
+ * A pipe's channel wakes only the poll() sets that watch its oid: a pipe is
+ * not an AF_UNIX socket, and waking every AF_UNIX poller in the system on each
+ * byte of a GLib wake-up pipe would be a thundering herd.
+ */
+static void _uchannel_notify(const uchannel_t *ch)
+{
+	if (ch->pollTargeted != 0U) {
+		pollwake_notify(&ch->pollOid);
+	}
+	else {
+		pollwake_notifyUnix();
+	}
+}
+
+
 size_t uchannel_roundSize(size_t size)
 {
 	if ((size != 0U) && ((size & (size - 1U)) != 0U)) {
@@ -82,11 +98,31 @@ uchannel_t *uchannel_alloc(size_t size, int framed)
 
 	ch->refs = 1;
 	ch->framed = (framed != 0) ? 1U : 0U;
+	ch->pollTargeted = 0;
+	ch->atomic = 0;
+	ch->maxSize = 0; /* a socket's ring never grows by itself */
+	hal_memset(&ch->pollOid, 0, sizeof(ch->pollOid));
 	ch->flags = 0;
 	ch->fdpacks = NULL;
 	ch->rxwait = NULL;
 	ch->txwait = NULL;
 	_cbuffer_init(&ch->buffer, data, size);
+
+	return ch;
+}
+
+
+uchannel_t *uchannel_allocStream(size_t size, size_t maxSize, size_t atomic, const oid_t *pollOid)
+{
+	uchannel_t *ch = uchannel_alloc(size, 0);
+
+	if (ch != NULL) {
+		/* not shared yet, so no lock is needed */
+		ch->maxSize = max(size, maxSize);
+		ch->atomic = atomic;
+		hal_memcpy(&ch->pollOid, pollOid, sizeof(ch->pollOid));
+		ch->pollTargeted = 1;
+	}
 
 	return ch;
 }
@@ -131,11 +167,67 @@ void uchannel_put(uchannel_t *ch)
 }
 
 
+/*
+ * Grows the ring of a stream channel so that `want` more bytes fit, up to
+ * maxSize. Called and returns with the lock held, but drops it around the
+ * allocation and the free. Returns EOK when the ring is now bigger than
+ * `oldSize` (grown here or by a concurrent writer), so the caller re-checks
+ * everything it has seen, or -ENOMEM.
+ */
+static int _uchannel_grow(uchannel_t *ch, size_t oldSize, size_t want)
+{
+	cbuffer_t old;
+	size_t size, avail, first;
+	void *data, *unused;
+
+	size = uchannel_roundSize(min(ch->maxSize, _cbuffer_avail(&ch->buffer) + want));
+	size = max(size, oldSize * 2U);
+	size = min(size, ch->maxSize);
+
+	(void)proc_lockClear(&ch->lock);
+	data = vm_kmalloc(size);
+	(void)proc_lockSet(&ch->lock);
+
+	if (ch->buffer.sz > oldSize) {
+		/* a concurrent writer has grown it meanwhile */
+		unused = data;
+	}
+	else if (data == NULL) {
+		return -ENOMEM;
+	}
+	else {
+		/* the ring never shrinks, so everything queued fits the new one */
+		avail = _cbuffer_avail(&ch->buffer);
+		hal_memcpy(&old, &ch->buffer, sizeof(old));
+		_cbuffer_init(&ch->buffer, data, size);
+		if (avail > 0U) {
+			first = min(avail, old.sz - old.r);
+			(void)_cbuffer_write(&ch->buffer, (const char *)old.data + old.r, first);
+			if (avail > first) {
+				(void)_cbuffer_write(&ch->buffer, old.data, avail - first);
+			}
+		}
+		unused = old.data;
+	}
+
+	if (unused != NULL) {
+		(void)proc_lockClear(&ch->lock);
+		vm_kfree(unused);
+		(void)proc_lockSet(&ch->lock);
+	}
+
+	return EOK;
+}
+
+
 ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, fdpack_t *fdpack)
 {
 	ssize_t ret = 0;
-	size_t done = 0, chunk, hdr;
-	int err;
+	size_t done = 0, chunk, hdr, room, need;
+	int err, whole;
+
+	/* an atomic write waits until all of it fits, and only then writes it */
+	whole = (((flags & UCHANNEL_OP_ATOMIC) != 0U) && (ch->framed == 0U) && (len <= ch->atomic)) ? 1 : 0;
 
 	(void)proc_lockSet(&ch->lock);
 
@@ -152,7 +244,21 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 		}
 
 		if (ch->framed == 0U) {
-			chunk = _cbuffer_write(&ch->buffer, (const char *)buf + done, len - done);
+			room = _cbuffer_free(&ch->buffer);
+			need = len - done;
+			if ((room < need) && (ch->buffer.sz < ch->maxSize)) {
+				/* grow before waiting; with the ring at maxSize, wait as usual */
+				if (_uchannel_grow(ch, ch->buffer.sz, need) == EOK) {
+					continue;
+				}
+			}
+
+			if ((whole != 0) && (room < len)) {
+				chunk = 0;
+			}
+			else {
+				chunk = _cbuffer_write(&ch->buffer, (const char *)buf + done, need);
+			}
 			if (chunk > 0U) {
 				if ((done == 0U) && (fdpack != NULL)) {
 					/* the descriptors travel with the first byte of the write */
@@ -160,7 +266,7 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 				}
 				done += chunk;
 				(void)proc_threadBroadcast(&ch->rxwait);
-				uchannel_pollNotify();
+				_uchannel_notify(ch);
 			}
 
 			if (done == len) {
@@ -182,7 +288,7 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 			(void)_cbuffer_write(&ch->buffer, &hdr, sizeof(hdr));
 			(void)_cbuffer_write(&ch->buffer, buf, len);
 			(void)proc_threadBroadcast(&ch->rxwait);
-			uchannel_pollNotify();
+			_uchannel_notify(ch);
 			ret = (ssize_t)len;
 			break;
 		}
@@ -305,7 +411,7 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 					/* No action */
 				}
 				(void)proc_threadBroadcast(&ch->txwait);
-				uchannel_pollNotify();
+				_uchannel_notify(ch);
 			}
 			break;
 		}
@@ -414,7 +520,7 @@ void uchannel_shutWr(uchannel_t *ch)
 	/* readers see EOS, writers (of a half-closed local end) EPIPE */
 	(void)proc_threadBroadcast(&ch->rxwait);
 	(void)proc_threadBroadcast(&ch->txwait);
-	uchannel_pollNotify();
+	_uchannel_notify(ch);
 
 	(void)proc_lockClear(&ch->lock);
 }
@@ -428,7 +534,7 @@ void uchannel_shutRd(uchannel_t *ch)
 
 	(void)proc_threadBroadcast(&ch->txwait);
 	(void)proc_threadBroadcast(&ch->rxwait);
-	uchannel_pollNotify();
+	_uchannel_notify(ch);
 
 	(void)proc_lockClear(&ch->lock);
 }
@@ -448,6 +554,10 @@ unsigned int uchannel_pollRd(uchannel_t *ch)
 		events |= UCHANNEL_EV_SHUT;
 	}
 
+	if (_cbuffer_avail(&ch->buffer) > 0U) {
+		events |= UCHANNEL_EV_DATA;
+	}
+
 	(void)proc_lockClear(&ch->lock);
 
 	return events;
@@ -463,8 +573,14 @@ unsigned int uchannel_pollWr(uchannel_t *ch)
 
 	free = _cbuffer_free(&ch->buffer);
 	if (ch->framed == 0U) {
-		/* a byte stream takes a partial write */
-		if (free > 0U) {
+		/*
+		 * A byte stream takes a partial write, but an atomic one needs room for
+		 * all of it: report EV_OUT only when the largest atomic write fits (or
+		 * the ring can still grow to make room), or a writer that waits for
+		 * POLLOUT after EAGAIN would spin. Linux reports a pipe writable with a
+		 * whole page free for the same reason.
+		 */
+		if (((free > 0U) && (free >= ch->atomic)) || (ch->buffer.sz < ch->maxSize)) {
 			events |= UCHANNEL_EV_OUT;
 		}
 	}
@@ -537,7 +653,7 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 	}
 
 	(void)proc_threadBroadcast(&ch->txwait);
-	uchannel_pollNotify();
+	_uchannel_notify(ch);
 
 	(void)proc_lockClear(&ch->lock);
 
@@ -560,4 +676,16 @@ size_t uchannel_size(uchannel_t *ch)
 	(void)proc_lockClear(&ch->lock);
 
 	return size;
+}
+
+
+size_t uchannel_avail(uchannel_t *ch)
+{
+	size_t avail;
+
+	(void)proc_lockSet(&ch->lock);
+	avail = (ch->framed == 0U) ? _cbuffer_avail(&ch->buffer) : 0U;
+	(void)proc_lockClear(&ch->lock);
+
+	return avail;
 }

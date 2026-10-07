@@ -27,10 +27,14 @@
  * differ from US_PORT, which this file uses to mean "AF_UNIX socket". */
 #define POSIX_PORT_CONSTRUCTING 0xfffffffeU
 
+/* The oid.port of an anonymous pipe (posix/pipe.h): the pipe lives in the
+ * kernel, so like USOCKET_PORT this names no server, and a message sent to it fails. */
+#define POSIX_PORT_PIPE 0xfffffffdU
+
 
 enum { ftRegular,
-	ftPipe,
-	ftFifo,
+	ftPipe, /* an anonymous pipe, in the kernel (posix/pipe.h) */
+	ftFifo, /* a named FIFO, served by posixsrv */
 	ftInetSocket,
 	ftUnixSocket,
 	ftTty,
@@ -63,6 +67,7 @@ typedef struct {
 	int type;
 	char *path; /* canonical abs path captured at open (for fchdir); NULL if none */
 	usocket_t *sock; /* ftUnixSocket: reference to the socket */
+	struct _uchannel_t *pipe; /* ftPipe: reference to the pipe's channel */
 } open_file_t;
 
 

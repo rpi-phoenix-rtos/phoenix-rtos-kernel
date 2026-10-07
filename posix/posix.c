@@ -26,6 +26,7 @@
 #include "proc/proc.h"
 
 #include "posix_private.h"
+#include "pipe.h"
 #include "pollwake.h"
 #include "lib/lib.h"
 
@@ -41,7 +42,8 @@
 /*
  * Fallback re-check granularity (us) for poll()/select(). AF_UNIX fds are
  * readiness-woken (every AF_UNIX state change wakes the pollwake waiters of sets
- * that hold one), and so are fds whose server calls pollNotify() when their
+ * that hold one), anonymous pipes too (a pipe's state change wakes the waiters
+ * that watch its oid), and so are fds whose server calls pollNotify() when their
  * readiness changes (posix/pollwake.h). This interval
  * bounds the latency for every other fd whose readiness comes from a remote
  * server over mtGetAttr (network sockets, devices that do not notify). It is
@@ -97,7 +99,7 @@ static struct {
 	char hostname[HOST_NAME_MAX + 1U];
 	flock_t *fileLocks;   /* global list of held record locks */
 	lock_t fileLocksLock; /* guards fileLocks */
-	oid_t pipesrv;        /* /dev/posix/pipes, resolved once (see posix_pipesrv) */
+	oid_t pipesrv;        /* /dev/posix/pipes (named FIFOs), resolved once (see posix_pipesrv) */
 	int pipesrvResolved;
 } posix_common;
 
@@ -108,7 +110,8 @@ static struct {
  * filesystem that owns "/", so a process that IS that filesystem sends the
  * lookup to the port it is itself supposed to be servicing -- and nothing ever
  * answers. That is what wedged the single-threaded nfs-fs through the socket()
- * path (see posix/inet.c); pipe(), mkfifo() and open() had the same shape.
+ * path (see posix/inet.c); mkfifo() and open() had the same shape, and so did
+ * pipe() while anonymous pipes were posixsrv objects.
  *
  * The second is cost: posix_open() resolved this path on EVERY open, and
  * "/dev/posix/pipes" is a devfs node rather than a registered port name, so it
@@ -221,6 +224,10 @@ int posix_fileDeref(open_file_t *f)
 		}
 		else if (f->type == ftUnixSocket) {
 			err = usocket_close(f->sock);
+		}
+		else if (f->type == ftPipe) {
+			pipe_close(f->pipe, f->status);
+			err = EOK;
 		}
 		else {
 			err = proc_close(f->oid, f->status);
@@ -509,7 +516,7 @@ static int posix_truncate(oid_t *oid, off_t length)
 	msg_t msg;
 	int err = -EINVAL;
 
-	if ((oid->port != USOCKET_PORT) && (length >= 0)) {
+	if ((oid->port != USOCKET_PORT) && (oid->port != POSIX_PORT_PIPE) && (length >= 0)) {
 		hal_memset(&msg, 0, sizeof(msg));
 		msg.type = mtTruncate;
 		hal_memcpy(&msg.oid, oid, sizeof(oid_t));
@@ -986,8 +993,9 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 
 			/* TODO: check for other types */
 			if (oid.port == pipesrv.port && proc_size(f->oid) < 0) {
-				/* FIXME: replace this hacky solution with proper device driver recognition */
-				f->type = ftPipe;
+				/* A named FIFO, served by posixsrv (anonymous pipes live in the kernel).
+				 * FIXME: replace this hacky solution with proper device driver recognition */
+				f->type = ftFifo;
 			}
 			else {
 				f->type = ftRegular;
@@ -1168,6 +1176,9 @@ ssize_t posix_read(int fildes, void *buf, size_t nbyte, off_t offset)
 		/* read() of zero bytes returns zero - it must not block */
 		rcnt = (nbyte == 0U) ? 0 : usocket_recvfrom(f->sock, buf, nbyte, 0, NULL, NULL);
 	}
+	else if (f->type == ftPipe) {
+		rcnt = pipe_read(f->pipe, buf, nbyte, status);
+	}
 	else {
 		rcnt = proc_read(f->oid, offs, buf, nbyte, status);
 	}
@@ -1231,6 +1242,9 @@ ssize_t posix_write(int fildes, void *buf, size_t nbyte, off_t offset)
 
 	if (f->type == ftUnixSocket) {
 		rcnt = usocket_sendto(f->sock, buf, nbyte, 0, NULL, 0);
+	}
+	else if (f->type == ftPipe) {
+		rcnt = pipe_write(f->pipe, buf, nbyte, status);
 	}
 	else {
 		rcnt = proc_write(f->oid, offs, buf, nbyte, status);
@@ -1405,96 +1419,82 @@ int posix_pipe(int fildes[2])
 	TRACE("pipe(%p)", fildes);
 
 	process_info_t *p;
-	open_file_t *fi, *fo;
+	open_file_t *rd, *wr;
+	uchannel_t *ch;
 	oid_t oid;
-	oid_t pipesrv;
-	int res;
+	int err, fd[2];
 
 	p = pinfo_find(process_getPid(proc_current()->process));
 	if (p == NULL) {
 		return -1;
 	}
 
-	hal_memset(&oid, 0, sizeof(oid));
-
-	res = posix_pipesrv(&pipesrv);
-	if (res < 0) {
+	err = pipe_create(&ch, &oid);
+	if (err < 0) {
 		pinfo_put(p);
-		return (res == -EINTR) ? res : -ENOSYS;
+		return err;
 	}
 
-	res = proc_create(pipesrv.port, pxBufferedPipe, O_RDONLY | O_WRONLY, oid, pipesrv, NULL, &oid);
-	if (res < 0) {
-		pinfo_put(p);
-		return res;
-	}
-
-	fo = vm_kmalloc(sizeof(open_file_t));
-	if (fo == NULL) {
-		(void)proc_destroy(oid.port, oid);
+	rd = vm_kmalloc(sizeof(open_file_t));
+	wr = vm_kmalloc(sizeof(open_file_t));
+	if ((rd == NULL) || (wr == NULL)) {
+		vm_kfree(rd);
+		vm_kfree(wr);
+		uchannel_put(ch);
 		pinfo_put(p);
 		return -ENOMEM;
 	}
 
-	fi = vm_kmalloc(sizeof(open_file_t));
-	if (fi == NULL) {
-		vm_kfree(fo);
-		(void)proc_destroy(oid.port, oid);
-		pinfo_put(p);
-		return -ENOMEM;
-	}
+	/* vm_kmalloc does not zero, and posix_fileDeref frees f->path when it is
+	 * non-NULL: a recycled block that once held a regular file's (freed) path
+	 * would be freed a second time. Zeroing also leaves no other field --
+	 * including any added to open_file_t later -- uninitialised. */
+	hal_memset(rd, 0, sizeof(open_file_t));
+	hal_memset(wr, 0, sizeof(open_file_t));
 
-	/* vm_kmalloc does not zero, and posix_fileDeref frees f->path
-	 * unconditionally when it is non-NULL. A pipe never sets a path, so
-	 * without this the close of a pipe fd frees whatever the recycled block
-	 * happens to hold in that slot -- and a block last used by a regular file
-	 * holds a real (already freed) path pointer, which is in range and
-	 * block-aligned, so both _vm_zfree guards pass and the block lands on the
-	 * free list twice. posix_newFile already zeroes for this reason; do the
-	 * same here rather than adding two more field assignments, so a field
-	 * added to open_file_t later cannot reintroduce this. Also covers f->ln,
-	 * which was likewise left uninitialised (fstat on a pipe read it). */
-	hal_memset(fo, 0, sizeof(open_file_t));
-	hal_memset(fi, 0, sizeof(open_file_t));
+	/* Both ends carry the pipe's oid: fstat() reports one inode for both, and
+	 * poll() sets watch it. Each end owns one channel reference. */
+	(void)proc_lockInit(&rd->lock, &proc_lockAttrDefault, "posix.file");
+	hal_memcpy(&rd->oid, &oid, sizeof(oid));
+	hal_memcpy(&rd->ln, &oid, sizeof(oid));
+	rd->refs = 1;
+	rd->type = ftPipe;
+	rd->status = O_RDONLY;
+	rd->pipe = ch;
+
+	(void)proc_lockInit(&wr->lock, &proc_lockAttrDefault, "posix.file");
+	hal_memcpy(&wr->oid, &oid, sizeof(oid));
+	hal_memcpy(&wr->ln, &oid, sizeof(oid));
+	wr->refs = 1;
+	wr->type = ftPipe;
+	wr->status = O_WRONLY;
+	wr->pipe = uchannel_ref(ch);
 
 	(void)proc_lockSet(&p->lock);
-	fildes[0] = _posix_allocfd(p, 0);
-	if (fildes[0] >= 0) {
-		fildes[1] = _posix_allocfd(p, fildes[0] + 1);
+	fd[0] = _posix_allocfd(p, 0);
+	fd[1] = (fd[0] >= 0) ? _posix_allocfd(p, fd[0] + 1) : -1;
+	if (fd[1] >= 0) {
+		/* Published only once complete, so no other thread ever sees a half-built end */
+		p->fds[fd[0]].file = rd;
+		p->fds[fd[0]].flags = 0;
+		p->fds[fd[1]].file = wr;
+		p->fds[fd[1]].flags = 0;
 	}
+	(void)proc_lockClear(&p->lock);
 
-	if ((fildes[0] < 0) || (fildes[1] < 0)) {
-		(void)proc_lockClear(&p->lock);
-
-		vm_kfree(fo);
-		vm_kfree(fi);
-
-		(void)proc_destroy(oid.port, oid);
-
+	if (fd[1] < 0) {
+		/* closes both ends, which drops both channel references */
+		(void)posix_fileDeref(rd);
+		(void)posix_fileDeref(wr);
 		pinfo_put(p);
 		return -EMFILE;
 	}
 
-	p->fds[fildes[0]].flags = p->fds[fildes[1]].flags = 0;
-
-	p->fds[fildes[0]].file = fo;
-	(void)proc_lockInit(&fo->lock, &proc_lockAttrDefault, "posix.file");
-	hal_memcpy(&fo->oid, &oid, sizeof(oid));
-	fo->refs = 1;
-	fo->offset = 0;
-	fo->type = ftPipe;
-	fo->status = O_RDONLY;
-
-	p->fds[fildes[1]].file = fi;
-	(void)proc_lockInit(&fi->lock, &proc_lockAttrDefault, "posix.file");
-	hal_memcpy(&fi->oid, &oid, sizeof(oid));
-	fi->refs = 1;
-	fi->offset = 0;
-	fi->type = ftPipe;
-	fi->status = O_WRONLY;
-
-	(void)proc_lockClear(&p->lock);
 	pinfo_put(p);
+
+	fildes[0] = fd[0];
+	fildes[1] = fd[1];
+
 	return 0;
 }
 
@@ -1789,7 +1789,17 @@ int posix_fstat(int fd, struct stat *buf)
 	buf->st_ino = (ino_t)f->ln.id;
 	buf->st_rdev = (dev_t)f->oid.port;
 
-	if (f->type == ftRegular) {
+	if (f->type == ftPipe) {
+		/* As Linux reports a pipe: one inode for both ends (st_dev is the
+		 * POSIX_PORT_PIPE namespace, st_ino the pipe's id), owner-only
+		 * permissions, a single link, no size (FIONREAD tells what is queued),
+		 * and PIPE_ATOMIC as the preferred I/O size. There is no server to ask. */
+		buf->st_rdev = 0;
+		buf->st_mode = S_IFIFO | S_IRUSR | S_IWUSR;
+		buf->st_nlink = 1;
+		buf->st_blksize = (blksize_t)PIPE_ATOMIC;
+	}
+	else if (f->type == ftRegular) {
 		msg.type = mtGetAttrAll;
 		hal_memcpy(&msg.oid, &f->oid, sizeof(oid_t));
 		msg.o.data = &attrs;
@@ -2490,8 +2500,9 @@ static int ioctl_processResponse(const msg_t *msg, unsigned long request, void *
 }
 
 
-/* FIONBIO as libphoenix <sys/ioctl.h> encodes it */
-#define POSIX_FIONBIO _IOC(IOC_IN, 'f', 126, sizeof(unsigned long))
+/* FIONBIO and FIONREAD as libphoenix <sys/ioctl.h> encodes them */
+#define POSIX_FIONBIO  _IOC(IOC_IN, 'f', 126, sizeof(unsigned long))
+#define POSIX_FIONREAD _IOC(IOC_OUT, 'f', 127, sizeof(int))
 
 
 /*
@@ -2517,6 +2528,55 @@ static int posix_usocketIoctl(usocket_t *s, unsigned long request, const void *d
 			else {
 				hal_memcpy(&val, data, sizeof(val));
 				err = usocket_setfl(s, (val != 0) ? O_NONBLOCK : 0U);
+			}
+			break;
+
+		default:
+			err = -ENOTTY;
+			break;
+	}
+
+	return err;
+}
+
+
+/*
+ * A pipe lives in the kernel as well. FIONBIO sets O_NONBLOCK on the open file,
+ * exactly as fcntl(F_SETFL) does; anything that is not a pipe request - TCGETS
+ * from isatty() above all - is ENOTTY, which is what it is.
+ */
+static int posix_pipeIoctl(open_file_t *f, unsigned long request, void *data, size_t size)
+{
+	int err, val;
+
+	switch (request) {
+		case POSIX_FIONBIO:
+			/* an int, as for a socket (see posix_usocketIoctl) */
+			if (size < sizeof(val)) {
+				err = -EINVAL;
+			}
+			else {
+				hal_memcpy(&val, data, sizeof(val));
+				(void)proc_lockSet(&f->lock);
+				if (val != 0) {
+					f->status |= O_NONBLOCK;
+				}
+				else {
+					f->status &= ~O_NONBLOCK;
+				}
+				(void)proc_lockClear(&f->lock);
+				err = EOK;
+			}
+			break;
+
+		case POSIX_FIONREAD:
+			if (size < sizeof(val)) {
+				err = -EINVAL;
+			}
+			else {
+				val = (int)pipe_avail(f->pipe);
+				hal_memcpy(data, &val, sizeof(val));
+				err = EOK;
 			}
 			break;
 
@@ -2574,6 +2634,9 @@ int posix_ioctl(int fildes, unsigned long request, u8 *ustack)
 
 		if ((err == EOK) && (f->type == ftUnixSocket)) {
 			err = posix_usocketIoctl(f->sock, request, data, size);
+		}
+		else if ((err == EOK) && (f->type == ftPipe)) {
+			err = posix_pipeIoctl(f, request, data, size);
 		}
 		else if (err == EOK) {
 			/* Zero before packing: ioctl_pack fills i.raw's header and the
@@ -3257,6 +3320,13 @@ static int do_poll_iteration(struct pollfd *fds, nfds_t nfds, unsigned int block
 			if (f->type == ftUnixSocket) {
 				err = usocket_poll(f->sock, events);
 			}
+			else if (f->type == ftPipe) {
+				/* In the kernel, but woken like a server fd: through its oid */
+				if (w != NULL) {
+					pollwake_watch(w, &f->oid);
+				}
+				err = pipe_poll(f->pipe, f->status, events);
+			}
 			else {
 				hal_memcpy(&msg.oid, &f->oid, sizeof(oid_t));
 				if (w != NULL) {
@@ -3340,6 +3410,7 @@ int posix_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 				++nUnix;
 			}
 			else {
+				/* A pipe counts here too: its channel wakes the waiters of its oid */
 				++nServer;
 				if (pf->type == ftInetSocket) {
 					++nInet;
