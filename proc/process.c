@@ -107,7 +107,7 @@ static void process_destroy(process_t *p)
 	 * address space was destroyed, a parent saw a 3 GB child's memory come back over 2 s more
 	 * on the Pi 4, and could fail to allocate it meanwhile. */
 	if (p->posix != 0U) {
-		posix_died(process_getPid(p), p->exit);
+		posix_died(process_getPid(p), p->exit, p->userTime, p->sysTime);
 	}
 
 	proc_portsDestroy(p, (borrowed == 0U) ? 1 : 0);
@@ -217,6 +217,9 @@ int proc_start(startFn_t start, void *arg, const char *path)
 
 	(void)proc_lockInit(&process->lock, &proc_lockAttrDefault, "process");
 
+	process->cpuTime = 0;
+	process->sysTime = 0;
+	process->userTime = 0;
 	process->ports = NULL;
 
 	process->sigpend = 0;
@@ -1383,6 +1386,7 @@ static void process_exec(thread_t *current, process_spawn_t *spawn)
 	}
 
 	hal_cpuSmpSync();
+	proc_cpuTimeKernelLeave(current);
 	hal_jmp(entry, current->kstack + current->kstacksz, stack, 0, NULL);
 }
 

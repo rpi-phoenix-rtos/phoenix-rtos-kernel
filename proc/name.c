@@ -642,7 +642,7 @@ int proc_read(oid_t oid, off_t offs, void *buf, size_t sz, unsigned int mode)
 }
 
 
-int proc_write(oid_t oid, off_t offs, void *buf, size_t sz, unsigned int mode)
+int proc_write(oid_t oid, off_t *offs, void *buf, size_t sz, unsigned int mode)
 {
 	int err;
 	msg_t *msg = vm_kmalloc(sizeof(msg_t));
@@ -655,7 +655,7 @@ int proc_write(oid_t oid, off_t offs, void *buf, size_t sz, unsigned int mode)
 
 	msg->type = mtWrite;
 	hal_memcpy(&msg->oid, &oid, sizeof(oid_t));
-	msg->i.io.offs = offs;
+	msg->i.io.offs = *offs;
 	msg->i.io.len = 0;
 	msg->i.io.mode = mode;
 
@@ -666,6 +666,10 @@ int proc_write(oid_t oid, off_t offs, void *buf, size_t sz, unsigned int mode)
 
 	if (err >= 0) {
 		err = msg->o.err;
+	}
+
+	if (err >= 0) {
+		*offs = msg->o.io.offs;
 	}
 
 	vm_kfree(msg);

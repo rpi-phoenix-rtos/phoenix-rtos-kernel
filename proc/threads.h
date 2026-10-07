@@ -93,6 +93,7 @@ typedef struct _thread_t {
 	 * (process_vforkThread does `current->kstack = parent->kstack`).  The stack
 	 * must not be freed while the borrower is still running on it. */
 	unsigned int lentKstack : 1;
+	unsigned int inKernel : 1;
 
 	unsigned int sigmask;
 	unsigned int sigpend;
@@ -121,8 +122,15 @@ typedef struct _thread_t {
 	time_t cpuTime;
 	time_t lastTime;
 
-	/* Id of the CPU core this thread last ran on (set by _threads_schedule) */
+	/*
+	 * hint of cpu the thread was last scheduled onto, validated against current under the
+	 * cpuSpinlock
+	 */
 	unsigned int cpuId;
+
+	/* Exact split of cpuTime, charged at every user/kernel boundary */
+	time_t sysTime;
+	time_t userTime;
 
 	cpu_context_t *context;
 	cpu_context_t *longjmpctx;
@@ -190,7 +198,7 @@ int proc_threadsOther(thread_t *t);
 int proc_threadSleep(time_t us);
 
 
-int proc_threadNanoSleep(time_t *sec, long int *nsec, int absolute);
+int proc_threadNanoSleep(time_t *sec, long int *nsec, int clockid, int absolute);
 
 
 int proc_threadWait(thread_t **queue, spinlock_t *spinlock, time_t timeout, spinlock_ctx_t *scp);
@@ -232,6 +240,21 @@ int proc_schedGet(thread_t *t, sched_params_t *params);
 
 
 int proc_schedSet(thread_t *t, int policy, sched_params_t *params);
+
+
+int proc_cpuTime(const thread_t *t, int perThread, time_t *cpuTime, time_t *userTime, time_t *sysTime);
+
+
+void proc_cpuTimeKernelEnter(thread_t *t);
+
+
+void proc_cpuTimeKernelLeave(thread_t *t);
+
+
+void *proc_cpuTimeIntrEnter(cpu_context_t *ctx);
+
+
+void proc_cpuTimeIntrLeave(void *interrupted);
 
 
 thread_t *threads_findThread(int tid);
@@ -279,6 +302,9 @@ int threads_sigsuspend(unsigned int mask);
 
 /* sigaltstack() for the calling thread; ss and oss are kernel copies */
 int threads_sigaltstack(const stack_t *ss, stack_t *oss);
+
+
+int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);
 
 
 void threads_setupUserReturn(void *retval, cpu_context_t *ctx);

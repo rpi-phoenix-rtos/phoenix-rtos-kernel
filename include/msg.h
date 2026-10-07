@@ -139,6 +139,11 @@ typedef struct _msg_t {
 				long long val;
 			} attr;
 
+			/* WRITE */
+			struct {
+				off_t offs;
+			} io;
+
 			/* CREATE */
 			struct {
 				oid_t oid;

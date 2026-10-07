@@ -134,6 +134,7 @@
 	ID(schedInfo) \
 	ID(schedGet) \
 	ID(schedSet) \
+	ID(sys_cpuTime) \
 	ID(sys_fdpath) \
 	ID(memExport) \
 	ID(memUnexport) \

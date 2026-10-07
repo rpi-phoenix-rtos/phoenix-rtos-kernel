@@ -554,6 +554,10 @@ int posix_clone(int ppid)
 	p->refs = 1;
 	p->exec = 0;
 	p->exited = 0;
+	p->userTime = 0;
+	p->sysTime = 0;
+	p->userTimeChildren = 0;
+	p->sysTimeChildren = 0;
 	p->ctty = 0; /* A child inherits the session but never its controlling terminal */
 
 	pp = pinfo_find(ppid);
@@ -736,7 +740,7 @@ int posix_exec(void)
 }
 
 
-static int posix_exit(process_info_t *p, int code)
+static int posix_exit(process_info_t *p, int code, time_t userTime, time_t sysTime)
 {
 	p->exitcode = code;
 
@@ -749,6 +753,10 @@ static int posix_exit(process_info_t *p, int code)
 	 */
 	(void)proc_lockSet(&p->lock);
 	atomic_store_uint(&p->exited, 1, __ATOMIC_RELAXED);
+
+	p->userTime = userTime + p->userTimeChildren;
+	p->sysTime = sysTime + p->sysTimeChildren;
+
 	(void)proc_lockClear(&p->lock);
 
 	/* Clears each slot before dropping its reference, so a zombie's fd table is
@@ -801,8 +809,11 @@ int posix_statvfs(const char *path, int fildes, struct statvfs *buf)
 	msg_t msg;
 	int err = EOK;
 
-	if (((path == NULL) && (fildes < 0)) ||
-			((path != NULL) && (fildes != -1))) {
+	if ((path == NULL) && (fildes < 0)) {
+		return -EBADF;
+	}
+
+	if ((path != NULL) && (fildes != -1)) {
 		return -EINVAL;
 	}
 
@@ -865,7 +876,6 @@ int posix_statvfs(const char *path, int fildes, struct statvfs *buf)
 }
 
 
-/* TODO: handle O_CREAT and O_EXCL */
 int posix_open(const char *filename, int oflag, u8 *ustack)
 {
 	TRACE("open(%s, %d, %d)", filename, oflag);
@@ -875,7 +885,6 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 	process_info_t *p;
 	open_file_t *f;
 	mode_t mode;
-	off_t size;
 
 	if (posix_pipesrv(&pipesrv) < 0) {
 		hal_memset(&pipesrv, 0xff, sizeof(oid_t));
@@ -934,23 +943,41 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 		(void)proc_lockClear(&p->lock);
 
 		do {
-			err = proc_lookup(filename, &ln, &oid);
-
-			if ((err == -ENOENT) && (((unsigned int)oflag & O_CREAT) != 0U)) {
+			if (((unsigned int)oflag & O_CREAT) != 0U) {
 				GETFROMSTACK(ustack, mode_t, mode, 2U);
 
 				err = posix_create(filename, 1 /* otFile */, mode | S_IFREG, dev, &oid);
+				if (err == -EEXIST) {
+					if (((unsigned int)oflag & O_EXCL) != 0U) {
+						break;
+					}
+
+					/*
+					 * FIXME: this is race-y as between posix_create and proc_lookup
+					 * the existing file might have been removed. The mtCreate message
+					 * should probably be able to fail but still provide the existing
+					 * file's oid so that we can work with it later when we don't care
+					 * if the file was created or not and just want the oid (O_CREAT
+					 * without O_EXCL).
+					 */
+					err = proc_lookup(filename, &ln, &oid);
+					if (err < 0) {
+						break;
+					}
+				}
+				else if (err < 0) {
+					break;
+				}
+				else {
+					created = 1;
+					hal_memcpy(&ln, &oid, sizeof(oid_t));
+				}
+			}
+			else {
+				err = proc_lookup(filename, &ln, &oid);
 				if (err < 0) {
 					break;
 				}
-				created = 1;
-				hal_memcpy(&ln, &oid, sizeof(oid_t));
-			}
-			else if (err < 0) {
-				break;
-			}
-			else {
-				/* No action required */
 			}
 
 			if (oid.port == USOCKET_PORT) {
@@ -1005,16 +1032,6 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 
 			if (((unsigned int)oflag & O_TRUNC) != 0U) {
 				(void)posix_truncate(&f->oid, 0);
-			}
-			else if (((unsigned int)oflag & O_APPEND) != 0U) {
-				/* Keep offset at 0 for files that cannot report their size (e.g. devices) */
-				size = proc_size(f->oid);
-				if (size > 0) {
-					f->offset = size;
-				}
-			}
-			else {
-				/* No action required */
 			}
 
 			f->status = (unsigned int)oflag & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
@@ -1236,8 +1253,12 @@ ssize_t posix_write(int fildes, void *buf, size_t nbyte, off_t offset)
 	/* offset < 0 means use current fd offset */
 	if (offset < 0) {
 		offs = f->offset;
+		status = f->status;
 	}
-	status = f->status;
+	else {
+		/* don't overwrite the offset in FS when offset is requested */
+		status = f->status & ~O_APPEND;
+	}
 	(void)proc_lockClear(&f->lock);
 
 	if (f->type == ftUnixSocket) {
@@ -1247,11 +1268,11 @@ ssize_t posix_write(int fildes, void *buf, size_t nbyte, off_t offset)
 		rcnt = pipe_write(f->pipe, buf, nbyte, status);
 	}
 	else {
-		rcnt = proc_write(f->oid, offs, buf, nbyte, status);
+		rcnt = proc_write(f->oid, &offs, buf, nbyte, status);
 
 		if (rcnt > 0 && offset < 0 && F_SEEKABLE(f->type)) {
 			(void)proc_lockSet(&f->lock);
-			f->offset += rcnt;
+			f->offset = offs;
 			(void)proc_lockClear(&f->lock);
 		}
 	}
@@ -4017,6 +4038,8 @@ int posix_waitpid(pid_t child, int *status, unsigned int options)
 			do {
 				if (waitpid_isWaitValid(child, pinfo, c) != 0) {
 					LIST_REMOVE(&pinfo->zombies, c);
+					pinfo->userTimeChildren += c->userTime;
+					pinfo->sysTimeChildren += c->sysTime;
 					err = c->process;
 					if (status != NULL) {
 						*status = c->exitcode;
@@ -4069,7 +4092,7 @@ int posix_waitpid(pid_t child, int *status, unsigned int options)
 }
 
 
-void posix_died(pid_t pid, int exit)
+void posix_died(pid_t pid, int exit, time_t userTime, time_t sysTime)
 {
 	process_info_t *pinfo, *ppinfo, *init, *cinfo, *zinfo, *zombies;
 	int adopted = 1;
@@ -4084,7 +4107,7 @@ void posix_died(pid_t pid, int exit)
 	ppid = atomic_load_int(&pinfo->parent, __ATOMIC_RELAXED);
 	ppinfo = pinfo_find(ppid);
 
-	(void)posix_exit(pinfo, exit);
+	(void)posix_exit(pinfo, exit, userTime, sysTime);
 
 	/* We might not find a parent if it died just now */
 	if (ppinfo != NULL) {
@@ -4141,6 +4164,30 @@ void posix_died(pid_t pid, int exit)
 	}
 
 	pinfo_put(pinfo);
+}
+
+
+int posix_childTimesGet(pid_t pid, time_t *userTime, time_t *sysTime)
+{
+	process_info_t *pinfo;
+	time_t user, sys;
+
+	pinfo = pinfo_find(pid);
+	if (pinfo == NULL) {
+		return -ESRCH;
+	}
+
+	(void)proc_lockSet(&pinfo->lock);
+	user = pinfo->userTimeChildren;
+	sys = pinfo->sysTimeChildren;
+	(void)proc_lockClear(&pinfo->lock);
+
+	*userTime = user;
+	*sysTime = sys;
+
+	pinfo_put(pinfo);
+
+	return EOK;
 }
 
 

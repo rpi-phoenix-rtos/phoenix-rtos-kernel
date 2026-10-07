@@ -31,6 +31,7 @@
 #include "lib/lib.h"
 
 #include "include/errno.h"
+#include "proc/threads.h"
 
 #define SPI_FIRST_IRQID 32
 
@@ -111,8 +112,6 @@ static struct {
 
 void _hal_interruptsInitPerCPU(void);
 
-int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);
-
 static void interrupts_disableIRQ(unsigned int irqn);
 
 
@@ -147,6 +146,7 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	unsigned int reschedule = 0;
 	spinlock_ctx_t sc;
 	int trace, ret, claimed = 0;
+	void *interrupted;
 
 	u32 ciarValue = *(interrupts_common.gicc + gicc_iar);
 	n = ciarValue & 0x3ffU;
@@ -154,6 +154,8 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	if (n >= SIZE_INTERRUPTS) {
 		return 0;
 	}
+
+	interrupted = proc_cpuTimeIntrEnter(ctx);
 
 	trace = interrupts_common.trace_irqs != 0 && n != hal_timerIrq();
 	if (trace != 0) {
@@ -191,6 +193,11 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 
 	if (trace != 0) {
 		trace_eventInterruptExit(n);
+	}
+
+	/* After a reschedule the mode comes from the context the scheduler restores */
+	if (reschedule == 0U) {
+		proc_cpuTimeIntrLeave(interrupted);
 	}
 
 	return (int)reschedule;
