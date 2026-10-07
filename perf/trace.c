@@ -989,7 +989,8 @@ static int trace_setConfig(unsigned int flags, const void *arg, size_t sz)
 	}
 
 	/* No CPU samples now: tracing is not enabled yet */
-	trace_common.cfg = cfg;
+	/* not a struct assignment: at this size gcc emits a memcpy call, and the kernel has none */
+	hal_memcpy(&trace_common.cfg, &cfg, sizeof(cfg));
 	trace_common.eventMask = (cfg.events == 0U) ? ~0U : cfg.events;
 	hal_memset(trace_common.sampleNext, 0, sizeof(*trace_common.sampleNext) * hal_cpuGetCount());
 
