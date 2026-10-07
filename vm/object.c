@@ -611,7 +611,10 @@ void vm_objectNotify(const msg_t *msg, int responded)
 			break;
 
 		case mtCreate:
-			target = (responded != 0) ? &msg->o.create.oid : NULL;
+			/* Only a create that succeeded names a new file. open(O_CREAT) creates first and
+			 * looks the name up on -EEXIST, so failed creates are routine, and their reply's
+			 * oid is whatever the request carried (zero). */
+			target = ((responded != 0) && (msg->o.err == EOK)) ? &msg->o.create.oid : NULL;
 			break;
 
 		default:
