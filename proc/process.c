@@ -826,6 +826,8 @@ static int process_load(process_t *process, vm_object_t *o, off_t base, size_t s
 	ehdr = vm_mmap(process_common.kmap, NULL, NULL, size, PROT_READ, o, base, MAP_NONE);
 	process->lazy = prevLazy;
 	if (ehdr == NULL) {
+		/* The whole image needs one free range of the kernel's address space this large */
+		lib_printf("exec: no %zu KB of kernel address space free in one piece for the image\n", size / 1024U);
 		return -ENOMEM;
 	}
 

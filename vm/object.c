@@ -42,12 +42,13 @@
  * contiguous objects, anonymous memory, the kernel object.
  *
  * Staleness. A cached object is reused only if it still describes the file:
- *  - Changes the kernel passes on: proc_send() reports every mtWrite, mtTruncate, mtSetAttr and
- *    mtDestroy of an oid, and the oid of every mtCreate response (a server may give a new file the
- *    id of a removed one -- dummyfs and ext2 do), to vm_objectNotify(). A cached object of that oid
- *    is freed at once; a referenced one is marked stale, so it is freed rather than cached when its
- *    last reference goes (and after mtCreate it also leaves the tree, so the new file never shares
- *    the old file's pages). Every write() and truncate of a file on this system goes this way.
+ *  - Changes the kernel passes on: proc_send() reports every mtWrite, mtTruncate, mtSetAttr,
+ *    mtDestroy and mtUnlink of an oid, and the oid of every mtCreate response (a server may give
+ *    a new file the id of a removed one -- dummyfs and ext2 do), to vm_objectNotify(). A cached
+ *    object of that oid is freed at once; a referenced one is marked stale, so it is freed rather
+ *    than cached when its last reference goes (and after mtCreate it also leaves the tree, so the
+ *    new file never shares the old file's pages). Every write(), truncate and unlink of a file on
+ *    this system goes this way.
  *  - Changes nobody tells the kernel about (another NFS client, e.g. the build host overwriting a
  *    binary on the export): before an unreferenced object is reused, the server is asked for size,
  *    mtime and ctime again (one mtGetAttrAll) and the object is reused only if all three are the
@@ -584,22 +585,27 @@ void vm_objectWritable(vm_object_t *o)
 }
 
 
-void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
+void vm_objectNotify(const msg_t *msg, int responded)
 {
 #if VM_OBJCACHE
 	vm_object_t *o, *victim = NULL;
 	const oid_t *target;
 
-	switch (type) {
+	switch (msg->type) {
 		case mtWrite:
 		case mtTruncate:
 		case mtSetAttr:
 		case mtDestroy:
-			target = oid;
+			target = &msg->oid;
+			break;
+
+		case mtUnlink:
+			/* A name of the file is gone, and maybe the file: the pages are worth nothing more */
+			target = &msg->i.ln.oid;
 			break;
 
 		case mtCreate:
-			target = res;
+			target = (responded != 0) ? &msg->o.create.oid : NULL;
 			break;
 
 		default:
@@ -620,7 +626,7 @@ void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
 		}
 		else {
 			o->flags |= (u8)VM_OBJ_STALE;
-			if (type == mtCreate) {
+			if (msg->type == mtCreate) {
 				/* The id names a new file now: the next mapping of it must not get these pages */
 				lib_rbRemove(&object_common.tree, &o->linkage);
 				o->flags |= (u8)VM_OBJ_UNLINKED;
@@ -634,9 +640,8 @@ void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
 		vm_kfree(victim);
 	}
 #else
-	(void)type;
-	(void)oid;
-	(void)res;
+	(void)msg;
+	(void)responded;
 #endif
 }
 

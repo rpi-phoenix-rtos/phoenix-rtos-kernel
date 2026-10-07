@@ -32,6 +32,7 @@ static struct {
 	size_t totalsz; /* stays invariant after _page_init() */
 	size_t allocsz;
 	size_t bootsz;
+	unsigned int failReports;
 
 	lock_t lock;
 } pages_info;
@@ -89,6 +90,38 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
 }
 
 
+/*
+ * Says why an allocation failed: memory used up, or free memory only in pieces smaller than the
+ * request (a contiguous block, a kmalloc zone). Neither shows anywhere else -- the caller just
+ * gets -ENOMEM -- and they call for different remedies. Bounded, so that a process faulting in a
+ * loop cannot flood the console.
+ */
+static void page_reportFailure(size_t size)
+{
+	unsigned int idx, largest = 0U, report;
+	size_t freesz;
+
+	(void)proc_lockSet(&pages_info.lock);
+	report = pages_info.failReports;
+	if (report < 32U) {
+		pages_info.failReports++;
+	}
+	for (idx = 0U; idx < SIZE_VM_SIZES; idx++) {
+		if (pages_info.sizes[idx] != NULL) {
+			largest = idx;
+		}
+	}
+	freesz = pages_info.totalsz - pages_info.allocsz;
+	(void)proc_lockClear(&pages_info.lock);
+
+	if (report < 32U) {
+		lib_printf("vm: no free block of %zu KB (free %zu KB, largest free block %zu KB, file cache %zu KB)\n",
+			size / 1024U, freesz / 1024U, (freesz != 0U) ? (((size_t)1 << largest) / 1024U) : 0U,
+			vm_objectCachedPages() * (SIZE_PAGE / 1024U));
+	}
+}
+
+
 page_t *vm_pageAlloc(size_t size, vm_flags_t flags)
 {
 	page_t *p;
@@ -103,6 +136,10 @@ page_t *vm_pageAlloc(size_t size, vm_flags_t flags)
 		if ((p != NULL) || (size > pages_info.totalsz) || (vm_objectReclaim() == 0)) {
 			break;
 		}
+	}
+
+	if (p == NULL) {
+		page_reportFailure(size);
 	}
 
 	return p;
@@ -465,6 +502,7 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	pages_info.totalsz = 0;
 	pages_info.allocsz = 0;
 	pages_info.bootsz = 0;
+	pages_info.failReports = 0;
 
 	for (k = 0; k < SIZE_VM_SIZES; k++) {
 		pages_info.sizes[k] = NULL;

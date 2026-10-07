@@ -16,6 +16,7 @@
 
 #include "hal/hal.h"
 #include "lib/lib.h"
+#include "include/msg.h"
 #include "proc/lock.h"
 #include "amap.h"
 
@@ -115,9 +116,9 @@ int vm_objectShared(const vm_object_t *o);
 void vm_objectWritable(vm_object_t *o);
 
 
-/* The kernel passed a message of type to a server about oid (the file changed, or the id now
- * names another file): forget what is cached about oid. res is the response's oid of mtCreate. */
-void vm_objectNotify(int type, const oid_t *oid, const oid_t *res);
+/* The kernel passed msg to a server, and got its response if responded: if it changed a file (or
+ * made an id name another file), forget what is cached about the file. */
+void vm_objectNotify(const msg_t *msg, int responded);
 
 
 /* Frees the pages of the least recently used cached object. Returns nonzero if it freed anything.
