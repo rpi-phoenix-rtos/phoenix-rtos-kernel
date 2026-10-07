@@ -23,7 +23,8 @@
 /*
  * A uchannel_t is one unidirectional data channel: a ring buffer, the file
  * descriptors travelling behind it and the two wait queues of its endpoints.
- * A connected socket pair owns two of them, one per direction.
+ * A connected socket pair owns two of them, one per direction; an anonymous
+ * pipe is one (posix/pipe.h).
  *
  * The channel is the only object shared between the two endpoints, so all
  * cross-endpoint state lives here: the reader learns that no more data will
@@ -44,6 +45,7 @@
 /* Operation flags of uchannel_read()/uchannel_write() */
 #define UCHANNEL_OP_NONBLOCK (1U << 0)
 #define UCHANNEL_OP_PEEK     (1U << 1)
+#define UCHANNEL_OP_ATOMIC   (1U << 2) /* byte-stream write: all of it at once or nothing yet */
 
 /*
  * Events reported by uchannel_pollRd()/uchannel_pollWr(). The channel states
@@ -54,12 +56,26 @@
 #define UCHANNEL_EV_IN   (1U << 0) /* a read would not block */
 #define UCHANNEL_EV_OUT  (1U << 1) /* there is room, so a write would not block */
 #define UCHANNEL_EV_SHUT (1U << 2) /* this direction is shut down, by either of its ends */
+#define UCHANNEL_EV_DATA (1U << 3) /* bytes are queued (pollRd only) */
 
 
 typedef struct _uchannel_t {
 	int refs; /* atomic */
 
 	u8 framed; /* immutable: 0 - byte stream, 1 - frame */
+
+	/*
+	 * Immutable, set by uchannel_allocStream() (zero for a socket channel):
+	 * `atomic` is the size up to which an UCHANNEL_OP_ATOMIC write goes in whole
+	 * and the room uchannel_pollWr() requires for EV_OUT; `maxSize` is the size
+	 * the ring may grow to on demand; `pollOid`, when `pollTargeted` is set, is
+	 * the oid whose pollwake waiters a state change wakes, instead of every
+	 * poll() set that holds an AF_UNIX socket.
+	 */
+	u8 pollTargeted;
+	size_t atomic;
+	size_t maxSize;
+	oid_t pollOid;
 
 	lock_t lock;
 
@@ -78,6 +94,16 @@ size_t uchannel_roundSize(size_t size);
 
 /* Allocates a channel with one reference. `size` must be a power of two. */
 uchannel_t *uchannel_alloc(size_t size, int framed);
+
+
+/*
+ * Allocates a byte-stream channel with one reference, for a pipe: its ring
+ * starts at `size` and grows on demand up to `maxSize` (powers of two, size <=
+ * maxSize), writes of up to `atomic` bytes can be made atomic with
+ * UCHANNEL_OP_ATOMIC, and its state changes wake only the pollwake waiters of
+ * `pollOid`.
+ */
+uchannel_t *uchannel_allocStream(size_t size, size_t maxSize, size_t atomic, const oid_t *pollOid);
 
 
 uchannel_t *uchannel_ref(uchannel_t *ch);
@@ -103,6 +129,12 @@ void uchannel_put(uchannel_t *ch);
  *
  * A zero-length write is not turned into a zero-length frame: it only
  * reports -EPIPE or 0.
+ *
+ * With UCHANNEL_OP_ATOMIC, a byte-stream write of at most `atomic` bytes (see
+ * uchannel_allocStream) is not split: nothing is written until all of it fits,
+ * so it is never interleaved with another writer's bytes, and a non-blocking
+ * one fails with -EWOULDBLOCK rather than writing a part. A longer write is
+ * handled as without the flag.
  *
  * `fdpack`, when given, is queued behind the data and its ownership passes to
  * the channel, but only if the call returns a positive count.
@@ -167,6 +199,10 @@ int uchannel_resize(uchannel_t *ch, size_t size);
 
 
 size_t uchannel_size(uchannel_t *ch);
+
+
+/* Returns the number of bytes queued (a byte stream's FIONREAD). */
+size_t uchannel_avail(uchannel_t *ch);
 
 
 
