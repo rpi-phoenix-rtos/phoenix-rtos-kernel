@@ -126,6 +126,11 @@ void vm_objectNotify(const msg_t *msg, int responded);
 int vm_objectReclaim(void);
 
 
+/* Frees the pages of the least recently used cached object if free memory (freesz bytes, not
+ * counting the cache) is below the cache's low watermark. Returns nonzero if it freed anything. */
+int vm_objectReclaimLow(size_t freesz);
+
+
 /* Number of pages held by unreferenced cached objects (a hint, read without the lock) */
 size_t vm_objectCachedPages(void);
 

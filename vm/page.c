@@ -32,7 +32,7 @@ static struct {
 	size_t totalsz; /* stays invariant after _page_init() */
 	size_t allocsz;
 	size_t bootsz;
-	unsigned int failReports;
+	unsigned int failures; /* allocations that failed, see page_reportFailure() */
 
 	lock_t lock;
 } pages_info;
@@ -98,14 +98,11 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
  */
 static void page_reportFailure(size_t size)
 {
-	unsigned int idx, largest = 0U, report;
+	unsigned int idx, largest = 0U, n;
 	size_t freesz;
 
 	(void)proc_lockSet(&pages_info.lock);
-	report = pages_info.failReports;
-	if (report < 32U) {
-		pages_info.failReports++;
-	}
+	n = ++pages_info.failures;
 	for (idx = 0U; idx < SIZE_VM_SIZES; idx++) {
 		if (pages_info.sizes[idx] != NULL) {
 			largest = idx;
@@ -114,10 +111,11 @@ static void page_reportFailure(size_t size)
 	freesz = pages_info.totalsz - pages_info.allocsz;
 	(void)proc_lockClear(&pages_info.lock);
 
-	if (report < 32U) {
-		lib_printf("vm: no free block of %zu KB (free %zu KB, largest free block %zu KB, file cache %zu KB)\n",
+	/* The first ones, then a sample: a later failure of another kind still gets reported */
+	if ((n <= 8U) || ((n % 64U) == 0U)) {
+		lib_printf("vm: no free block of %zu KB (free %zu KB, largest free block %zu KB, file cache %zu KB; failure %u)\n",
 			size / 1024U, freesz / 1024U, (freesz != 0U) ? (((size_t)1 << largest) / 1024U) : 0U,
-			vm_objectCachedPages() * (SIZE_PAGE / 1024U));
+			vm_objectCachedPages() * (SIZE_PAGE / 1024U), n);
 	}
 }
 
@@ -140,6 +138,11 @@ page_t *vm_pageAlloc(size_t size, vm_flags_t flags)
 
 	if (p == NULL) {
 		page_reportFailure(size);
+	}
+	else {
+		/* Keep memory that is really free, not only cached: pages given back at the last moment
+		 * lie scattered between the ones taken meanwhile, and are no use for a contiguous block */
+		(void)vm_objectReclaimLow(pages_info.totalsz - pages_info.allocsz);
 	}
 
 	return p;
@@ -502,7 +505,7 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	pages_info.totalsz = 0;
 	pages_info.allocsz = 0;
 	pages_info.bootsz = 0;
-	pages_info.failReports = 0;
+	pages_info.failures = 0;
 
 	for (k = 0; k < SIZE_VM_SIZES; k++) {
 		pages_info.sizes[k] = NULL;

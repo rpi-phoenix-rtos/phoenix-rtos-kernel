@@ -60,8 +60,13 @@
  *
  * Memory. Cached pages are free memory as far as anybody else is concerned: vm_pageAlloc() and
  * page_map() call vm_objectReclaim() when the allocator has nothing left and retry, so a cached
- * page never causes an allocation failure; meminfo reports them as free. The cache is also capped
- * (VM_OBJCACHE_PERCENT of RAM) and given up while free memory is below 1/VM_OBJCACHE_LOWWATER of it.
+ * page never causes an allocation failure; meminfo reports them as free. Memory that is really
+ * free is kept above 1/VM_OBJCACHE_LOWWATER of RAM: below it every allocation evicts the least
+ * recently used object (vm_objectReclaimLow()). That matters for contiguous blocks (kmalloc zones,
+ * amap arrays, MAP_CONTIGUOUS): pages given back only when nothing else is left lie scattered
+ * between the pages taken meanwhile. (Build 43, without this: a process using up all memory died
+ * at the first touch of a new mapping -- its amap array wants a 256 KB block -- 576 MB earlier
+ * than on a kernel without the cache.) The cache is also capped (VM_OBJCACHE_PERCENT).
  *
  * Locking. object_common.lock is taken under a map's lock (fault path, vm_objectWritable()) and
  * under kmalloc_common.lock (a zone created by vm_kmalloc() allocates pages: vm_pageAlloc() ->
@@ -82,9 +87,10 @@
 #define VM_OBJCACHE_PERCENT 25U
 #endif
 
-/* No object is kept while free memory is below 1/VM_OBJCACHE_LOWWATER of the memory free at boot */
+/* Free memory (not counting the cache) is kept above 1/VM_OBJCACHE_LOWWATER of the memory free
+ * at boot: below it, every allocation evicts an object, and no object is kept */
 #ifndef VM_OBJCACHE_LOWWATER
-#define VM_OBJCACHE_LOWWATER 32U
+#define VM_OBJCACHE_LOWWATER 16U
 #endif
 
 /* otFile of <sys/file.h> */
@@ -678,6 +684,21 @@ int vm_objectReclaim(void)
 
 	return 1;
 #else
+	return 0;
+#endif
+}
+
+
+int vm_objectReclaimLow(size_t freesz)
+{
+#if VM_OBJCACHE
+	if ((object_common.cached == 0U) || ((freesz / SIZE_PAGE) >= object_common.lowWater)) {
+		return 0;
+	}
+
+	return vm_objectReclaim();
+#else
+	(void)freesz;
 	return 0;
 #endif
 }
