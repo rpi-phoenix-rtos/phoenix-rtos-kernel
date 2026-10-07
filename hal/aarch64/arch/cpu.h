@@ -219,6 +219,18 @@ unsigned int hal_cpuBacktrace(ptr_t fp, ptr_t lo, ptr_t hi, u64 *ret, unsigned i
 int hal_cpuSyscallBefore(ptr_t pc);
 
 
+/* Nonzero if the instruction just before kernel pc unmasks interrupts (msr daif / daifclr) */
+int hal_cpuIrqUnmaskedBefore(ptr_t pc);
+
+
+/*
+ * For the user context of a thread that entered the kernel with an exception (not a syscall):
+ * the exception class (ESR_EL1.EC) and fault address it was taken with. Returns 0 on success,
+ * -1 if uctx was not saved by an exception.
+ */
+int hal_cpuExceptionInfo(const cpu_context_t *uctx, unsigned int *eclass, ptr_t *far);
+
+
 /* parasoft-suppress-next-line MISRAC2012-DIR_4_3 "Assembly is required for low-level operations" */
 static inline unsigned int hal_cpuGetID(void)
 {
