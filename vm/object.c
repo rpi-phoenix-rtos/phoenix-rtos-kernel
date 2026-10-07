@@ -42,12 +42,13 @@
  * contiguous objects, anonymous memory, the kernel object.
  *
  * Staleness. A cached object is reused only if it still describes the file:
- *  - Changes the kernel passes on: proc_send() reports every mtWrite, mtTruncate, mtSetAttr and
- *    mtDestroy of an oid, and the oid of every mtCreate response (a server may give a new file the
- *    id of a removed one -- dummyfs and ext2 do), to vm_objectNotify(). A cached object of that oid
- *    is freed at once; a referenced one is marked stale, so it is freed rather than cached when its
- *    last reference goes (and after mtCreate it also leaves the tree, so the new file never shares
- *    the old file's pages). Every write() and truncate of a file on this system goes this way.
+ *  - Changes the kernel passes on: proc_send() reports every mtWrite, mtTruncate, mtSetAttr,
+ *    mtDestroy and mtUnlink of an oid, and the oid of every mtCreate response (a server may give
+ *    a new file the id of a removed one -- dummyfs and ext2 do), to vm_objectNotify(). A cached
+ *    object of that oid is freed at once; a referenced one is marked stale, so it is freed rather
+ *    than cached when its last reference goes (and after mtCreate it also leaves the tree, so the
+ *    new file never shares the old file's pages). Every write(), truncate and unlink of a file on
+ *    this system goes this way.
  *  - Changes nobody tells the kernel about (another NFS client, e.g. the build host overwriting a
  *    binary on the export): before an unreferenced object is reused, the server is asked for size,
  *    mtime and ctime again (one mtGetAttrAll) and the object is reused only if all three are the
@@ -59,8 +60,13 @@
  *
  * Memory. Cached pages are free memory as far as anybody else is concerned: vm_pageAlloc() and
  * page_map() call vm_objectReclaim() when the allocator has nothing left and retry, so a cached
- * page never causes an allocation failure; meminfo reports them as free. The cache is also capped
- * (VM_OBJCACHE_PERCENT of RAM) and given up while free memory is below 1/VM_OBJCACHE_LOWWATER of it.
+ * page never causes an allocation failure; meminfo reports them as free. Memory that is really
+ * free is kept above 1/VM_OBJCACHE_LOWWATER of RAM: below it every allocation evicts the least
+ * recently used object (vm_objectReclaimLow()). That matters for contiguous blocks (kmalloc zones,
+ * amap arrays, MAP_CONTIGUOUS): pages given back only when nothing else is left lie scattered
+ * between the pages taken meanwhile. (Build 43, without this: a process using up all memory died
+ * at the first touch of a new mapping -- its amap array wants a 256 KB block -- 576 MB earlier
+ * than on a kernel without the cache.) The cache is also capped (VM_OBJCACHE_PERCENT).
  *
  * Locking. object_common.lock is taken under a map's lock (fault path, vm_objectWritable()) and
  * under kmalloc_common.lock (a zone created by vm_kmalloc() allocates pages: vm_pageAlloc() ->
@@ -81,9 +87,10 @@
 #define VM_OBJCACHE_PERCENT 25U
 #endif
 
-/* No object is kept while free memory is below 1/VM_OBJCACHE_LOWWATER of the memory free at boot */
+/* Free memory (not counting the cache) is kept above 1/VM_OBJCACHE_LOWWATER of the memory free
+ * at boot: below it, every allocation evicts an object, and no object is kept */
 #ifndef VM_OBJCACHE_LOWWATER
-#define VM_OBJCACHE_LOWWATER 32U
+#define VM_OBJCACHE_LOWWATER 16U
 #endif
 
 /* otFile of <sys/file.h> */
@@ -584,22 +591,27 @@ void vm_objectWritable(vm_object_t *o)
 }
 
 
-void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
+void vm_objectNotify(const msg_t *msg, int responded)
 {
 #if VM_OBJCACHE
 	vm_object_t *o, *victim = NULL;
 	const oid_t *target;
 
-	switch (type) {
+	switch (msg->type) {
 		case mtWrite:
 		case mtTruncate:
 		case mtSetAttr:
 		case mtDestroy:
-			target = oid;
+			target = &msg->oid;
+			break;
+
+		case mtUnlink:
+			/* A name of the file is gone, and maybe the file: the pages are worth nothing more */
+			target = &msg->i.ln.oid;
 			break;
 
 		case mtCreate:
-			target = res;
+			target = (responded != 0) ? &msg->o.create.oid : NULL;
 			break;
 
 		default:
@@ -620,7 +632,7 @@ void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
 		}
 		else {
 			o->flags |= (u8)VM_OBJ_STALE;
-			if (type == mtCreate) {
+			if (msg->type == mtCreate) {
 				/* The id names a new file now: the next mapping of it must not get these pages */
 				lib_rbRemove(&object_common.tree, &o->linkage);
 				o->flags |= (u8)VM_OBJ_UNLINKED;
@@ -634,9 +646,8 @@ void vm_objectNotify(int type, const oid_t *oid, const oid_t *res)
 		vm_kfree(victim);
 	}
 #else
-	(void)type;
-	(void)oid;
-	(void)res;
+	(void)msg;
+	(void)responded;
 #endif
 }
 
@@ -673,6 +684,21 @@ int vm_objectReclaim(void)
 
 	return 1;
 #else
+	return 0;
+#endif
+}
+
+
+int vm_objectReclaimLow(size_t freesz)
+{
+#if VM_OBJCACHE
+	if ((object_common.cached == 0U) || ((freesz / SIZE_PAGE) >= object_common.lowWater)) {
+		return 0;
+	}
+
+	return vm_objectReclaim();
+#else
+	(void)freesz;
 	return 0;
 #endif
 }
