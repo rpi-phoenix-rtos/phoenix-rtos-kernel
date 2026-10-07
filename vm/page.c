@@ -25,22 +25,91 @@
 #define SIZE_VM_SIZES ((unsigned int)(sizeof(void *) * (size_t)__CHAR_BIT__))
 
 
+/*
+ * Grouping by mobility. Memory is divided into pageblocks (VM_PAGEBLOCK_PAGES pages, aligned),
+ * and a pageblock that is split serves either the kernel or the processes, not both:
+ *  - kernel pages (kmalloc zones -- e.g. an anon_t for every 32 pages of user memory --, page
+ *    tables, amap arrays, kernel stacks) mostly outlive the user pages they were allocated among.
+ *    Taken from the same blocks, they end up one every few pages all over memory, and nothing
+ *    larger than the gaps between them can be had again however much is freed. (Simulation: a
+ *    process takes a page table -- one page -- after every 2 MB another process touches, until
+ *    that one has 3 GB; when it has exited, 3.3 GB are free and 50 blocks of 4 MB can be had
+ *    without grouping, 781 with it.)
+ *  - user pages and the file cache come and go with processes and files: a pageblock of them
+ *    becomes free as a whole, for contiguous blocks (MAP_CONTIGUOUS, GPU buffers, big kmalloc
+ *    zones).
+ * Below the pageblock size each kind has its own free lists (sizes[PAGE_LIST_APP],
+ * sizes[PAGE_LIST_KERNEL]); a free block of a pageblock or more is nobody's
+ * (sizes[PAGE_LIST_BLOCKS]). An allocation takes the smallest block that fits from its own lists,
+ * then from the shared ones -- splitting a free pageblock makes it its kind's (PAGE_BLOCK_KERNEL
+ * on every page of it) --, and only then from the other kind's lists: an allocation fails only
+ * if no free block of the lists would do. A free block lives on the list of its pageblock's
+ * kind whoever freed it, so buddies (of a size below a pageblock, in one pageblock) are always on
+ * the same list.
+ */
+#ifndef VM_PAGEBLOCK_PAGES
+#define VM_PAGEBLOCK_PAGES 512U
+#endif
+
+#define PAGE_LIST_APP    0U
+#define PAGE_LIST_KERNEL 1U
+#define PAGE_LIST_BLOCKS 2U
+#define PAGE_LISTS       3U
+
+/* The page's pageblock serves the kernel: a page flag (bit 3) that no architecture uses */
+#define PAGE_BLOCK_KERNEL 0x08U
+
+_Static_assert(((PAGE_FREE | PAGE_OWNER_KERNEL | PAGE_OWNER_APP | PAGE_KERNEL_SYSPAGE | PAGE_KERNEL_CPU |
+						PAGE_KERNEL_PTABLE | PAGE_KERNEL_PMAP | PAGE_KERNEL_STACK | PAGE_KERNEL_HEAP) &
+					   PAGE_BLOCK_KERNEL) == 0U,
+	"PAGE_BLOCK_KERNEL collides with a page flag of the architecture");
+_Static_assert((VM_PAGEBLOCK_PAGES & (VM_PAGEBLOCK_PAGES - 1U)) == 0U, "VM_PAGEBLOCK_PAGES must be a power of 2");
+
+
 static struct {
-	page_t *sizes[SIZE_VM_SIZES];
+	page_t *sizes[PAGE_LISTS][SIZE_VM_SIZES];
 	page_t *pages; /* pages ordering and their addresses (page_t::addr) stay invariant after _page_init() */
 
 	size_t totalsz; /* stays invariant after _page_init() */
 	size_t allocsz;
 	size_t bootsz;
 	unsigned int failures; /* allocations that failed, see page_reportFailure() */
+	unsigned int blockidx; /* log2 of the pageblock size in bytes */
 
 	lock_t lock;
 } pages_info;
 
 
+/* The free list of a free block of size 2^idx headed by p */
+static page_t **_page_list(const page_t *p, unsigned int idx)
+{
+	unsigned int l;
+
+	if (idx >= pages_info.blockidx) {
+		l = PAGE_LIST_BLOCKS;
+	}
+	else {
+		l = ((p->flags & PAGE_BLOCK_KERNEL) != 0U) ? PAGE_LIST_KERNEL : PAGE_LIST_APP;
+	}
+
+	return &pages_info.sizes[l][idx];
+}
+
+
+/* The smallest size from idx up to (not including) end with a block on list l, or end */
+static unsigned int _page_fit(unsigned int l, unsigned int idx, unsigned int end)
+{
+	while ((idx < end) && (pages_info.sizes[l][idx] == NULL)) {
+		idx++;
+	}
+
+	return idx;
+}
+
+
 static page_t *_page_alloc(size_t size, vm_flags_t flags)
 {
-	unsigned int start, stop, i;
+	unsigned int start, stop, i, own, other, end = pages_info.blockidx;
 	page_t *lh, *rh;
 
 	/* Establish first index */
@@ -51,38 +120,62 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
 	if (hal_cpuGetFirstBit(size) < start) {
 		start++;
 	}
-
-	/* Find segment */
-	stop = start;
-
-	while ((stop < SIZE_VM_SIZES) && (pages_info.sizes[stop] == NULL)) {
-		stop++;
-	}
-	if (stop == SIZE_VM_SIZES) {
+	if (start >= SIZE_VM_SIZES) {
 		return NULL;
 	}
 
-	lh = pages_info.sizes[stop];
+	if ((flags & PAGE_OWNER_APP) != 0U) {
+		own = PAGE_LIST_APP;
+		other = PAGE_LIST_KERNEL;
+	}
+	else {
+		own = PAGE_LIST_KERNEL;
+		other = PAGE_LIST_APP;
+	}
 
-	/* Split segment */
+	/* Smallest fit: in a pageblock of our kind, a free pageblock or more, the other kind */
+	i = own;
+	stop = _page_fit(own, start, end);
+	if (stop >= end) {
+		i = PAGE_LIST_BLOCKS;
+		stop = _page_fit(PAGE_LIST_BLOCKS, max(start, end), SIZE_VM_SIZES);
+		if (stop >= SIZE_VM_SIZES) {
+			i = other;
+			stop = _page_fit(other, start, end);
+			if (stop >= end) {
+				return NULL;
+			}
+		}
+	}
+
+	lh = pages_info.sizes[i][stop];
+	LIST_REMOVE(&pages_info.sizes[i][stop], lh);
+
+	/* Split segment, the right halves go back to the free lists */
 	while (stop > start) {
-		LIST_REMOVE(&pages_info.sizes[stop], lh);
+		if (stop == pages_info.blockidx) {
+			/* A whole free pageblock (lh is its first page): now it is ours */
+			for (i = 0; i < VM_PAGEBLOCK_PAGES; i++) {
+				if (own == PAGE_LIST_KERNEL) {
+					(lh + i)->flags |= PAGE_BLOCK_KERNEL;
+				}
+				else {
+					(lh + i)->flags &= (u8)~PAGE_BLOCK_KERNEL;
+				}
+			}
+		}
 
 		stop--;
 
-		lh->idx--;
-		rh = lh + (1UL << lh->idx) / SIZE_PAGE;
-		rh->idx = lh->idx;
-		LIST_ADD(&pages_info.sizes[stop], lh);
-		LIST_ADD(&pages_info.sizes[stop], rh);
+		lh->idx = (u8)stop;
+		rh = lh + ((size_t)1 << stop) / SIZE_PAGE;
+		rh->idx = (u8)stop;
+		LIST_ADD(_page_list(rh, stop), rh);
 	}
 
-	LIST_REMOVE(&pages_info.sizes[stop], lh);
-
-	/* Mark allocated pages */
-	for (i = 0; i < (1UL << lh->idx) / SIZE_PAGE; i++) {
-		(lh + i)->flags &= ~PAGE_FREE;
-		(lh + i)->flags |= flags;
+	/* Mark allocated pages (the pageblock's kind stays) */
+	for (i = 0; i < ((size_t)1 << lh->idx) / SIZE_PAGE; i++) {
+		(lh + i)->flags = (u8)(((lh + i)->flags & PAGE_BLOCK_KERNEL) | flags);
 		pages_info.allocsz += SIZE_PAGE;
 	}
 
@@ -98,14 +191,16 @@ static page_t *_page_alloc(size_t size, vm_flags_t flags)
  */
 static void page_reportFailure(size_t size)
 {
-	unsigned int idx, largest = 0U, n;
+	unsigned int idx, l, largest = 0U, n;
 	size_t freesz;
 
 	(void)proc_lockSet(&pages_info.lock);
 	n = ++pages_info.failures;
-	for (idx = 0U; idx < SIZE_VM_SIZES; idx++) {
-		if (pages_info.sizes[idx] != NULL) {
-			largest = idx;
+	for (l = 0U; l < PAGE_LISTS; l++) {
+		for (idx = 0U; idx < SIZE_VM_SIZES; idx++) {
+			if ((pages_info.sizes[l][idx] != NULL) && (idx > largest)) {
+				largest = idx;
+			}
 		}
 	}
 	freesz = pages_info.totalsz - pages_info.allocsz;
@@ -210,7 +305,7 @@ void vm_pageFree(page_t *p)
 			break;
 		}
 
-		LIST_REMOVE(&pages_info.sizes[idx], buddy);
+		LIST_REMOVE(_page_list(buddy, idx), buddy);
 
 		rh->idx = (u8)hal_cpuGetFirstBit(SIZE_PAGE);
 		idx++;
@@ -218,7 +313,7 @@ void vm_pageFree(page_t *p)
 		p = lh;
 	}
 
-	LIST_ADD(&pages_info.sizes[idx], p);
+	LIST_ADD(_page_list(p, idx), p);
 
 	(void)proc_lockClear(&pages_info.lock);
 	return;
@@ -261,7 +356,7 @@ static void _page_initSizes(void)
 	page_t *p;
 
 	/* Remove already discovered pages */
-	pages_info.sizes[hal_cpuGetFirstBit(SIZE_PAGE)] = NULL;
+	pages_info.sizes[PAGE_LIST_APP][hal_cpuGetFirstBit(SIZE_PAGE)] = NULL;
 
 	while (i < pages_info.totalsz / SIZE_PAGE) {
 		p = &pages_info.pages[i];
@@ -276,9 +371,9 @@ static void _page_initSizes(void)
 			idx = SIZE_VM_SIZES - 1U;
 		}
 
-		/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "idx is limited to min(SIZE_VM_SIZES - 1U, bits in p-> addr")*/
 		/* Free pages that follow without a hole in physical memory (the page_t of the first page
 		 * after a hole is the next one in pages_info.pages) */
+		/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 "idx is limited to min(SIZE_VM_SIZES - 1U, bits in p-> addr")*/
 		for (k = 0U; (k < (((u64)1 << idx) / SIZE_PAGE) - 1U) && (i + k < ((pages_info.totalsz / SIZE_PAGE) - 1U)); k++) {
 			if (((pages_info.pages[i + k + 1U].flags & PAGE_FREE) == 0U) ||
 					(pages_info.pages[i + k + 1U].addr != (p->addr + (k + 1U) * SIZE_PAGE))) {
@@ -289,7 +384,7 @@ static void _page_initSizes(void)
 		idx = hal_cpuGetLastBit((k + 1U) * SIZE_PAGE);
 		p->idx = (u8)idx;
 
-		LIST_ADD(&pages_info.sizes[idx], p);
+		LIST_ADD(_page_list(p, idx), p);
 
 		i += (size_t)(((u64)1 << idx) / SIZE_PAGE);
 	}
@@ -520,8 +615,11 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	pages_info.failures = 0;
 
 	for (k = 0; k < SIZE_VM_SIZES; k++) {
-		pages_info.sizes[k] = NULL;
+		pages_info.sizes[PAGE_LIST_APP][k] = NULL;
+		pages_info.sizes[PAGE_LIST_KERNEL][k] = NULL;
+		pages_info.sizes[PAGE_LIST_BLOCKS][k] = NULL;
 	}
+	pages_info.blockidx = hal_cpuGetFirstBit(VM_PAGEBLOCK_PAGES * SIZE_PAGE);
 
 	addr = 0;
 	pages_info.pages = (page_t *)*bss;
@@ -541,10 +639,12 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 		}
 
 		if (err == EOK) {
+			/* Every pageblock starts out as user memory, whatever the HAL left in the flags */
+			page->flags &= (u8)~PAGE_BLOCK_KERNEL;
 			pages_info.totalsz += SIZE_PAGE;
 			if ((page->flags & PAGE_FREE) != 0U) {
 				page->idx = (u8)hal_cpuGetFirstBit(SIZE_PAGE);
-				LIST_ADD(&pages_info.sizes[hal_cpuGetFirstBit(SIZE_PAGE)], page);
+				LIST_ADD(&pages_info.sizes[PAGE_LIST_APP][hal_cpuGetFirstBit(SIZE_PAGE)], page);
 			}
 			else {
 				page->idx = 0;
@@ -582,8 +682,8 @@ void _page_init(pmap_t *pmap, void **bss, void **top)
 	}
 
 	/* Show statistics on the console */
-	lib_printf("vm: Initializing page allocator (%d+%d)/%dKB, page_t=%d\n", (pages_info.allocsz - pages_info.bootsz) / 1024U,
-			pages_info.bootsz / 1024U, pages_info.totalsz / 1024U, sizeof(page_t));
+	lib_printf("vm: Initializing page allocator (%d+%d)/%dKB, page_t=%d, pageblocks of %uKB\n", (pages_info.allocsz - pages_info.bootsz) / 1024U,
+			pages_info.bootsz / 1024U, pages_info.totalsz / 1024U, sizeof(page_t), (unsigned int)((VM_PAGEBLOCK_PAGES * SIZE_PAGE) / 1024U));
 
 	_page_showPages();
 
