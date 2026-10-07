@@ -152,7 +152,8 @@ page_t *vm_pageAlloc(size_t size, vm_flags_t flags)
 void vm_pageFree(page_t *p)
 {
 	unsigned int idx, i;
-	page_t *lh = p, *rh = p;
+	size_t pi, n, npages = pages_info.totalsz / SIZE_PAGE;
+	page_t *lh, *rh, *buddy;
 
 	if (p == NULL) {
 		return;
@@ -160,9 +161,9 @@ void vm_pageFree(page_t *p)
 
 	(void)proc_lockSet(&pages_info.lock);
 
-	if ((lh->flags & PAGE_FREE) != 0U) {
+	if ((p->flags & PAGE_FREE) != 0U) {
 		hal_cpuDisableInterrupts();
-		lib_printf("page: double free (%p)\n", lh);
+		lib_printf("page: double free (%p)\n", p);
 		hal_cpuEnableInterrupts();
 		for (;;) {
 		}
@@ -176,37 +177,45 @@ void vm_pageFree(page_t *p)
 		pages_info.allocsz -= SIZE_PAGE;
 	}
 
-	if ((p->addr & (((u64)1 << (idx + 1U)) - 1U)) != 0U) {
-		lh = p - ((u64)1 << idx) / SIZE_PAGE;
-	}
-	else {
-		rh = p + ((u64)1 << idx) / SIZE_PAGE;
-	}
+	/* Merge with the buddy for as long as it is a free block of the same size. Both halves are
+	 * worked out afresh at every size: a block that grew as the left half may be the right half
+	 * of the next size. (Before, only the pointer to the buddy was moved, so merging stopped at
+	 * the first such size, and memory never became one block again. On a 4 GB Pi 4, after a
+	 * process used up memory and exited: 2.9 GB free, the largest block 32 KB.) */
+	while ((idx + 1U) < SIZE_VM_SIZES) {
+		/* parasoft-suppress-next-line MISRAC2012-RULE_18_4 "p points into pages_info.pages" */
+		pi = (size_t)(p - pages_info.pages);
+		n = (size_t)(((u64)1 << idx) / SIZE_PAGE);
 
-	/* parasoft-suppress-next-line MISRAC2012-DIR_4_1 MISRAC2012-RULE_18_3 "lh, rh, pages_info.pages are related" */
-	while ((lh >= pages_info.pages) && (rh < (pages_info.pages + pages_info.totalsz / SIZE_PAGE)) &&
-			((lh->flags & PAGE_FREE) != 0U) && ((rh->flags & PAGE_FREE) != 0U) && (lh->idx == rh->idx) &&
-			((lh->addr + (1UL << lh->idx)) == rh->addr) && (idx < SIZE_VM_SIZES)) {
-
-		if (p == lh) {
-			LIST_REMOVE(&pages_info.sizes[idx], rh);
+		if ((p->addr & ((u64)1 << idx)) != 0U) {
+			if (pi < n) {
+				break;
+			}
+			lh = p - n;
+			rh = p;
+			buddy = lh;
 		}
 		else {
-			LIST_REMOVE(&pages_info.sizes[idx], lh);
+			if ((pi + n) >= npages) {
+				break;
+			}
+			lh = p;
+			rh = p + n;
+			buddy = rh;
 		}
+
+		/* The page at the buddy's place heads a free block of this size, and the two are
+		 * contiguous (there may be a hole in physical memory between neighbouring page_t) */
+		if (((buddy->flags & PAGE_FREE) == 0U) || (buddy->idx != idx) || ((lh->addr + ((u64)1 << idx)) != rh->addr)) {
+			break;
+		}
+
+		LIST_REMOVE(&pages_info.sizes[idx], buddy);
 
 		rh->idx = (u8)hal_cpuGetFirstBit(SIZE_PAGE);
-		lh->idx++;
 		idx++;
-
+		lh->idx = (u8)idx;
 		p = lh;
-
-		if ((p->addr & (((u64)1 << (idx + 1U)) - 1U)) != 0U) {
-			lh = p - ((u64)1 << idx) / SIZE_PAGE;
-		}
-		else {
-			rh = p + ((u64)1 << idx) / SIZE_PAGE;
-		}
 	}
 
 	LIST_ADD(&pages_info.sizes[idx], p);
