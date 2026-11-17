@@ -20,6 +20,7 @@
 #include "posix.h"
 #include "posix_private.h"
 #include "fdpass.h"
+#include "uaddr.h"
 #include "uchannel.h"
 #include "usocket.h"
 
@@ -101,19 +102,6 @@ enum {
 };
 
 
-/*
- * The address a socket is bound to, as reported by getsockname() and
- * getpeername(). It is immutable once made, so an endpoint can share it with the
- * sockets that report it too (an accepted socket reports its listener's address)
- * instead of reading it from them.
- */
-typedef struct {
-	int refs; /* atomic */
-	size_t len; /* of the path, without the terminating NUL */
-	char path[];
-} usocket_addr_t;
-
-
 struct _usocket_t {
 	idnode_t linkage;               /* tree of named sockets, valid while `named` */
 	struct _usocket_t *next, *prev; /* linkage in a listener's pending list */
@@ -129,8 +117,9 @@ struct _usocket_t {
 	size_t rcvbuf;  /* size of the channels created for this socket */
 	uchannel_t *rx; /* counted */
 	uchannel_t *tx; /* counted */
-	usocket_addr_t *addr;     /* counted, NULL while unbound */
-	usocket_addr_t *peerAddr; /* counted, NULL while the peer is unbound */
+
+	uaddr_t *addr;     /* own name, set once by bind() or accept(), counted */
+	uaddr_t *peerAddr; /* name of the socket we are connected to, counted */
 
 	struct _usocket_t *pending; /* connectors waiting to be accepted, counted */
 	u8 pendingCnt;
@@ -158,77 +147,16 @@ static struct {
 } usocket_common;
 
 
-/* Makes an address of the first `len` bytes of `path`. */
-static usocket_addr_t *usocket_addrAlloc(const char *path, size_t len)
+static int usocket_isFramed(unsigned int type)
 {
-	usocket_addr_t *addr;
-
-	addr = vm_kmalloc(sizeof(usocket_addr_t) + len + 1U);
-	if (addr != NULL) {
-		addr->refs = 1;
-		addr->len = len;
-		hal_memcpy(addr->path, path, len);
-		addr->path[len] = '\0';
-	}
-
-	return addr;
+	return (type != SOCK_STREAM) ? 1 : 0;
 }
 
 
-static usocket_addr_t *usocket_addrRef(usocket_addr_t *addr)
+/* Only a datagram tells its reader where it came from, so only its frames carry a name. */
+static int usocket_isSourced(unsigned int type)
 {
-	if (addr != NULL) {
-		(void)lib_atomicIncrement(&addr->refs);
-	}
-
-	return addr;
-}
-
-
-static void usocket_addrPut(usocket_addr_t *addr)
-{
-	if ((addr != NULL) && (lib_atomicDecrement(&addr->refs) == 0)) {
-		vm_kfree(addr);
-	}
-}
-
-
-/*
- * Returns an address to the caller the way getsockname() and getpeername() do:
- * truncated to the caller's buffer, with the length of the whole address. An
- * unbound socket has only the family.
- */
-static int usocket_addrCopyOut(const usocket_addr_t *addr, struct sockaddr *address, socklen_t *address_len)
-{
-	sa_family_t family = AF_UNIX;
-	size_t len, n;
-
-	if (address_len == NULL) {
-		return -EINVAL;
-	}
-
-	len = sizeof(sa_family_t);
-	if (addr != NULL) {
-		len += addr->len + 1U;
-	}
-
-	n = min(len, (size_t)*address_len);
-	if (n > 0U) {
-		hal_memcpy(address, &family, min(n, sizeof(family)));
-	}
-	if (n > sizeof(family)) {
-		hal_memcpy(address->sa_data, addr->path, n - sizeof(family));
-	}
-
-	*address_len = (socklen_t)len;
-
-	return EOK;
-}
-
-
-static int usocket_isFramed(const usocket_t *s)
-{
-	return (s->type != SOCK_STREAM) ? 1 : 0;
+	return (type == SOCK_DGRAM) ? 1 : 0;
 }
 
 
@@ -313,8 +241,8 @@ static void usocket_put(usocket_t *s)
 	 */
 	uchannel_put(s->rx);
 	uchannel_put(s->tx);
-	usocket_addrPut(s->addr);
-	usocket_addrPut(s->peerAddr);
+	uaddr_put(s->addr);
+	uaddr_put(s->peerAddr);
 	(void)proc_lockDone(&s->lock);
 	vm_kfree(s);
 }
@@ -421,6 +349,10 @@ static unsigned int _usocket_opFlags(const usocket_t *s, unsigned int flags)
 		op |= UCHANNEL_OP_PEEK;
 	}
 
+	if ((flags & MSG_TRUNC) != 0U) {
+		op |= UCHANNEL_OP_TRUNC;
+	}
+
 	return op;
 }
 
@@ -447,7 +379,7 @@ static int usocket_rxCreate(usocket_t *s)
 		return EOK;
 	}
 
-	rx = uchannel_alloc(size, 1);
+	rx = uchannel_alloc(size, 1, 1);
 	if (rx == NULL) {
 		return -ENOMEM;
 	}
@@ -496,7 +428,7 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 {
 	usocket_t *s[2];
 	uchannel_t *ch[2];
-	int nonblock, framed;
+	int nonblock, framed, sourced;
 	size_t size;
 
 	nonblock = ((type & SOCK_NONBLOCK) != 0U) ? 1 : 0;
@@ -510,7 +442,8 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 		return -EPROTONOSUPPORT;
 	}
 
-	framed = (type != SOCK_STREAM) ? 1 : 0;
+	framed = usocket_isFramed(type);
+	sourced = usocket_isSourced(type);
 	size = usocket_defaultBufferSize(type);
 
 	s[0] = usocket_alloc(type, nonblock);
@@ -524,14 +457,14 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 		return -ENOMEM;
 	}
 
-	ch[0] = uchannel_alloc(size, framed);
+	ch[0] = uchannel_alloc(size, framed, sourced);
 	if (ch[0] == NULL) {
 		usocket_put(s[0]);
 		usocket_put(s[1]);
 		return -ENOMEM;
 	}
 
-	ch[1] = uchannel_alloc(size, framed);
+	ch[1] = uchannel_alloc(size, framed, sourced);
 	if (ch[1] == NULL) {
 		uchannel_put(ch[0]);
 		usocket_put(s[0]);
@@ -559,12 +492,12 @@ int usocket_socketpair(int domain, unsigned int type, int protocol, usocket_t *s
 
 int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address_len)
 {
-	usocket_addr_t *addr, *oldAddr;
+	uaddr_t *addr;
 	char *path, *name;
 	const char *dir, *sunPath;
 	oid_t odir, dev, node;
 	size_t len, maxLen;
-	int err, id;
+	int err, id, hasName;
 
 	if ((address == NULL) || (address_len <= sizeof(sa_family_t))) {
 		return -EINVAL;
@@ -585,30 +518,34 @@ int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address
 	}
 
 	/*
-	 * Only a socket that already has a name is refused, whatever its
-	 * connection state. usocket_nameAlloc() decides that atomically, and the
-	 * exclusive hold on the naming it gives is what lets the two message
-	 * exchanges below run without any lock held.
-	 */
-
-	addr = usocket_addrAlloc(sunPath, len);
-	path = (addr != NULL) ? lib_strdup(addr->path) : NULL;
-	id = (path != NULL) ? usocket_nameAlloc(s) : -ENOMEM;
-
-	if (id < 0) {
-		vm_kfree(path);
-		usocket_addrPut(addr);
-		return id;
-	}
-
-	/*
-	 * The address is in place before the socket file is made, so that no one
-	 * who reaches the socket by its name can find it without one.
+	 * A socket that already has a name is refused, whatever its connection
+	 * state - one it took from a listener when it was accepted, which is in
+	 * place before the socket is handed out, or one it bound itself, which
+	 * usocket_nameAlloc() decides on atomically. The exclusive hold on the
+	 * naming that it gives is what lets the two message exchanges below run
+	 * without any lock held.
 	 */
 	(void)proc_lockSet(&s->lock);
-	oldAddr = s->addr;
-	s->addr = addr;
+	hasName = (s->addr != NULL) ? 1 : 0;
 	(void)proc_lockClear(&s->lock);
+
+	if (hasName != 0) {
+		return -EINVAL;
+	}
+
+	path = vm_kmalloc(len + 1U);
+	if (path != NULL) {
+		hal_memcpy(path, sunPath, len);
+		path[len] = '\0';
+	}
+	addr = (path != NULL) ? uaddr_alloc(path) : NULL;
+	id = (addr != NULL) ? usocket_nameAlloc(s) : -ENOMEM;
+
+	if (id < 0) {
+		uaddr_put(addr);
+		vm_kfree(path);
+		return id;
+	}
 
 	lib_splitname(path, &name, &dir);
 
@@ -642,22 +579,19 @@ int usocket_bind(usocket_t *s, const struct sockaddr *address, socklen_t address
 		 * this call, rather than a half made one that may yet be taken back.
 		 */
 		(void)proc_lockSet(&s->lock);
+		s->addr = addr;
 		s->flags |= USOCKET_BOUND;
 		(void)proc_lockClear(&s->lock);
 
-		usocket_addrPut(oldAddr);
+		addr = NULL;
 	}
 	else {
-		(void)proc_lockSet(&s->lock);
-		s->addr = oldAddr;
-		(void)proc_lockClear(&s->lock);
-
-		usocket_addrPut(addr);
-
 		if (usocket_nameFree(s) != 0) {
 			usocket_put(s);
 		}
 	}
+
+	uaddr_put(addr);
 
 	return err;
 }
@@ -745,7 +679,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 {
 	usocket_t *ls;
 	uchannel_t *ch, *rx, *oldTx = NULL, *oldRx;
-	usocket_addr_t *peerAddr, *oldPeerAddr;
+	uaddr_t *lsAddr = NULL, *oldAddr = NULL;
 	oid_t oid;
 	size_t rcvbuf;
 	int err = EOK, nonblock;
@@ -762,7 +696,9 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		}
 		else if (s->state == (u8)usocketConnected) {
 			oldTx = s->tx;
+			oldAddr = s->peerAddr;
 			s->tx = NULL;
+			s->peerAddr = NULL;
 			s->state = (u8)usocketUnconnected;
 		}
 		else {
@@ -770,6 +706,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		}
 		(void)proc_lockClear(&s->lock);
 		uchannel_put(oldTx);
+		uaddr_put(oldAddr);
 		return err;
 	}
 
@@ -840,32 +777,32 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 
 	if (s->type == SOCK_DGRAM) {
 		/*
-		 * No handshake: caching a reference to the peer's receive channel is
-		 * the whole of a datagram connection.
+		 * No handshake: caching a reference to the peer's receive channel and
+		 * address is the whole of a datagram connection.
 		 */
 		(void)proc_lockSet(&ls->lock);
 		ch = uchannel_ref(ls->rx);
-		peerAddr = usocket_addrRef(ls->addr);
+		lsAddr = uaddr_ref(ls->addr);
 		(void)proc_lockClear(&ls->lock);
 		usocket_put(ls);
 
 		if (ch == NULL) {
-			usocket_addrPut(peerAddr);
+			uaddr_put(lsAddr);
 			usocket_connectRollback(s);
 			return -ECONNREFUSED;
 		}
 
 		(void)proc_lockSet(&s->lock);
 		oldTx = s->tx;
+		oldAddr = s->peerAddr;
 		s->tx = ch;
-		oldPeerAddr = s->peerAddr;
-		s->peerAddr = peerAddr;
+		s->peerAddr = lsAddr;
 		s->state = (u8)usocketConnected;
 		(void)proc_lockClear(&s->lock);
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
-		usocket_addrPut(oldPeerAddr);
+		uaddr_put(oldAddr);
 
 		return EOK;
 	}
@@ -876,7 +813,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 	 * Every field of this socket is therefore still touched only under
 	 * its own lock.
 	 */
-	rx = uchannel_alloc(rcvbuf, usocket_isFramed(s));
+	rx = uchannel_alloc(rcvbuf, usocket_isFramed(s->type), usocket_isSourced(s->type));
 	if (rx == NULL) {
 		usocket_put(ls);
 		usocket_connectRollback(s);
@@ -900,6 +837,7 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		ls->pendingCnt++;
 		(void)proc_threadBroadcast(&ls->acceptq);
 		uchannel_pollNotify();
+		lsAddr = uaddr_ref(ls->addr);
 		err = EOK;
 	}
 	(void)proc_lockClear(&ls->lock);
@@ -912,6 +850,17 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 	}
 
 	(void)proc_lockSet(&s->lock);
+
+	/*
+	 * The name of the socket we are connecting to, which getpeername() answers
+	 * with. It is set here, and not once the connection is up, so that a
+	 * non-blocking connect() - which returns from the wait below with the
+	 * connection still pending - leaves it behind as well. There is no name to
+	 * replace: this attempt started from an unconnected socket, and it is the
+	 * only one that can be in flight, as every other state answers connect()
+	 * with an error.
+	 */
+	s->peerAddr = lsAddr;
 
 	nonblock = ((s->flags & USOCKET_NONBLOCK) != 0U) ? 1 : 0;
 
@@ -956,11 +905,14 @@ int usocket_connect(usocket_t *s, const struct sockaddr *address, socklen_t addr
 		s->state = (u8)usocketUnconnected;
 		ch = s->rx;
 		s->rx = NULL;
+		oldAddr = s->peerAddr;
+		s->peerAddr = NULL;
 	}
 
 	(void)proc_lockClear(&s->lock);
 
 	uchannel_put(ch);
+	uaddr_put(oldAddr);
 
 	return err;
 }
@@ -970,7 +922,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 {
 	usocket_t *cs, *ns;
 	uchannel_t *c2s, *tx, *oldTx;
-	usocket_addr_t *addr, *peerAddr, *oldPeerAddr;
+	uaddr_t *lsAddr, *csAddr;
 	size_t rcvbuf;
 	int err, nonblock, listenerPid, connectorPid;
 
@@ -1009,8 +961,8 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 		cs = ls->pending;
 		LIST_REMOVE(&ls->pending, cs);
 		ls->pendingCnt--;
-		addr = usocket_addrRef(ls->addr);
 		rcvbuf = ls->rcvbuf;
+		lsAddr = uaddr_ref(ls->addr);
 		listenerPid = ls->ownPid;
 
 		(void)proc_lockClear(&ls->lock);
@@ -1019,16 +971,21 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		ns = usocket_alloc(ls->type, nonblock);
 		if (ns == NULL) {
-			usocket_addrPut(addr);
+			uaddr_put(lsAddr);
 			usocket_abort(cs, ECONNREFUSED);
 			usocket_put(cs);
 			return -ENOMEM;
 		}
 
-		/* ns is not reachable yet, and reports the listener's address as its own */
-		ns->addr = addr;
+		/*
+		 * The connection is named after the socket it was accepted on, as it is
+		 * the only name it has ever been reachable by. Setting it here rather
+		 * than at the end leaves it to usocket_put() to give back on the paths
+		 * that drop `ns` below.
+		 */
+		ns->addr = lsAddr;
 
-		c2s = uchannel_alloc(rcvbuf, usocket_isFramed(ls));
+		c2s = uchannel_alloc(rcvbuf, usocket_isFramed(ls->type), usocket_isSourced(ls->type));
 		if (c2s == NULL) {
 			usocket_put(ns);
 			usocket_abort(cs, ECONNREFUSED);
@@ -1038,8 +995,7 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/*
 		 * The one and only place where a socket touches another socket's
-		 * endpoint: handing the channels and the listener's address over to
-		 * the connector, and taking the connector's address in return.
+		 * endpoint: handing the channels over to the connector.
 		 */
 		(void)proc_lockSet(&cs->lock);
 
@@ -1055,16 +1011,13 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 			continue;
 		}
 
-		peerAddr = usocket_addrRef(cs->addr);
-		oldPeerAddr = cs->peerAddr;
-		cs->peerAddr = usocket_addrRef(addr);
-
 		tx = uchannel_ref(cs->rx);
 		oldTx = cs->tx;
 		cs->tx = uchannel_ref(c2s);
 		cs->peerPid = listenerPid;
 		connectorPid = cs->ownPid;
 		cs->state = (u8)usocketConnected;
+		csAddr = uaddr_ref(cs->addr);
 		(void)proc_threadBroadcast(&cs->connq);
 		uchannel_pollNotify();
 
@@ -1072,17 +1025,21 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
-		usocket_addrPut(oldPeerAddr);
 		usocket_put(cs);
 
 		/* ns is not reachable yet */
-		ns->peerAddr = peerAddr;
 		ns->rcvbuf = rcvbuf;
 		ns->rx = c2s;
 		ns->tx = tx;
+		ns->peerAddr = csAddr;
 		ns->ownPid = listenerPid;
 		ns->peerPid = connectorPid;
 		ns->state = (u8)usocketConnected;
+
+		if ((address != NULL) && (address_len != NULL)) {
+			/* the same answer getpeername() would give for the new socket */
+			uaddr_copy(ns->peerAddr, address, address_len);
+		}
 
 		*s = ns;
 
@@ -1093,18 +1050,33 @@ int usocket_accept4(usocket_t *ls, struct sockaddr *address, socklen_t *address_
 
 int usocket_getpeername(usocket_t *s, struct sockaddr *address, socklen_t *address_len)
 {
-	usocket_addr_t *addr;
-	int connected, err;
+	uaddr_t *addr;
+	int err;
+
+	if ((address == NULL) || (address_len == NULL)) {
+		return -EINVAL;
+	}
 
 	(void)proc_lockSet(&s->lock);
-	connected = (s->state == (u8)usocketConnected) ? 1 : 0;
-	addr = usocket_addrRef(s->peerAddr);
+
+	/*
+	 * A connection that the peer has closed still has a peer to name, as the
+	 * socket stays connected until it is closed itself.
+	 */
+	if (s->state == (u8)usocketConnected) {
+		addr = uaddr_ref(s->peerAddr);
+		err = EOK;
+	}
+	else {
+		err = -ENOTCONN;
+	}
+
 	(void)proc_lockClear(&s->lock);
 
-	/* no lock is held while the caller's memory is written */
-	err = (connected != 0) ? usocket_addrCopyOut(addr, address, address_len) : -ENOTCONN;
-
-	usocket_addrPut(addr);
+	if (err == EOK) {
+		uaddr_copy(addr, address, address_len);
+		uaddr_put(addr);
+	}
 
 	return err;
 }
@@ -1112,19 +1084,22 @@ int usocket_getpeername(usocket_t *s, struct sockaddr *address, socklen_t *addre
 
 int usocket_getsockname(usocket_t *s, struct sockaddr *address, socklen_t *address_len)
 {
-	usocket_addr_t *addr;
-	int err;
+	uaddr_t *addr;
+
+	if ((address == NULL) || (address_len == NULL)) {
+		return -EINVAL;
+	}
 
 	(void)proc_lockSet(&s->lock);
-	addr = usocket_addrRef(s->addr);
+	addr = uaddr_ref(s->addr);
 	(void)proc_lockClear(&s->lock);
 
-	/* no lock is held while the caller's memory is written */
-	err = usocket_addrCopyOut(addr, address, address_len);
+	/* a socket with no name of its own answers with the family alone */
+	uaddr_copy(addr, address, address_len);
 
-	usocket_addrPut(addr);
+	uaddr_put(addr);
 
-	return err;
+	return EOK;
 }
 
 
@@ -1156,9 +1131,13 @@ static int usocket_getPeerCred(usocket_t *s, struct ucred *cred)
 int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, socklen_t *optlen)
 {
 	uchannel_t *rx;
-	size_t size;
+	size_t len, size;
 	int err = EOK;
-	int value;
+	union {
+		int i;
+		struct timeval t;
+		struct linger l;
+	} val;
 
 	if (level != SOL_SOCKET) {
 		return -EINVAL;
@@ -1181,11 +1160,62 @@ int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, sockl
 		return err;
 	}
 
-	if (*optlen < sizeof(int)) {
+	if (((unsigned int)optname == SO_RCVTIMEO) || ((unsigned int)optname == SO_SNDTIMEO)) {
+		len = sizeof(struct timeval);
+	}
+	else if ((unsigned int)optname == SO_LINGER) {
+		len = sizeof(struct linger);
+	}
+	else {
+		len = sizeof(int);
+	}
+
+	if (*optlen < len) {
 		return -EINVAL;
 	}
 
 	switch ((unsigned int)optname) {
+		case SO_BROADCAST:
+		case SO_DEBUG:
+		case SO_DONTROUTE:
+		case SO_KEEPALIVE:
+		case SO_OOBINLINE:
+		case SO_REUSEADDR:
+		case SO_SNDBUF:
+			val.i = 0;
+			break;
+
+		case SO_LINGER:
+			val.l.l_onoff = 0;
+			val.l.l_linger = 0;
+			break;
+
+		case SO_ACCEPTCONN:
+			(void)proc_lockSet(&s->lock);
+			val.i = (s->state == (u8)usocketListening) ? 1 : 0;
+			(void)proc_lockClear(&s->lock);
+			break;
+
+		case SO_PROTOCOL:
+			val.i = PF_UNSPEC;
+			break;
+
+		case SO_RCVLOWAT:
+		case SO_SNDLOWAT:
+			val.i = 1;
+			break;
+
+		case SO_RCVTIMEO:
+		case SO_SNDTIMEO:
+			val.t.tv_sec = 0;
+			val.t.tv_usec = 0;
+			break;
+
+		case SO_TYPE:
+			/* GLib's g_socket_new_from_fd() needs it to adopt an inherited socket */
+			val.i = (int)s->type;
+			break;
+
 		case SO_RCVBUF:
 			(void)proc_lockSet(&s->lock);
 			size = s->rcvbuf;
@@ -1197,25 +1227,14 @@ int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, sockl
 				uchannel_put(rx);
 			}
 
-			value = (int)size;
+			val.i = (int)size;
 			break;
 
 		case SO_ERROR:
 			/* POSIX: the pending error is returned in optval and cleared */
 			(void)proc_lockSet(&s->lock);
-			value = s->err;
+			val.i = s->err;
 			s->err = 0;
-			(void)proc_lockClear(&s->lock);
-			break;
-
-		case SO_TYPE:
-			/* GLib's g_socket_new_from_fd() needs it to adopt an inherited socket */
-			value = (int)s->type;
-			break;
-
-		case SO_ACCEPTCONN:
-			(void)proc_lockSet(&s->lock);
-			value = (s->state == (u8)usocketListening) ? 1 : 0;
 			(void)proc_lockClear(&s->lock);
 			break;
 
@@ -1225,8 +1244,8 @@ int usocket_getsockopt(usocket_t *s, int level, int optname, void *optval, sockl
 	}
 
 	if (err == EOK) {
-		*((int *)optval) = value;
-		*optlen = (socklen_t)sizeof(int);
+		hal_memcpy(optval, &val, len);
+		*optlen = (socklen_t)len;
 	}
 
 	return err;
@@ -1290,26 +1309,24 @@ int usocket_setsockopt(usocket_t *s, int level, int optname, const void *optval,
 }
 
 
-static ssize_t usocket_recv(usocket_t *s, void *buf, size_t len, unsigned int flags, struct sockaddr *src_addr, socklen_t *src_len, void *control, socklen_t *controllen)
+static ssize_t usocket_recv(usocket_t *s, void *buf, size_t len, unsigned int flags, unsigned int *oflags, struct sockaddr *src_addr, socklen_t *src_len, void *control, socklen_t *controllen)
 {
 	uchannel_t *rx;
 	fdpack_t *packs = NULL;
+	uaddr_t *src = NULL;
 	ssize_t ret;
 	unsigned int op;
-	int wantsControl, shutRd, err;
+	int wantsSrc, wantsControl, framed, shutRd, err;
 
+	wantsSrc = ((src_addr != NULL) && (src_len != NULL)) ? 1 : 0;
 	wantsControl = ((control != NULL) && (controllen != NULL) && (*controllen > 0U)) ? 1 : 0;
+	framed = usocket_isFramed(s->type);
 
 	(void)proc_lockSet(&s->lock);
 	op = _usocket_opFlags(s, flags);
 	rx = uchannel_ref(s->rx);
 	shutRd = ((s->flags & USOCKET_SHUT_RD) != 0U) ? 1 : 0;
 	(void)proc_lockClear(&s->lock);
-
-	if ((src_addr != NULL) && (src_len != NULL)) {
-		/* TODO: for a datagram socket report the peer address here */
-		*src_len = 0;
-	}
 
 	err = EOK;
 	if ((rx == NULL) && (s->type == SOCK_DGRAM) && (shutRd == 0)) {
@@ -1322,44 +1339,75 @@ static ssize_t usocket_recv(usocket_t *s, void *buf, size_t len, unsigned int fl
 	}
 
 	if (rx == NULL) {
-		if (controllen != NULL) {
-			*controllen = 0;
-		}
-
 		if (err != EOK) {
 			return (ssize_t)err;
 		}
 
-		/* a socket shut down for reading is EOS, not unconnected */
-		return (shutRd != 0) ? 0 : -ENOTCONN;
-	}
-
-	ret = uchannel_read(rx, buf, len, op, (wantsControl != 0) ? &packs : NULL);
-
-	if (packs != NULL) {
-		/*
-		 * No lock is held here - fdpass_unpack() reaches into the file
-		 * descriptor table of this process.
-		 */
-		(void)fdpass_unpack(&packs, control, controllen);
-		if (packs != NULL) {
-			if (usocket_isFramed(s) != 0) {
-				/*
-				 * A message's descriptors are delivered with that message or
-				 * not at all: what did not fit the control buffer is closed,
-				 * as on Linux (which also sets MSG_CTRUNC).
-				 */
-				fdpass_discard(&packs);
-			}
-			else {
-				uchannel_returnPacks(rx, &packs);
-			}
+		if (shutRd == 0) {
+			return -ENOTCONN;
 		}
-	}
-	else {
+
+		/* a socket shut down for reading is EOS, not unconnected: no data, hence no source and no control data */
+		if (wantsSrc != 0) {
+			*src_len = 0;
+		}
+
 		if (controllen != NULL) {
 			*controllen = 0;
 		}
+
+		return 0;
+	}
+
+	/*
+	 * A message's descriptors are delivered with that message or not at all:
+	 * what does not fit the control buffer, or a read that asks for none, has
+	 * them closed and reports MSG_CTRUNC, as on Linux. A byte stream detaches
+	 * every queued pack at once, including those that travel with bytes not
+	 * read yet, so it keeps them instead: a read that asks for no control data
+	 * leaves them queued, and what does not fit goes back to the channel for
+	 * the next recvmsg().
+	 */
+	ret = uchannel_read(rx, buf, len, op, oflags, (wantsSrc != 0) ? &src : NULL, ((framed != 0) || (wantsControl != 0)) ? &packs : NULL);
+
+	if (src != NULL) {
+		uaddr_copy(src, src_addr, src_len);
+		uaddr_put(src);
+	}
+	else if ((ret >= 0) && (wantsSrc != 0)) {
+		/* a datagram from a nameless sender, and every connected socket, answer with a length of zero */
+		*src_len = 0;
+	}
+	else {
+		/* no source to report */
+	}
+
+	if (packs != NULL) {
+		if (wantsControl != 0) {
+			/*
+			 * No lock is held here - fdpass_unpack() reaches into the file
+			 * descriptor table of this process.
+			 */
+			(void)fdpass_unpack(&packs, control, controllen);
+		}
+		if (packs == NULL) {
+			/* all delivered */
+		}
+		else if (framed != 0) {
+			fdpass_discard(&packs);
+			if (oflags != NULL) {
+				*oflags |= MSG_CTRUNC;
+			}
+		}
+		else {
+			uchannel_returnPacks(rx, &packs);
+		}
+	}
+	else if ((ret >= 0) && (controllen != NULL)) {
+		*controllen = 0;
+	}
+	else {
+		/* no control data to report */
 	}
 
 	uchannel_put(rx);
@@ -1372,12 +1420,14 @@ static ssize_t usocket_send(usocket_t *s, const void *buf, size_t len, unsigned 
 {
 	usocket_t *d;
 	uchannel_t *tx, *oldTx = NULL;
+	uaddr_t *src = NULL, *oldAddr = NULL;
 	oid_t oid;
 	ssize_t ret;
 	unsigned int op;
-	int dgram, err;
+	int dgram, sourced, err;
 
 	dgram = (s->type == SOCK_DGRAM) ? 1 : 0;
+	sourced = usocket_isSourced(s->type);
 
 	/* TODO: validate `dest_len` */
 	if ((dgram != 0) && (dest_addr != NULL) && (dest_len != 0U)) {
@@ -1412,18 +1462,20 @@ static ssize_t usocket_send(usocket_t *s, const void *buf, size_t len, unsigned 
 		(void)proc_lockSet(&s->lock);
 		op = _usocket_opFlags(s, flags);
 		err = ((s->flags & USOCKET_SHUT_WR) != 0U) ? -EPIPE : EOK;
+		src = uaddr_ref(s->addr);
 		(void)proc_lockClear(&s->lock);
 
-		if (err != EOK) {
+		if ((err != EOK) || (tx == NULL)) {
+			uaddr_put(src);
 			uchannel_put(tx);
-			return (ssize_t)err;
+			return (err != EOK) ? (ssize_t)err : -ECONNREFUSED;
 		}
 
-		if (tx == NULL) {
-			return -ECONNREFUSED;
+		ret = uchannel_write(tx, buf, len, op, src, fdpack);
+		if (ret <= 0) {
+			/* no frame was written, so its name is still ours */
+			uaddr_put(src);
 		}
-
-		ret = uchannel_write(tx, buf, len, op, fdpack);
 
 		uchannel_put(tx);
 
@@ -1442,14 +1494,20 @@ static ssize_t usocket_send(usocket_t *s, const void *buf, size_t len, unsigned 
 	else {
 		tx = uchannel_ref(s->tx);
 		err = (tx == NULL) ? -ENOTCONN : EOK;
+		src = (sourced != 0) ? uaddr_ref(s->addr) : NULL;
 	}
 	(void)proc_lockClear(&s->lock);
 
 	if (err != EOK) {
+		uaddr_put(src);
 		return (ssize_t)err;
 	}
 
-	ret = uchannel_write(tx, buf, len, op, fdpack);
+	ret = uchannel_write(tx, buf, len, op, src, fdpack);
+	if (ret <= 0) {
+		/* no frame was written, so its name is still ours */
+		uaddr_put(src);
+	}
 
 	if ((dgram != 0) && (ret == -EPIPE)) {
 		/*
@@ -1460,13 +1518,16 @@ static ssize_t usocket_send(usocket_t *s, const void *buf, size_t len, unsigned 
 		(void)proc_lockSet(&s->lock);
 		if (s->tx == tx) {
 			oldTx = s->tx;
+			oldAddr = s->peerAddr;
 			s->tx = NULL;
+			s->peerAddr = NULL;
 			s->state = (u8)usocketUnconnected;
 		}
 		(void)proc_lockClear(&s->lock);
 
 		/* uchannel_put() can reach into the descriptor table, so hold no lock */
 		uchannel_put(oldTx);
+		uaddr_put(oldAddr);
 
 		ret = -ECONNREFUSED;
 	}
@@ -1479,7 +1540,7 @@ static ssize_t usocket_send(usocket_t *s, const void *buf, size_t len, unsigned 
 
 ssize_t usocket_recvfrom(usocket_t *s, void *msg, size_t len, unsigned int flags, struct sockaddr *src_addr, socklen_t *src_len)
 {
-	return usocket_recv(s, msg, len, flags, src_addr, src_len, NULL, NULL);
+	return usocket_recv(s, msg, len, flags, NULL, src_addr, src_len, NULL, NULL);
 }
 
 
@@ -1494,6 +1555,7 @@ ssize_t usocket_recvmsg(usocket_t *s, struct msghdr *msg, unsigned int flags)
 	ssize_t err;
 	void *buf = NULL;
 	size_t len = 0;
+	unsigned int oflags = 0U;
 
 	/* multiple buffers are not supported */
 	if (msg->msg_iovlen > 1) {
@@ -1505,11 +1567,10 @@ ssize_t usocket_recvmsg(usocket_t *s, struct msghdr *msg, unsigned int flags)
 		len = msg->msg_iov->iov_len;
 	}
 
-	err = usocket_recv(s, buf, len, flags, msg->msg_name, &msg->msg_namelen, msg->msg_control, &msg->msg_controllen);
+	err = usocket_recv(s, buf, len, flags, &oflags, msg->msg_name, &msg->msg_namelen, msg->msg_control, &msg->msg_controllen);
 
 	if (err >= 0) {
-		/* output flags are not supported */
-		msg->msg_flags = 0;
+		msg->msg_flags = (int)oflags;
 	}
 
 	return err;

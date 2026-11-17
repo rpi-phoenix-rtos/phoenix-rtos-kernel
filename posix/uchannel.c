@@ -21,7 +21,8 @@
 
 
 /*
- * A frame is stored as its length followed by its bytes. The top bit of the
+ * A frame is stored as its length, the name of its writer on a `sourced`
+ * channel (see uaddr.h), and its bytes. The top bit of the
  * length word says that a descriptor pack travels with the frame: the packs of
  * a framed channel are queued in frame order, one per marked frame, so the
  * reader of a marked frame takes exactly the oldest pack. A frame can never be
@@ -74,7 +75,36 @@ size_t uchannel_roundSize(size_t size)
 }
 
 
-uchannel_t *uchannel_alloc(size_t size, int framed)
+/*
+ * Size of a frame header: the length of the frame, and optionally the name of
+ * whoever wrote it.
+ */
+static size_t _uchannel_hdrSize(const uchannel_t *ch)
+{
+	return (ch->sourced != 0U) ? (sizeof(size_t) + sizeof(uaddr_t *)) : sizeof(size_t);
+}
+
+
+/*
+ * Gives back the names of the frames in a ring that nobody will ever read. The
+ * ring is private to the caller here - either detached by uchannel_resize() or
+ * left behind by the last reference - so no lock is taken.
+ */
+static void uchannel_dropSrcs(cbuffer_t *buffer)
+{
+	uaddr_t *addr;
+	size_t len;
+
+	while (_cbuffer_avail(buffer) > (sizeof(len) + sizeof(addr))) {
+		(void)_cbuffer_read(buffer, &len, sizeof(len));
+		(void)_cbuffer_read(buffer, &addr, sizeof(addr));
+		(void)_cbuffer_discard(buffer, len & ~UCHANNEL_FRAME_FDS);
+		uaddr_put(addr);
+	}
+}
+
+
+uchannel_t *uchannel_alloc(size_t size, int framed, int sourced)
 {
 	uchannel_t *ch;
 	void *data;
@@ -98,6 +128,7 @@ uchannel_t *uchannel_alloc(size_t size, int framed)
 
 	ch->refs = 1;
 	ch->framed = (framed != 0) ? 1U : 0U;
+	ch->sourced = ((framed != 0) && (sourced != 0)) ? 1U : 0U;
 	ch->pollTargeted = 0;
 	ch->atomic = 0;
 	ch->maxSize = 0; /* a socket's ring never grows by itself */
@@ -114,7 +145,7 @@ uchannel_t *uchannel_alloc(size_t size, int framed)
 
 uchannel_t *uchannel_allocStream(size_t size, size_t maxSize, size_t atomic, const oid_t *pollOid)
 {
-	uchannel_t *ch = uchannel_alloc(size, 0);
+	uchannel_t *ch = uchannel_alloc(size, 0, 0);
 
 	if (ch != NULL) {
 		/* not shared yet, so no lock is needed */
@@ -156,6 +187,9 @@ void uchannel_put(uchannel_t *ch)
 	 * as fdpass_discard() reaches back into the file descriptor table.
 	 */
 	packs = ch->fdpacks;
+	if (ch->sourced != 0U) {
+		uchannel_dropSrcs(&ch->buffer);
+	}
 
 	(void)proc_lockDone(&ch->lock);
 	vm_kfree(ch->buffer.data);
@@ -220,16 +254,18 @@ static int _uchannel_grow(uchannel_t *ch, size_t oldSize, size_t want)
 }
 
 
-ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, fdpack_t *fdpack)
+ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, uaddr_t *src, fdpack_t *fdpack)
 {
 	ssize_t ret = 0;
-	size_t done = 0, chunk, hdr, room, need;
+	size_t done = 0, chunk, hdr, hdrSize, room, need;
 	int err, whole;
 
 	/* an atomic write waits until all of it fits, and only then writes it */
 	whole = (((flags & UCHANNEL_OP_ATOMIC) != 0U) && (ch->framed == 0U) && (len <= ch->atomic)) ? 1 : 0;
 
 	(void)proc_lockSet(&ch->lock);
+
+	hdrSize = _uchannel_hdrSize(ch);
 
 	for (;;) {
 		if ((ch->flags & (UCHANNEL_SHUT_RD | UCHANNEL_SHUT_WR)) != 0U) {
@@ -274,11 +310,11 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 				break;
 			}
 		}
-		else if (len > (ch->buffer.sz - sizeof(len))) {
+		else if (len > (ch->buffer.sz - hdrSize)) {
 			ret = -EMSGSIZE;
 			break;
 		}
-		else if (_cbuffer_free(&ch->buffer) >= (len + sizeof(len))) {
+		else if (_cbuffer_free(&ch->buffer) >= (len + hdrSize)) {
 			hdr = len;
 			if (fdpack != NULL) {
 				/* the descriptors belong to this frame and to no other */
@@ -286,6 +322,10 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
 				LIST_ADD(&ch->fdpacks, fdpack);
 			}
 			(void)_cbuffer_write(&ch->buffer, &hdr, sizeof(hdr));
+			if (ch->sourced != 0U) {
+				/* the frame takes the caller's reference with it */
+				(void)_cbuffer_write(&ch->buffer, &src, sizeof(src));
+			}
 			(void)_cbuffer_write(&ch->buffer, buf, len);
 			(void)proc_threadBroadcast(&ch->rxwait);
 			_uchannel_notify(ch);
@@ -325,24 +365,34 @@ static void _uchannel_takePacks(uchannel_t *ch, fdpack_t **packs)
 }
 
 
-ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags, fdpack_t **packs)
+ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags, unsigned int *oflags, uaddr_t **src, fdpack_t **packs)
 {
 	ssize_t ret = 0;
-	size_t rlen = 0;
+	size_t rlen = 0, clen = 0, hdrSize;
+	uaddr_t *rsrc;
 	fdpack_t *framePack = NULL, *pack;
-	int err, hasFds;
+	int consumed, err, hasFds;
 
 	if (packs != NULL) {
 		*packs = NULL;
 	}
 
+	if (src != NULL) {
+		*src = NULL;
+	}
+
 	(void)proc_lockSet(&ch->lock);
 
+	hdrSize = _uchannel_hdrSize(ch);
+
 	for (;;) {
-		if (len == 0U) {
+		rsrc = NULL;
+		consumed = 0;
+
+		if ((len == 0U) && (ch->framed == 0U)) {
 			/*
-			 * A zero-length read waits for data but takes none of it.
-			 * Note that read(len = 0) never gets here, as posix_read()
+			 * A zero-length read of a stream waits for data but takes none of
+			 * it. Note that read(len = 0) never gets here, as posix_read()
 			 * answers it with 0 straight away.
 			 */
 			ret = 0;
@@ -357,23 +407,31 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 			else {
 				ret = (ssize_t)_cbuffer_read(&ch->buffer, buf, len);
 			}
+
+			consumed = (ret > 0) ? 1 : 0;
 		}
-		else if (_cbuffer_avail(&ch->buffer) > sizeof(rlen)) {
+		else if (_cbuffer_avail(&ch->buffer) > hdrSize) {
 			(void)_cbuffer_peek(&ch->buffer, &rlen, sizeof(rlen));
 			hasFds = ((rlen & UCHANNEL_FRAME_FDS) != 0U) ? 1 : 0;
 			rlen &= ~UCHANNEL_FRAME_FDS;
-			ret = (ssize_t)min(len, rlen);
+			clen = min(len, rlen);
+
+			if (ch->sourced != 0U) {
+				(void)_cbuffer_peekAt(&ch->buffer, sizeof(rlen), &rsrc, sizeof(rsrc));
+			}
 
 			if ((flags & UCHANNEL_OP_PEEK) != 0U) {
-				(void)_cbuffer_peekAt(&ch->buffer, sizeof(rlen), buf, (size_t)ret);
+				/* the frame stays where it is, so its name is handed out with a reference of its own */
+				rsrc = uaddr_ref(rsrc);
+				(void)_cbuffer_peekAt(&ch->buffer, hdrSize, buf, clen);
 			}
 			else {
-				(void)_cbuffer_discard(&ch->buffer, sizeof(rlen));
-				(void)_cbuffer_read(&ch->buffer, buf, (size_t)ret);
+				(void)_cbuffer_discard(&ch->buffer, hdrSize);
+				(void)_cbuffer_read(&ch->buffer, buf, clen);
 
-				if (rlen > (size_t)ret) {
+				if (rlen > clen) {
 					/* the rest of a truncated frame is dropped */
-					(void)_cbuffer_discard(&ch->buffer, rlen - (size_t)ret);
+					(void)_cbuffer_discard(&ch->buffer, rlen - clen);
 				}
 
 				if ((hasFds != 0) && (ch->fdpacks != NULL)) {
@@ -382,8 +440,8 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 					 * it to the next reader of a later frame, which is how a reader
 					 * that drains two frames with descriptors got both sets of
 					 * descriptors with the first and none with the second.
-					 * ret > 0 here (len > 0 and no frame is empty), so the pack is
-					 * either handed out or closed below.
+					 * The frame is consumed here, so the pack is either handed
+					 * out or closed below.
 					 */
 					pack = ch->fdpacks;
 					LIST_REMOVE(&ch->fdpacks, pack);
@@ -391,12 +449,25 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 					LIST_ADD(&framePack, pack);
 				}
 			}
+
+			if ((rlen > clen) && (oflags != NULL)) {
+				*oflags |= MSG_TRUNC;
+			}
+
+			if ((flags & UCHANNEL_OP_TRUNC) != 0U) {
+				ret = (ssize_t)rlen;
+			}
+			else {
+				ret = (ssize_t)clen;
+			}
+
+			consumed = 1;
 		}
 		else {
 			/* no complete frame */
 		}
 
-		if (ret > 0) {
+		if (consumed != 0) {
 			if ((flags & UCHANNEL_OP_PEEK) == 0U) {
 				if (ch->framed != 0U) {
 					if (packs != NULL) {
@@ -412,6 +483,17 @@ ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags,
 				}
 				(void)proc_threadBroadcast(&ch->txwait);
 				_uchannel_notify(ch);
+			}
+
+			if (src != NULL) {
+				*src = rsrc;
+			}
+			else if (rsrc != NULL) {
+				/* a caller that does not ask for the name is not left owing one */
+				uaddr_put(rsrc);
+			}
+			else {
+				/* no name to report */
 			}
 			break;
 		}
@@ -591,7 +673,7 @@ unsigned int uchannel_pollWr(uchannel_t *ch)
 		 * for POLLOUT after EAGAIN (WebKit's IPC) would spin until the reader
 		 * caught up. Writable while at most a quarter of the ring is in use,
 		 * as Linux does for these sockets: any frame of up to three quarters
-		 * of the ring, length word included, then fits.
+		 * of the ring, header included, then fits.
 		 */
 		events |= UCHANNEL_EV_OUT;
 	}
@@ -615,6 +697,7 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 	cbuffer_t old;
 	size_t avail, first;
 	fdpack_t *dropped = NULL;
+	int drop = 0;
 
 	data = vm_kmalloc(size);
 	if (data == NULL) {
@@ -650,12 +733,18 @@ int uchannel_resize(uchannel_t *ch, size_t size)
 			/* the descriptors of the dropped frames must not attach to later ones */
 			_uchannel_takePacks(ch, &dropped);
 		}
+		drop = 1;
 	}
 
 	(void)proc_threadBroadcast(&ch->txwait);
 	_uchannel_notify(ch);
 
 	(void)proc_lockClear(&ch->lock);
+
+	if ((drop != 0) && (ch->sourced != 0U)) {
+		/* the old ring is nobody's but ours now, so the dropped frames can give their names back */
+		uchannel_dropSrcs(&old);
+	}
 
 	vm_kfree(old.data);
 

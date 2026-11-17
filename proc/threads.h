@@ -76,7 +76,6 @@ typedef struct _thread_t {
 	struct _thread_t *procprev;
 
 	int refs;
-	struct _thread_t *blocking;
 
 	struct _thread_t **wait;
 	time_t wakeup;
@@ -97,6 +96,7 @@ typedef struct _thread_t {
 
 	unsigned int sigmask;
 	unsigned int sigpend;
+	unsigned int sigwait;
 	sigorigin_t sigorigin[NSIG - 1]; /* for sigpend, indexed like process->sigactions */
 	void *sigaddr;                   /* si_addr of the last fault raised on this thread */
 	stack_t altstack;                /* sigaltstack(); SS_DISABLE when there is none */
@@ -245,6 +245,8 @@ int proc_schedSet(thread_t *t, int policy, sched_params_t *params);
 int proc_cpuTime(const thread_t *t, int perThread, time_t *cpuTime, time_t *userTime, time_t *sysTime);
 
 
+#ifdef CPUTIME_SPLIT_ENABLE
+
 void proc_cpuTimeKernelEnter(thread_t *t);
 
 
@@ -255,6 +257,34 @@ void *proc_cpuTimeIntrEnter(cpu_context_t *ctx);
 
 
 void proc_cpuTimeIntrLeave(void *interrupted);
+
+#else
+
+static inline void proc_cpuTimeKernelEnter(thread_t *t)
+{
+	(void)t;
+}
+
+
+static inline void proc_cpuTimeKernelLeave(thread_t *t)
+{
+	(void)t;
+}
+
+
+static inline void *proc_cpuTimeIntrEnter(cpu_context_t *ctx)
+{
+	(void)ctx;
+	return NULL;
+}
+
+
+static inline void proc_cpuTimeIntrLeave(void *interrupted)
+{
+	(void)interrupted;
+}
+
+#endif
 
 
 thread_t *threads_findThread(int tid);
@@ -302,6 +332,12 @@ int threads_sigsuspend(unsigned int mask);
 
 /* sigaltstack() for the calling thread; ss and oss are kernel copies */
 int threads_sigaltstack(const stack_t *ss, stack_t *oss);
+
+
+unsigned int threads_sigpending(void);
+
+
+int threads_sigwait(unsigned int set, const time_t *timeout);
 
 
 int threads_schedule(unsigned int n, cpu_context_t *context, void *arg);

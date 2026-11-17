@@ -41,6 +41,7 @@
 
 #define SOL_SOCKET 0xfff
 
+/* values copied from LwIP */
 #define SO_ACCEPTCONN   0x0002U
 #define SO_BROADCAST    0x0020U
 #define SO_DEBUG        0x0001U
@@ -49,6 +50,7 @@
 #define SO_KEEPALIVE    0x0008U
 #define SO_LINGER       0x0080U
 #define SO_OOBINLINE    0x0100U
+#define SO_PROTOCOL     0x100cU
 #define SO_RCVBUF       0x1002U
 #define SO_RCVLOWAT     0x1004U
 #define SO_RCVTIMEO     0x1006U
@@ -67,6 +69,8 @@
 #define MSG_DONTWAIT 0x08U
 #define MSG_MORE     0x10U
 #define MSG_NOSIGNAL 0x20U
+#define MSG_TRUNC    0x40U
+#define MSG_CTRUNC   0x80U
 
 #define SCM_RIGHTS 1
 
@@ -111,6 +115,12 @@ struct cmsghdr {
 	socklen_t cmsg_len;
 	int cmsg_level;
 	int cmsg_type;
+};
+
+
+struct linger {
+	int l_onoff;
+	int l_linger;
 };
 
 

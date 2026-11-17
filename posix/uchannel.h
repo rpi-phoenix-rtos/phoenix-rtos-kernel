@@ -18,6 +18,7 @@
 #include "lib/lib.h"
 #include "proc/proc.h"
 #include "fdpass.h"
+#include "uaddr.h"
 
 
 /*
@@ -45,7 +46,8 @@
 /* Operation flags of uchannel_read()/uchannel_write() */
 #define UCHANNEL_OP_NONBLOCK (1U << 0)
 #define UCHANNEL_OP_PEEK     (1U << 1)
-#define UCHANNEL_OP_ATOMIC   (1U << 2) /* byte-stream write: all of it at once or nothing yet */
+#define UCHANNEL_OP_TRUNC    (1U << 2)
+#define UCHANNEL_OP_ATOMIC   (1U << 3) /* byte-stream write: all of it at once or nothing yet */
 
 /*
  * Events reported by uchannel_pollRd()/uchannel_pollWr(). The channel states
@@ -63,6 +65,8 @@ typedef struct _uchannel_t {
 	int refs; /* atomic */
 
 	u8 framed; /* immutable: 0 - byte stream, 1 - frame */
+
+	u8 sourced; /* immutable: 1 - every frame carries the name of whoever wrote it */
 
 	/*
 	 * Immutable, set by uchannel_allocStream() (zero for a socket channel):
@@ -93,7 +97,7 @@ size_t uchannel_roundSize(size_t size);
 
 
 /* Allocates a channel with one reference. `size` must be a power of two. */
-uchannel_t *uchannel_alloc(size_t size, int framed);
+uchannel_t *uchannel_alloc(size_t size, int framed, int sourced);
 
 
 /*
@@ -136,17 +140,37 @@ void uchannel_put(uchannel_t *ch);
  * one fails with -EWOULDBLOCK rather than writing a part. A longer write is
  * handled as without the flag.
  *
+ * `src` is the name to report as the frame's source. The channel takes the
+ * caller's reference over when it writes the frame, and the caller still owns
+ * it otherwise. Only a channel allocated with `sourced` can carry a name: one
+ * handed to any other channel is neither stored nor given back, so the caller
+ * must not pass one.
+ *
  * `fdpack`, when given, is queued behind the data and its ownership passes to
  * the channel, but only if the call returns a positive count.
  */
-ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, fdpack_t *fdpack);
+ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int flags, uaddr_t *src, fdpack_t *fdpack);
 
 
 /*
- * Reads from the channel, blocking until there is something to read unless
+ * Reads from the channel, blocking until data is available unless
  * UCHANNEL_OP_NONBLOCK is set. Returns the number of bytes read, 0 on
  * end-of-stream (the ring is empty and either side is shut down), or
- * -EWOULDBLOCK, -EINTR.
+ * -EWOULDBLOCK or -EINTR.
+ *
+ * Datagram reads consume the entire frame, even if the buffer is too small
+ * or has zero length. Any data that does not fit is discarded. If `oflags`
+ * is not NULL, MSG_TRUNC is set when the frame is truncated. If
+ * UCHANNEL_OP_TRUNC is set, the actual frame length is returned instead of
+ * the number of bytes copied.
+ *
+ * Stream reads consume as many bytes as requested, up to the available
+ * data. A zero-length stream read waits for data without consuming it.
+ *
+ * If `src` is not NULL, the address of the frame sender is returned through
+ * it, or NULL if no address is available. The caller owns the returned
+ * reference and must release it with uaddr_put(). A peek returns its own
+ * reference while leaving the frame in the ring.
  *
  * When `packs` is not NULL descriptor packs are detached into it, and the
  * caller unpacks them with no lock held. On a byte stream these are all the
@@ -156,7 +180,7 @@ ssize_t uchannel_write(uchannel_t *ch, const void *buf, size_t len, unsigned int
  * deliver - and a frame read with `packs` NULL has its descriptors closed here.
  * A peek takes no descriptors.
  */
-ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags, fdpack_t **packs);
+ssize_t uchannel_read(uchannel_t *ch, void *buf, size_t len, unsigned int flags, unsigned int *oflags, uaddr_t **src, fdpack_t **packs);
 
 
 /*

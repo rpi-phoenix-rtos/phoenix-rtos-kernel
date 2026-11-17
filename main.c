@@ -28,6 +28,8 @@
 #include "perf/perf.h"
 #include "log/log.h"
 
+#include <phoenix/version.h>
+
 /* Early bring-up progress markers, between the kernel banner and the first
  * syspage program. They are the only visibility into kernel init if a future
  * change hangs in _vm_init/_proc_init, so they are kept -- but this is the
@@ -134,7 +136,7 @@ int main(void)
 	_hal_init();
 	_usrv_init();
 
-	hal_consolePrint(ATTR_BOLD, "Phoenix-RTOS microkernel v. " RELEASE " rev. " VERSION "\n");
+	hal_consolePrint(ATTR_BOLD, "Phoenix-RTOS microkernel v" VERSION "\n");
 
 	lib_printf("hal: %s\n", hal_cpuInfo(s));
 	lib_printf("hal: %s\n", hal_cpuFeatures(s, sizeof(s)));

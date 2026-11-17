@@ -67,7 +67,9 @@ static struct {
 	u64 readyBitmask;
 
 	thread_t **current;
+#ifdef CPUTIME_SPLIT_ENABLE
 	spinlock_t *cpuSpinlock;
+#endif
 
 	time_t utcoffs;
 
@@ -537,11 +539,16 @@ static void _threads_cpuTimeToProcess(const thread_t *t)
  */
 static void _threads_cpuTimeMode(thread_t *t, int kernel)
 {
+#ifdef CPUTIME_SPLIT_ENABLE
 	if ((t == NULL) || ((int)t->inKernel == kernel)) {
 		return;
 	}
 	_threads_cpuTimeCharge(t, hal_timerGetUs());
 	t->inKernel = (kernel != 0) ? 1U : 0U;
+#else
+	(void)t;
+	(void)kernel;
+#endif
 }
 
 
@@ -557,6 +564,7 @@ static void _threads_cpuTimeCalc(thread_t *current, thread_t *selected, cpu_cont
 		selected->lastTime = now;
 	}
 
+#ifdef CPUTIME_SPLIT_ENABLE
 	/*
 	 * The context about to be restored says which mode the thread resumes in: a thread
 	 * preempted in user space comes back to user space, one that blocked inside a syscall
@@ -565,6 +573,9 @@ static void _threads_cpuTimeCalc(thread_t *current, thread_t *selected, cpu_cont
 	if (selected != NULL) {
 		selected->inKernel = (hal_cpuSupervisorMode(selCtx) != 0) ? 1U : 0U;
 	}
+#else
+	(void)selCtx;
+#endif
 }
 
 
@@ -584,13 +595,13 @@ static void _threads_cpuTimeAddInflight(const thread_t *t, time_t inflight, time
 
 /*
  * Adds up what one thread has run, the mode boundaries it has crossed plus the run it is
- * in the middle of right now. Note: always called with threads_common.spinlock set, which
- * is what stops the thread from being scheduled onto another cpu than the one locked out
- * of charging it here.
+ * in the middle of right now. Note: always called with threads_common.spinlock set.
  */
 static void _threads_cpuTimeOfThread(const thread_t *t, time_t *total, time_t *user, time_t *sys)
 {
+#ifdef CPUTIME_SPLIT_ENABLE
 	spinlock_ctx_t sc;
+#endif
 	unsigned int i, ncpus = hal_cpuGetCount();
 
 	for (i = 0; i < ncpus; i++) {
@@ -606,7 +617,9 @@ static void _threads_cpuTimeOfThread(const thread_t *t, time_t *total, time_t *u
 		*sys += t->sysTime;
 	}
 	else {
+#ifdef CPUTIME_SPLIT_ENABLE
 		hal_spinlockSet(&threads_common.cpuSpinlock[i], &sc);
+#endif
 
 		*total += t->cpuTime;
 		*user += t->userTime;
@@ -615,10 +628,14 @@ static void _threads_cpuTimeOfThread(const thread_t *t, time_t *total, time_t *u
 		/* cpuTime is only accumulated at mode boundaries - add what it has run since */
 		_threads_cpuTimeAddInflight(t, hal_timerGetUs() - t->lastTime, total, user, sys);
 
+#ifdef CPUTIME_SPLIT_ENABLE
 		hal_spinlockClear(&threads_common.cpuSpinlock[i], &sc);
+#endif
 	}
 }
 
+
+#ifdef CPUTIME_SPLIT_ENABLE
 
 static unsigned int _threads_cpuSpinlockSet(const thread_t *t, spinlock_ctx_t *sc)
 {
@@ -697,6 +714,8 @@ void proc_cpuTimeIntrLeave(void *interrupted)
 
 	hal_spinlockClear(&threads_common.cpuSpinlock[cpu], &sc);
 }
+
+#endif
 
 
 __attribute__((noreturn)) void proc_longjmp(cpu_context_t *ctx)
@@ -1032,7 +1051,7 @@ void threads_canaryInit(thread_t *t, void *ustack, size_t ustacksz)
 
 int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t priority, size_t kstacksz, void *stack, size_t stacksz, unsigned int sigmask, void *arg)
 {
-	thread_t *t;
+	thread_t *t, *creator;
 	spinlock_ctx_t sc;
 	int err;
 
@@ -1075,6 +1094,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	t->magic = THREAD_MAGIC;
 	t->sigmask = sigmask;
 	t->sigpend = 0;
+	t->sigwait = 0;
 	t->sigaddr = NULL;
 	t->altstack.ss_sp = NULL;
 	t->altstack.ss_flags = SS_DISABLE;
@@ -1092,7 +1112,11 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	t->sysTime = 0;
 	t->userTime = 0;
 	t->cpuId = 0;
+#ifdef CPUTIME_SPLIT_ENABLE
 	t->inKernel = 1;
+#else
+	t->inKernel = (process == NULL) ? 1U : 0U;
+#endif
 	proc_gettime(&t->readyTime, NULL);
 	t->maxWait = 0;
 	t->startTime = t->readyTime;
@@ -1136,6 +1160,11 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 		hal_cpuSetCtxGot(t->context, process->got);
 		hal_spinlockSet(&threads_common.spinlock, &sc);
 
+		creator = _proc_current();
+		if ((creator != NULL) && (creator->process == process) && (creator->exit != 0U)) {
+			t->exit = creator->exit;
+		}
+
 		LIST_ADD_EX(&process->threads, t, procnext, procprev);
 	}
 	else {
@@ -1145,7 +1174,6 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	trace_eventThreadCreate(t);
 
 	/* Insert thread to scheduler queue */
-
 	_threads_waking(t);
 	_readyAdd(t);
 
@@ -1268,9 +1296,10 @@ int proc_threadPriority(thread_t *t, int val, int *res)
 			_proc_threadSetPriority(t, priority);
 		}
 		else if (priority > t->priority) {
-			/* Make sure that the inherited priority from the lock is not reduced */
-			if ((t->locks == NULL) || (priority <= _proc_threadGetLockPriority(t))) {
-				_proc_threadSetPriority(t, priority);
+			/* Lower down to the priority inherited from the owned locks at most */
+			priority_t effective = _proc_threadGetPriority(t);
+			if (effective > t->priority) {
+				_proc_threadSetPriority(t, effective);
 
 				if (t == _proc_current()) {
 					/* Trigger immediate rescheduling if the task has lowered its priority */
@@ -1944,6 +1973,39 @@ static int threads_sigmutable(int sig)
 }
 
 
+static int threads_sigdefaultIgnored(int sig)
+{
+	switch (sig) {
+		case SIGURG:
+		case SIGCHLD:
+		case SIGWINCH:
+		case SIGINFO:
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+
+static void _threads_sigdiscard(process_t *process, int sig)
+{
+	unsigned int sigbit;
+	thread_t *thread = process->threads;
+
+	LIB_ASSERT((sig > 0) && (sig < NSIG), "invalid signal %d", sig);
+
+	sigbit = (unsigned int)1U << (unsigned int)sig;
+	process->sigpend &= ~sigbit;
+
+	if (thread != NULL) {
+		do {
+			thread->sigpend &= ~sigbit;
+			thread = thread->procnext;
+		} while (thread != process->threads);
+	}
+}
+
+
 static int _threads_sigdefault(process_t *process, thread_t *thread, int sig)
 {
 	switch (sig) {
@@ -2012,6 +2074,12 @@ static void _threads_sigoriginSet(sigorigin_t *origin, const siginfo_t *info)
 }
 
 
+static int _threads_sigwaiting(const thread_t *thread, u32 sigbit)
+{
+	return (((thread->sigwait & sigbit) != 0U) && (thread->state == SLEEP)) ? 1 : 0;
+}
+
+
 int threads_sigpost(process_t *process, thread_t *thread, int sig)
 {
 	return threads_sigpostInfo(process, thread, sig, NULL);
@@ -2072,7 +2140,7 @@ int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const sig
 
 		if (thread != NULL) {
 			do {
-				if ((sigbit & ~thread->sigmask) != 0U) {
+				if (((sigbit & ~thread->sigmask) != 0U) || (_threads_sigwaiting(thread, sigbit) != 0)) {
 					break;
 				}
 				thread = thread->procnext;
@@ -2098,6 +2166,12 @@ int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const sig
 		if ((performedAction != SIGNAL_IGNORE) && (thread->interruptible != 0U)) {
 			_thread_interrupt(thread);
 		}
+	}
+	else if (_threads_sigwaiting(thread, sigbit) != 0) {
+		_thread_interrupt(thread);
+	}
+	else {
+		/* No action required */
 	}
 
 	hal_spinlockClear(&threads_common.spinlock, &sc);
@@ -2486,6 +2560,12 @@ int threads_setSigaction(int sig, sigtrampolineFn_t trampoline, const struct sig
 		process->sigactions[sig - 1].sa_mask &= ~(u32)((1UL << SIGKILL) | (1UL << SIGSTOP));
 	}
 
+	/* POSIX: setting SIG_IGN, or SIG_DFL when the default action is to ignore, discards the pending signal even if blocked */
+	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1-a "POSIX compliant definition" */
+	if ((act != NULL) && ((act->sa_handler == SIG_IGN) || ((act->sa_handler == SIG_DFL) && (threads_sigdefaultIgnored(sig) != 0)))) {
+		_threads_sigdiscard(process, sig);
+	}
+
 	if (trampoline != NULL) {
 		process->sigtrampoline = trampoline;
 	}
@@ -2687,6 +2767,21 @@ int threads_sigaltstack(const stack_t *ss, stack_t *oss)
 }
 
 
+unsigned int threads_sigpending(void)
+{
+	thread_t *thread;
+	spinlock_ctx_t sc;
+	unsigned int pending;
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	thread = _proc_current();
+	pending = (thread->sigpend | thread->process->sigpend) & thread->sigmask;
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	return pending;
+}
+
+
 int threads_sigsuspend(unsigned int mask)
 {
 	thread_t *thread;
@@ -2749,6 +2844,66 @@ int threads_sigsuspend(unsigned int mask)
 
 	/* sigsuspend always exits with -EINTR */
 	return -EINTR;
+}
+
+
+int threads_sigwait(unsigned int set, const time_t *timeout)
+{
+	thread_t *thread, *tqueue;
+	spinlock_ctx_t sc;
+	unsigned int pending, sigbit;
+	time_t reltime = 0, abstime = 0;
+	int ret, sig, err = EOK;
+
+	set &= ~(u32)((1UL << SIGNULL) | (1UL << SIGKILL) | (1UL << SIGSTOP));
+
+	if (timeout != NULL) {
+		reltime = *timeout;
+		err = proc_clockTimeoutToAbsTime(PH_CLOCK_RELATIVE, reltime, &abstime);
+		if (err < 0) {
+			return err;
+		}
+	}
+
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	thread = _proc_current();
+
+	for (;;) {
+		pending = (thread->sigpend | thread->process->sigpend) & set;
+		if (pending != 0U) {
+			ret = (int)hal_cpuGetFirstBit(pending);
+			sigbit = (u32)1U << (unsigned int)ret;
+			if ((thread->sigpend & sigbit) != 0U) {
+				thread->sigpend &= ~sigbit;
+			}
+			else {
+				thread->process->sigpend &= ~sigbit;
+			}
+			break;
+		}
+
+		sig = _threads_checkSignal(thread, thread->process);
+		if ((sig != 0) || (thread->exit != 0U)) {
+			ret = -EINTR;
+			break;
+		}
+
+		if (((timeout != NULL) && (reltime == 0)) || (err == -ETIME)) {
+			ret = -EAGAIN;
+			break;
+		}
+
+		thread->sigwait = set;
+		tqueue = NULL;
+		_proc_threadEnqueue(&tqueue, abstime, 1);
+		err = hal_cpuReschedule(&threads_common.spinlock, &sc);
+		hal_spinlockSet(&threads_common.spinlock, &sc);
+		thread->sigwait = 0U;
+	}
+
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	return ret;
 }
 
 
@@ -3885,6 +4040,7 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 		return -ENOMEM;
 	}
 
+#ifdef CPUTIME_SPLIT_ENABLE
 	/* parasoft-suppress-next-line MISRAC2012-DIR_4_7 "return value of hal_cpuGetCount() is always the same, false positive" */
 	threads_common.cpuSpinlock = (spinlock_t *)vm_kmalloc(sizeof(spinlock_t) * ncpus);
 	if (threads_common.cpuSpinlock == NULL) {
@@ -3895,6 +4051,7 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 	for (i = 0; i < ncpus; i++) {
 		hal_spinlockCreate(&threads_common.cpuSpinlock[i], "threads.cpuTimeLock");
 	}
+#endif
 
 	/* Run idle thread on every cpu */
 	for (i = 0; i < ncpus; i++) {

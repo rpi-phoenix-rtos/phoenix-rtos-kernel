@@ -346,7 +346,7 @@ void hal_cpuReboot(void)
 /* cache management */
 
 
-void hal_cleanDCache(ptr_t start, size_t len)
+void hal_cacheOnInstrLoad(ptr_t start, size_t len)
 {
 	(void)start;
 	(void)len;
@@ -438,6 +438,7 @@ void hal_cpuRemoteFlushTLB(u32 asid, const void *vaddr, size_t size)
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_4 "Definition in assembly" */
 __attribute__((section(".init"))) void hal_cpuInitCore(void)
 {
+	hal_platformInitCore();
 	hal_interruptsInitCore();
 	hal_timerInitCore();
 	(void)hal_cpuAtomicAdd(&cpu_common.cpusStarted, 1U);

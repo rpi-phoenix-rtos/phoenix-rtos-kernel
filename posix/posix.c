@@ -30,6 +30,8 @@
 #include "pollwake.h"
 #include "lib/lib.h"
 
+#include <phoenix/version.h>
+
 #define MAX_FD_COUNT     1024
 #define INITIAL_FD_COUNT 32
 
@@ -57,13 +59,6 @@
 
 
 /* NOTE: socket/port ids are limited to 32-bits, hence possible downcast of oid.id from id_t to unsigned int */
-
-
-typedef struct {
-	oid_t oid;
-	unsigned int flags;
-	unsigned short types;
-} evsub_t;
 
 
 typedef struct _event_t {
@@ -1034,7 +1029,7 @@ int posix_open(const char *filename, int oflag, u8 *ustack)
 				(void)posix_truncate(&f->oid, 0);
 			}
 
-			f->status = (unsigned int)oflag & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
+			f->status = (unsigned int)oflag & ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
 
 			/* Record the canonical path (libphoenix resolves it before sys_open) so
 			 * fchdir()/the *at family can recover a fd's directory. Shared across
@@ -1272,7 +1267,8 @@ ssize_t posix_write(int fildes, void *buf, size_t nbyte, off_t offset)
 
 		if (rcnt > 0 && offset < 0 && F_SEEKABLE(f->type)) {
 			(void)proc_lockSet(&f->lock);
-			f->offset = offs;
+			/* only O_APPEND needs the offset reported by the server, raw devices don't report it */
+			f->offset = ((status & O_APPEND) != 0U) ? offs : (f->offset + rcnt);
 			(void)proc_lockClear(&f->lock);
 		}
 	}
@@ -2063,7 +2059,7 @@ static int posix_fcntlSetFl(int fd, unsigned int val)
 	open_file_t *f;
 	int err;
 	/* Creation and access mode flags shall be ignored */
-	unsigned int ignorefl = O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_RDONLY | O_RDWR | O_WRONLY;
+	unsigned int ignorefl = O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_RDONLY | O_RDWR | O_WRONLY | O_NOFOLLOW;
 
 	err = posix_getOpenFile(fd, &f);
 	if (err == 0) {
@@ -2936,9 +2932,11 @@ int posix_uname(struct utsname *name)
 	name->sysname[sizeof(name->sysname) - 1U] = '\0';
 	(void)hal_strncpy(name->nodename, posix_common.hostname, sizeof(name->nodename) - 1U);
 	name->nodename[sizeof(name->nodename) - 1U] = '\0';
-	(void)hal_strncpy(name->release, RELEASE, sizeof(name->release) - 1U);
+	/* TODO: Use PHOENIX_VER* instead of VERSION_TAGGED/VERSION_BUILD (which are provided
+	 * directly via `-D`) once they are properly populated by p-r-project */
+	(void)hal_strncpy(name->release, VERSION_TAGGED, sizeof(name->release) - 1U);
 	name->release[sizeof(name->release) - 1U] = '\0';
-	(void)hal_strncpy(name->version, VERSION, sizeof(name->version) - 1U);
+	(void)hal_strncpy(name->version, VERSION_BUILD, sizeof(name->version) - 1U);
 	name->version[sizeof(name->version) - 1U] = '\0';
 	(void)hal_strncpy(name->machine, TARGET_FAMILY, sizeof(name->machine) - 1U);
 	name->machine[sizeof(name->machine) - 1U] = '\0';

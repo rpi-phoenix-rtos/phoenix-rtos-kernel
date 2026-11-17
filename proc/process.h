@@ -81,8 +81,6 @@ typedef struct _process_t {
 	/* Anonymous memory is allocated at mmap() time instead of on first access: set once the
 	 * process runs code at interrupt level (userintr_setHandler()), where a fault cannot be served */
 	unsigned int anonEager : 1;
-	unsigned int lgap : 1;
-	unsigned int rgap : 1;
 	unsigned int posix : 1;
 
 	/* TODO: Process shall keep information permissions (uid, euid, suid, gid, egid, sgid, umask) */

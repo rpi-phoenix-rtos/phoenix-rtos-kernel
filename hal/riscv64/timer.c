@@ -31,13 +31,23 @@ static struct {
 } timer_common;
 
 
+static void timerSet(u64 val)
+{
+#ifdef __riscv_sstc
+	csr_write(stimecmp, val);
+#else
+	hal_sbiSetTimer(val);
+#endif
+}
+
+
 static int timer_irqHandler(unsigned int n, cpu_context_t *ctx, void *arg)
 {
 	(void)n;
 	(void)arg;
 	(void)ctx;
 
-	hal_sbiSetTimer(csr_read(time) + timer_common.interval);
+	timerSet(csr_read(time) + timer_common.interval);
 
 	return 0;
 }
@@ -45,7 +55,7 @@ static int timer_irqHandler(unsigned int n, cpu_context_t *ctx, void *arg)
 
 void hal_timerSetWakeup(u32 waitUs)
 {
-	hal_sbiSetTimer(csr_read(time) + waitUs * ((u64)TIMER_FREQ / (1000UL * 1000UL)));
+	timerSet(csr_read(time) + waitUs * ((u64)TIMER_FREQ / (1000UL * 1000UL)));
 }
 
 
@@ -67,8 +77,18 @@ int hal_timerRegister(intrFn_t f, void *data, intr_handler_t *h)
 
 char *hal_timerFeatures(char *features, size_t len)
 {
+	const char str[] = "Using RISC-V timer, ";
+	size_t n = sizeof(str) - 1U;
+
 	if (len != 0U) {
-		(void)hal_strncpy(features, "Using hypervisor timer", len);
+		(void)hal_strncpy(features, str, len);
+		if (len > (n + 1U)) {
+#ifdef __riscv_sstc
+			(void)hal_strncpy(features + n, "Sstc", len - n);
+#else
+			(void)hal_strncpy(features + n, "SBI", len - n);
+#endif
+		}
 		features[len - 1U] = '\0';
 	}
 	return features;
@@ -77,7 +97,7 @@ char *hal_timerFeatures(char *features, size_t len)
 
 void hal_timerInitCore(void)
 {
-	hal_sbiSetTimer(csr_read(time) + timer_common.interval);
+	timerSet(csr_read(time) + timer_common.interval);
 }
 
 
@@ -91,5 +111,5 @@ __attribute__((section(".init"))) void _hal_timerInit(u32 interval)
 	timer_common.handler.data = NULL;
 	(void)hal_interruptsSetHandler(&timer_common.handler);
 
-	hal_sbiSetTimer(csr_read(time) + timer_common.interval);
+	timerSet(csr_read(time) + timer_common.interval);
 }

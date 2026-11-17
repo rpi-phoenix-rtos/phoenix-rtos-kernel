@@ -62,7 +62,7 @@ ssize_t pipe_read(uchannel_t *ch, void *buf, size_t len, unsigned int status)
 		return 0;
 	}
 
-	return uchannel_read(ch, buf, len, pipe_opFlags(status), NULL);
+	return uchannel_read(ch, buf, len, pipe_opFlags(status), NULL, NULL, NULL);
 }
 
 
@@ -73,7 +73,7 @@ ssize_t pipe_write(uchannel_t *ch, const void *buf, size_t len, unsigned int sta
 		return 0;
 	}
 
-	return uchannel_write(ch, buf, len, pipe_opFlags(status) | UCHANNEL_OP_ATOMIC, NULL);
+	return uchannel_write(ch, buf, len, pipe_opFlags(status) | UCHANNEL_OP_ATOMIC, NULL, NULL);
 }
 
 
