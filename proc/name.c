@@ -671,10 +671,11 @@ int proc_write(oid_t oid, off_t *offs, void *buf, size_t sz, unsigned int mode)
 	if (err > 0) {
 		/*
 		 * The server reports the offset after the write in o.io.offs, which is how O_APPEND
-		 * learns where the data went. A server that predates that field leaves it as we sent
-		 * it (zero), and no real write of err bytes can end below offset err: advance by the
-		 * byte count instead, or every sequential write to such a server (block devices,
-		 * drivers) would land at offset 0.
+		 * learns where the data went (posix_write() advances the offset itself otherwise).
+		 * A server that predates that field leaves it as we sent it (zero), and no real
+		 * write of err bytes can end below offset err: advance by the byte count instead,
+		 * so that an O_APPEND write to such a server (a driver) does not rewind the
+		 * descriptor to 0.
 		 */
 		if (msg->o.io.offs >= (off_t)err) {
 			*offs = msg->o.io.offs;
