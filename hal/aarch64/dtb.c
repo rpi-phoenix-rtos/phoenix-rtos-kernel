@@ -106,6 +106,11 @@ static struct {
 	size_t nSerials;
 	dtb_serial_t serials[MAX_SERIALS];
 
+	struct {
+		addr_t base; /* 0 if the node has no usable reg */
+		int compatible;
+	} pmWatchdog;
+
 	char *stdoutPath;
 } dtb_common;
 
@@ -460,6 +465,34 @@ static int dtb_parseMemory(void *dtb, u32 si, u32 l)
 }
 
 
+static void dtb_parsePMWatchdog(void *dtb, u32 si, u32 l)
+{
+	const char *name = dtb_getString(si);
+	const char *compat = dtb;
+	u32 i = 0U;
+
+	if ((hal_strcmp(name, "reg") == 0) && (dtb_common.soc.addressCells != 0U) && (l >= (dtb_common.soc.addressCells * sizeof(u32)))) {
+		if (dtb_readCells(dtb, dtb_common.soc.addressCells, &dtb_common.pmWatchdog.base) == EOK) {
+			if (dtb_translateSocAddress(&dtb_common.pmWatchdog.base) != EOK) {
+				dtb_common.pmWatchdog.base = 0U;
+			}
+		}
+	}
+	else if (hal_strcmp(name, "compatible") == 0) {
+		/* "compatible" is a list of NUL-terminated strings */
+		while (i < l) {
+			if (hal_strcmp(&compat[i], "brcm,bcm2835-pm-wdt") == 0) {
+				dtb_common.pmWatchdog.compatible = 1;
+			}
+			i += hal_strlen(&compat[i]) + 1U;
+		}
+	}
+	else {
+		/* No action required */
+	}
+}
+
+
 static int dtb_isInterruptControllerNode(const char *nodeName, unsigned int depth, int inAMBA_APU)
 {
 	if ((inAMBA_APU != 0) && (hal_strncmp(nodeName, STR_AND_LEN("interrupt-controller@")) == 0)) {
@@ -604,6 +637,7 @@ static void dtb_parse(void)
 		stateTimer,
 		stateChosen,
 		stateSerial,
+		statePMWatchdog,     /* BCM2835-family power management block (watchdog) */
 		stateResvMemRoot,    /* properties on /reserved-memory itself */
 		stateResvMemChild,   /* properties on a child node of /reserved-memory */
 	} state = stateIdle;
@@ -664,6 +698,9 @@ static void dtb_parse(void)
 			else if (dtb_isInterruptControllerNode(dtb, depth, state == stateAMBA_APU) != 0) {
 				state = stateInterruptController;
 			}
+			else if ((dtb_common.soc.depth != 0U) && (depth == dtb_common.soc.depth) && (hal_strncmp(dtb, STR_AND_LEN("watchdog@")) == 0)) {
+				state = statePMWatchdog;
+			}
 			else if (dtb_isSerialNode(dtb, depth) != 0) {
 				if (dtb_common.nSerials < MAX_SERIALS) {
 					state = stateSerial;
@@ -720,6 +757,10 @@ static void dtb_parse(void)
 
 				case stateSerial:
 					dtb_parseSerial(dtb, si, l, (dtb_common.soc.depth != 0U) && (depth > dtb_common.soc.depth));
+					break;
+
+				case statePMWatchdog:
+					dtb_parsePMWatchdog(dtb, si, l);
 					break;
 
 				case stateResvMemRoot:
@@ -859,6 +900,17 @@ void dtb_getGIC(addr_t *gicc, addr_t *gicd)
 {
 	*gicc = dtb_common.apu_gic.gicc;
 	*gicd = dtb_common.apu_gic.gicd;
+}
+
+
+int dtb_getPMWatchdog(addr_t *base)
+{
+	if ((dtb_common.pmWatchdog.compatible == 0) || (dtb_common.pmWatchdog.base == 0U)) {
+		return -ENODEV;
+	}
+
+	*base = dtb_common.pmWatchdog.base;
+	return EOK;
 }
 
 
