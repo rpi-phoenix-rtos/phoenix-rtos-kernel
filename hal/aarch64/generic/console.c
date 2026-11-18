@@ -20,11 +20,18 @@
 #include "hal/aarch64/pl011.h"
 
 
+/* The early-console alias, see _hal_consoleEarlyPutch() */
+#define CONSOLE_EARLY_UART ((volatile u32 *)0xffffffffffe00000ull)
+
+
 static struct {
+	hal_pl011_t early;
 	hal_pl011_t uart;
 	spinlock_t lock;
 	int enabled;
-} console_common;
+} console_common = {
+	.early = { .base = CONSOLE_EARLY_UART },
+};
 
 
 /* CROSS-BOARD PORTABILITY NOTE (upstream review item "B5"): the early-console
@@ -39,13 +46,10 @@ static struct {
  * ("Early-console alias — cross-board port"). Do not "fix" it for the Pi 4. */
 static void _hal_consoleEarlyPutch(char c)
 {
-	volatile u32 *uart = (volatile u32 *)0xffffffffffe00000ull;
-	volatile u32 *uartfr = (volatile u32 *)0xffffffffffe00018ull;
-
-	while ((*uartfr & (1U << 5)) != 0U) {
-	}
-
-	*uart = (u32)(u8)c;
+	/* Bounded: if the UART behind the alias stops draining, output is dropped
+	 * instead of this CPU spinning on the status register forever, with the
+	 * console lock held and every other printing CPU spinning behind it */
+	(void)hal_pl011Putch(&console_common.early, c);
 }
 
 
