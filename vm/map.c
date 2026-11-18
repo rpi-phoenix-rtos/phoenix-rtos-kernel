@@ -1224,9 +1224,8 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 			/* A USER thread whose process_t is gone (detached above). It can
 			 * never make progress -- there is no map to fault into and no
 			 * process to signal -- but panicking here takes the whole board
-			 * down: LIB_ASSERT_ALWAYS reaches hal_cpuReboot(), which on BCM2711
-			 * is `for (;;) hal_cpuHalt()` (hal/aarch64/generic/generic.c:141),
-			 * i.e. a permanent halt with no reboot. That is what turned one
+			 * down: LIB_ASSERT_ALWAYS reaches hal_cpuReboot() (a board reset,
+			 * or a permanent halt in debug builds). That is what turned one
 			 * corrupt pointer into a dead Pi on an X11 session exit. Retire just
 			 * this thread instead and let the other three cores live.
 			 *

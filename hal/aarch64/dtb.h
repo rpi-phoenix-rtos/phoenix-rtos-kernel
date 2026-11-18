@@ -95,6 +95,11 @@ int dtb_armToBus(addr_t cpuAddr, addr_t *busAddr);
 void dtb_getGIC(addr_t *gicc, addr_t *gicd);
 
 
+/* Physical base of a BCM2835-family power management block ("brcm,bcm2835-pm-wdt"),
+ * whose watchdog resets or halts the SoC. Returns -ENODEV when there is none. */
+int dtb_getPMWatchdog(addr_t *base);
+
+
 void dtb_getSerials(dtb_serial_t **serials, size_t *nSerials);
 
 
