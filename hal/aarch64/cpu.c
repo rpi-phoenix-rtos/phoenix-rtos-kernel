@@ -21,6 +21,9 @@
 
 #define CONST_STR_SIZE(x) (x), (sizeof(x) - 1U)
 
+/* CPACR_EL1.FPEN: FP/SIMD use at EL0 does not trap only when both bits are set */
+#define CPACR_FPEN (3UL << 20)
+
 /* Function creates new cpu context on top of given thread kernel stack */
 int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, size_t kstacksz, void *ustack, void *arg, hal_tls_t *tls)
 {
@@ -126,10 +129,14 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		uc = (void *)(((ptr_t)signalCtx - sizeof(*uc)) & ~(ptr_t)0xfU);
 		si = (void *)(((ptr_t)uc - sizeof(*si)) & ~(ptr_t)0xfU);
 
+		/* info is cleared before it is filled in, padding included */
 		hal_memcpy(si, info, sizeof(*si));
 
+		/* Field by field: the padding of ss may be old kernel memory */
 		hal_memset(uc, 0, sizeof(*uc));
-		hal_memcpy(&uc->uc_stack, ss, sizeof(uc->uc_stack));
+		uc->uc_stack.ss_sp = ss->ss_sp;
+		uc->uc_stack.ss_flags = ss->ss_flags;
+		uc->uc_stack.ss_size = ss->ss_size;
 		uc->uc_sigmask = oldmask;
 		uc->uc_mcontext.fault_address = (u64)(ptr_t)info->si_addr;
 		for (i = 0; i < 31U; i++) {
@@ -144,8 +151,35 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		argc--;
 	}
 
-	hal_memcpy(signalCtx, ctx, sizeof(cpu_context_t));
+	/* The frame is in user memory, where other threads of the process can read
+	 * it while it is written: build it from the fields that belong to the
+	 * interrupted code and never store a kernel value into it, not even for a
+	 * moment. savesp is a kernel stack address; sigreturn and the return
+	 * through this frame never read it. Of CPACR_EL1 only the FPU enable bits
+	 * are the thread's, and only those are restored from a frame. */
+	signalCtx->savesp = 0;
+	signalCtx->cpacr = ctx->cpacr & CPACR_FPEN;
+#ifndef __SOFTFP__
+	if ((ctx->cpacr & CPACR_FPEN) == CPACR_FPEN) {
+		signalCtx->fpcr = ctx->fpcr;
+		signalCtx->fpsr = ctx->fpsr;
+		hal_memcpy(signalCtx->freg, ctx->freg, sizeof(signalCtx->freg));
+	}
+	else {
+		/* The FPU was trapped when the thread entered the kernel, so the
+		 * exception entry did not save the FP registers and this part of the
+		 * kernel frame holds old kernel stack contents. The thread has no FP
+		 * state to restore: a return through the frame leaves the FPU trapped
+		 * and does not load this area, so zero it. */
+		signalCtx->fpcr = 0;
+		signalCtx->fpsr = 0;
+		hal_memset(signalCtx->freg, 0, sizeof(signalCtx->freg));
+	}
+#endif
+	signalCtx->psr = ctx->psr;
+	hal_memcpy(signalCtx->x, ctx->x, sizeof(signalCtx->x));
 
+	/* The interrupted pc and sp are passed to the trampoline below */
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1 "Program counter must be set to the address of the function" */
 	signalCtx->pc = (u64)trampoline;
 	signalCtx->sp = (si != NULL) ? (u64)(ptr_t)si : (u64)(ptr_t)signalCtx;
@@ -174,7 +208,7 @@ void hal_cpuSigreturn(void *kstack, void *ustack, cpu_context_t **ctx)
 	/* As in hal_cpuSigreturnContext(): the condition flags and the FPU enable
 	 * bits only, never the exception masks or the exception level */
 	kctx->psr = (kctx->psr & PSR_NZCV) | MODE_EL0;
-	kctx->cpacr &= (3UL << 20);
+	kctx->cpacr &= CPACR_FPEN;
 
 	*ctx = kctx;
 }
@@ -187,7 +221,7 @@ void *hal_cpuSigreturnContext(cpu_context_t *ctx, const cpu_context_t *sctx, con
 #ifndef __SOFTFP__
 	/* Only the FPU enable bits are restored: the FP/SIMD registers below are
 	 * loaded on return only when both are set. */
-	ctx->cpacr = sctx->cpacr & (3UL << 20);
+	ctx->cpacr = sctx->cpacr & CPACR_FPEN;
 	ctx->fpcr = sctx->fpcr;
 	ctx->fpsr = sctx->fpsr;
 	hal_memcpy(ctx->freg, sctx->freg, sizeof(ctx->freg));
