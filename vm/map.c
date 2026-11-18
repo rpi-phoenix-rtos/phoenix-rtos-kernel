@@ -1209,16 +1209,16 @@ static void map_pageFault(unsigned int n, exc_context_t *ctx)
 		}
 
 		/*
-		 * FIXME (upstream): in case the signal is ignored or blocked, the process
-		 * should be terminated to avoid an exception dump loop. In case it is
-		 * handled, we should provide a mechanism to force delivery of this signal
-		 * before other pending ones.
+		 * A blocked or ignored SIGSEGV terminates the process (see
+		 * threads_sigpostFault()) instead of looping on the fault.
+		 * FIXME (upstream): in case it is handled, we should provide a mechanism
+		 * to force delivery of this signal before other pending ones.
 		 */
 		if (proc != NULL) {
 			hal_memset(&info, 0, sizeof(info));
 			info.si_code = (err == -EFAULT) ? SEGV_MAPERR : SEGV_ACCERR;
 			info.si_addr = vaddr;
-			(void)threads_sigpostInfo(proc, thread, SIGSEGV, &info);
+			(void)threads_sigpostFault(proc, thread, SIGSEGV, &info);
 		}
 		else if (thread->process == NULL) {
 			/* A USER thread whose process_t is gone (detached above). It can
