@@ -159,12 +159,27 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 }
 
 
+/* The saved context *ctx is in user memory, where the process can change it at
+ * any time, including from another CPU after it has been checked. Copy it once
+ * into the syscall's frame at the top of the kernel stack and resume from that
+ * copy, keeping nothing from it that is not the process's to set. */
 void hal_cpuSigreturn(void *kstack, void *ustack, cpu_context_t **ctx)
 {
-	(void)kstack;
-	GETFROMSTACK(ustack, u64, (*ctx)->pc, 2);
-	GETFROMSTACK(ustack, u64, (*ctx)->sp, 3);
-	GETFROMSTACK(ustack, u64, (*ctx)->psr, 4);
+	cpu_context_t *kctx = (void *)((char *)kstack - sizeof(cpu_context_t));
+
+	hal_memcpy(kctx, *ctx, sizeof(cpu_context_t));
+	kctx->savesp = (u64)(ptr_t)kctx;
+
+	GETFROMSTACK(ustack, u64, kctx->pc, 2);
+	GETFROMSTACK(ustack, u64, kctx->sp, 3);
+	GETFROMSTACK(ustack, u64, kctx->psr, 4);
+
+	/* As in hal_cpuSigreturnContext(): the condition flags and the FPU enable
+	 * bits only, never the exception masks or the exception level */
+	kctx->psr = (kctx->psr & PSR_NZCV) | MODE_EL0;
+	kctx->cpacr &= (3UL << 20);
+
+	*ctx = kctx;
 }
 
 
