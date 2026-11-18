@@ -17,7 +17,13 @@
 #include "hal/spinlock.h"
 
 #include "hal/aarch64/dtb.h"
+#include "hal/aarch64/heartbeat.h"
 #include "hal/aarch64/pl011.h"
+
+#ifdef KERNEL_HEARTBEAT
+#include "hal/timer.h"
+#include "lib/lib.h"
+#endif
 
 
 /* The early-console alias, see _hal_consoleEarlyPutch() */
@@ -125,6 +131,90 @@ void hal_consolePutch(char c)
 	hal_pl011Putch(&console_common.uart, c);
 	hal_spinlockClear(&console_common.lock, &sc);
 }
+
+
+#ifdef KERNEL_HEARTBEAT
+
+#ifndef KERNEL_HEARTBEAT_SEC
+#define KERNEL_HEARTBEAT_SEC 10
+#endif
+
+#define HEARTBEAT_PERIOD_US ((time_t)KERNEL_HEARTBEAT_SEC * 1000000)
+
+
+/* Each CPU writes only its own entry, from its own timer interrupt. Every
+ * CPU prints, at its own time slot, the tick counts of all CPUs: a CPU that
+ * stopped taking interrupts shows as a count that no longer grows, in the
+ * lines of the CPUs that still run. */
+static struct {
+	volatile u32 ticks;
+	volatile u64 pc;     /* where the last timer interrupt found the CPU */
+	volatile u32 el;
+	time_t next;         /* when this CPU prints next */
+	u32 seen[NUM_CPUS];  /* tick counts at this CPU's previous line */
+} __attribute__((aligned(64))) heartbeat_cpu[NUM_CPUS];
+
+
+static void _hal_heartbeatPrint(unsigned int id, time_t now)
+{
+	char line[64 + NUM_CPUS * 40];
+	char *p = line;
+	unsigned int i, stopped = 0U;
+	u32 ticks;
+
+	p += lib_sprintf(p, "hb cpu%u t=%u ticks", id, (u32)(now / 1000000));
+	for (i = 0U; i < NUM_CPUS; i++) {
+		ticks = heartbeat_cpu[i].ticks;
+		if (ticks == heartbeat_cpu[id].seen[i]) {
+			stopped |= 1U << i;
+		}
+		heartbeat_cpu[id].seen[i] = ticks;
+		p += lib_sprintf(p, " %u%s", ticks, ((stopped & (1U << i)) != 0U) ? "!" : "");
+	}
+
+	/* Where this CPU, and each CPU whose count stopped, was last interrupted */
+	for (i = 0U; i < NUM_CPUS; i++) {
+		if ((i == id) || ((stopped & (1U << i)) != 0U)) {
+			p += lib_sprintf(p, " %u@%llx/el%u", i, (u64)heartbeat_cpu[i].pc, heartbeat_cpu[i].el);
+		}
+	}
+	(void)lib_sprintf(p, " drop %u\n", console_common.early.dropped + console_common.uart.dropped);
+
+	/* Past the console lock: the CPU holding it may be the one that hangs */
+	for (p = line; *p != '\0'; p++) {
+		(void)hal_pl011Putch(&console_common.early, *p);
+	}
+}
+
+
+void _hal_heartbeat(const cpu_context_t *ctx)
+{
+	unsigned int id = hal_cpuGetID();
+	time_t now, slot;
+
+	if (id >= NUM_CPUS) {
+		return;
+	}
+
+	heartbeat_cpu[id].ticks++;
+	heartbeat_cpu[id].pc = ctx->pc;
+	heartbeat_cpu[id].el = (u32)((ctx->psr >> 2) & 3U);
+
+	now = hal_timerGetUs();
+	if (now < heartbeat_cpu[id].next) {
+		return;
+	}
+
+	if (heartbeat_cpu[id].next != 0) {
+		_hal_heartbeatPrint(id, now);
+	}
+
+	/* The CPUs take turns, spread over the period, so their lines do not collide */
+	slot = (HEARTBEAT_PERIOD_US / (time_t)NUM_CPUS) * (time_t)id;
+	heartbeat_cpu[id].next = ((now - slot) / HEARTBEAT_PERIOD_US + 1) * HEARTBEAT_PERIOD_US + slot;
+}
+
+#endif /* KERNEL_HEARTBEAT */
 
 
 __attribute__((section(".init"))) void _hal_consoleInit(void)

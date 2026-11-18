@@ -49,6 +49,9 @@
 #define TIMER_IRQ_GROUP 1U
 #endif
 
+/* The console implements the KERNEL_HEARTBEAT debug output (hal/aarch64/heartbeat.h) */
+#define HAL_CONSOLE_HEARTBEAT
+
 #ifndef __ASSEMBLY__
 
 #if defined(__TARGET_AARCH64A72)
