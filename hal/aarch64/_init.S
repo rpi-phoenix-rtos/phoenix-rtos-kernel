@@ -386,6 +386,24 @@ el1_entry:
 	ldr x0, =(MAIR_EL1_VALUE)
 	msr mair_el1, x0
 
+	/* Only the primary CPU builds the boot translation tables below; every CPU
+	 * then translates through them. A secondary skips to the per-CPU part
+	 * and waits, just before it enables its MMU, for _bootTablesReady, which
+	 * the primary sets once the tables are complete in memory (see
+	 * .Lboot_tables_ready).
+	 *
+	 * Secondaries are released before the primary enters the kernel (plo
+	 * starts them, then finishes its own teardown and jumps). When every CPU
+	 * zeroed and refilled the tables itself, the primary's zeroing of
+	 * SCRATCH_TT could land while a secondary, MMU already on and running
+	 * at its low PC in _other_core_trap, fetched instructions through it;
+	 * and a secondary that ran late could zero KERNEL_TTL2 or another table
+	 * the primary already used, or discard (dc ivac) lines the primary had
+	 * written with its caches on. */
+	mrs x0, mpidr_el1
+	and x0, x0, #0xff
+	cbnz x0, .Lboot_tables_built
+
 	/* Note: ADRP instruction will generate a PC-relative address.
 	 * Because now PC is in physical memory, the resulting address will also be physical */
 	/* Create temporary TTL1 that maps 2 GB around syspage->pkernel */
@@ -425,18 +443,6 @@ el1_entry:
 	ldr x3, =EARLY_UART_DEVICE_BLOCK
 	orr x1, x3, x2, lsl #30
 	str x1, [x0, x2, lsl 3]
-	msr ttbr0_el1, x0
-
-#if defined(PL011_TTY_EARLY_VADDR)
-	/* rpi4: install the early diagnostic vector (dumps ESR/ELR/FAR over the
-	 * early PL011 alias). Other aarch64 targets don't define the early UART VA
-	 * and keep the armstub VBAR mirrored above until the real vector install. */
-	adr x0, _early_vector_table
-	msr vbar_el1, x0
-#endif
-
-	adrp x0, PMAP_COMMON_KERNEL_TTL2
-	msr ttbr1_el1, x0
 
 	/* C-1 (2026-05-15, Linux __cpu_setup pattern): construct ALL kernel
 	 * TTBR1 page tables BEFORE SCTLR.M=1. The walker then sees a fully-
@@ -450,9 +456,7 @@ el1_entry:
 	 * cacheable inner-shareable walks once SCTLR.M=1, observing a
 	 * coherent view because the bytes are already in DDR.
 	 *
-	 * Cores 1-3 also reach this block; they write the same values
-	 * (race-free same-write convergence). The MPIDR check that traps
-	 * them to _other_core_trap remains post-MMU. */
+	 * Primary only (see .Lboot_tables_built). */
 
 	/* Zero KERNEL_TTL2 */
 	adrp x0, PMAP_COMMON_KERNEL_TTL2
@@ -529,10 +533,11 @@ el1_entry:
 	 * supposed to make it unnecessary.
 	 */
 
-	/* Activate TTBR1 walks (clear EPD1) — still pre-MMU. */
-	mrs x0, tcr_el1
-	bic x0, x0, #(1 << 23)
-	msr tcr_el1, x0
+	/* Zero the page that becomes the empty TTBR0 table once the low identity
+	 * map is dropped (before `b main`). Written here, with the other tables,
+	 * so that no CPU writes it after the primary has enabled its caches. */
+	adrp x0, PMAP_COMMON_SCRATCH_PAGE
+	bl _fill_page_zero
 
 	/* dsb sy: with MMU off, stores use Normal-NC; full-system barrier
 	 * is the safe choice to drain the write buffer to DDR before MMU
@@ -562,6 +567,30 @@ el1_entry:
 	dsb ish
 	isb
 
+.Lboot_tables_built:
+	/* Per-CPU translation registers; the tables they point to are the
+	 * primary's (see above). Nothing is translated until SCTLR_EL1.M is set
+	 * below, so a secondary may set them before the tables are ready. */
+	adrp x0, PMAP_COMMON_SCRATCH_TT
+	msr ttbr0_el1, x0
+
+#if defined(PL011_TTY_EARLY_VADDR)
+	/* rpi4: install the early diagnostic vector (dumps ESR/ELR/FAR over the
+	 * early PL011 alias). Other aarch64 targets don't define the early UART VA
+	 * and keep the armstub VBAR mirrored above until the real vector install. */
+	adr x0, _early_vector_table
+	msr vbar_el1, x0
+#endif
+
+	adrp x0, PMAP_COMMON_KERNEL_TTL2
+	msr ttbr1_el1, x0
+
+	/* Activate TTBR1 walks (clear EPD1) — still pre-MMU. */
+	mrs x0, tcr_el1
+	bic x0, x0, #(1 << 23)
+	msr tcr_el1, x0
+	isb
+
 	/* Enable MMU+D-cache+I-cache (SCTLR.M|C|I) in a single write below;
 	 * A72; canonical barrier ritual with a defensive set/way invalidate
 	 * immediately prior. (TD-16 RESOLVED 2026-05-17.) */
@@ -581,6 +610,48 @@ el1_entry:
 	mov x9, x28
 	dsb ish
 	isb
+
+	/* The primary publishes its boot tables here and a secondary waits for
+	 * them (see .Lboot_tables_built), both after the set/way invalidate
+	 * above and just before the SCTLR write. A set/way invalidate reaches
+	 * the shared L2, where it discards the dirty lines of any CPU that
+	 * already runs with its caches on. Publishing after the primary's
+	 * invalidate keeps every secondary's caches off until it is done;
+	 * waiting after its own invalidate keeps a secondary from running one
+	 * once the primary may have its caches on. (Only a secondary that
+	 * reaches its invalidate after the primary has published still can;
+	 * secondaries are started first and skip the table build.) Nothing in
+	 * the wait allocates into this CPU's caches (MMU and caches are off, dc
+	 * ivac only invalidates), so they are still invalid at the SCTLR write.
+	 *
+	 * The flag is written and read with the MMU and caches off, so both go
+	 * to memory, but a load may still hit a stale line left from before the
+	 * kernel was entered: the flag's line is invalidated (to the point of
+	 * coherency) after the store and before every read. ivac, not civac: a
+	 * stale copy must not be written back over the new value. */
+	mrs x0, mpidr_el1
+	and x0, x0, #0xff
+	adrp x1, _bootTablesReady
+	add x1, x1, :lo12:_bootTablesReady
+	cbnz x0, .Lboot_tables_wait
+
+	mov w0, #1
+	str w0, [x1]
+	dsb sy
+	dc ivac, x1
+	dsb sy
+	sev
+	b .Lboot_tables_ready
+
+.Lboot_tables_wait:
+	dc ivac, x1
+	dsb sy
+	ldr w0, [x1]
+	cbnz w0, .Lboot_tables_ready
+	wfe
+	b .Lboot_tables_wait
+
+.Lboot_tables_ready:
 
 	/* Single-shot M|C|I — canonical zynqmp aarch64 pattern. Pairs with
 	 * plo running caches-on with a dc civac DDR teardown before handoff,
@@ -617,10 +688,6 @@ el1_entry:
 	adrp x0, PMAP_COMMON_STACK
 	mov x1, SIZE_INITIAL_KSTACK
 	add sp, x0, x1
-
-	/* Zero out an additional page that will be used a bit later */
-	adrp x0, PMAP_COMMON_SCRATCH_PAGE
-	bl _fill_page_zero
 
 	/* Initialize counter of started CPUs.
 	 * The counter starts out uninitialized. We want to initialize it only once by only one core -
@@ -1147,6 +1214,23 @@ _early_vector_table:
 
 _initNCpusFlag:
         .word 1
+
+/* Set to 1 by the primary CPU once the boot translation tables are built and
+ * in memory; secondary CPUs wait for it, with their caches off, before they
+ * enable the MMU (see .Lboot_tables_built and .Lboot_tables_ready).
+ *
+ * Like _initNCpusFlag it lives in this section, which is still writable at
+ * that point, so its 0 comes with the loaded image: not from whoever zeroes
+ * .bss, and not from a previous boot. It has a 64-byte line (the Cortex-A53/
+ * A72 cache writeback granule) to itself because the secondaries invalidate
+ * that line while they wait: anything else in it, written by a CPU with its
+ * caches on (_initNCpusFlag is), could be discarded. */
+.balign 64
+.type _bootTablesReady, %object
+_bootTablesReady:
+        .word 0
+.balign 64
+.size _bootTablesReady, . - _bootTablesReady
 
 .align 4
 .globl hal_cpuInvalDataCacheAll
