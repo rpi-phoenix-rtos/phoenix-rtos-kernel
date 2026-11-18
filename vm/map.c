@@ -1638,6 +1638,46 @@ int vm_mapCopy(process_t *proc, vm_map_t *dst, vm_map_t *src)
 }
 
 
+#ifndef NOMMU
+/* Is all of [start, end) inside entries of map? The entries need not be one
+ * mapping: a buffer may run across entries that mprotect() or a partial
+ * munmap() split from one mapping, or across mappings placed back to back,
+ * so walk forward from the entry holding the first byte as long as each next
+ * entry starts exactly where the previous one ends. Most buffers are inside a
+ * single entry, which takes one tree lookup. */
+static int _map_covers(vm_map_t *map, ptr_t start, ptr_t end)
+{
+	map_entry_t key, *e;
+	ptr_t covered;
+
+	/* parasoft-suppress-next-line MISRAC2012-RULE_11_6 "Structure 'key' is used only for tree searching" */
+	key.vaddr = (void *)start;
+	key.size = 1;
+
+	/* With a size of 1 the key overlaps only the entry that holds the first byte */
+	e = lib_treeof(map_entry_t, linkage, lib_rbFind(&map->tree, &key.linkage));
+	if (e == NULL) {
+		return 0;
+	}
+
+	covered = (ptr_t)e->vaddr + e->size;
+	while (covered < end) {
+		e = lib_treeof(map_entry_t, linkage, lib_rbNext(&e->linkage));
+		if ((e == NULL) || ((ptr_t)e->vaddr != covered)) {
+			return 0;
+		}
+		covered += e->size;
+	}
+
+	return 1;
+}
+#endif
+
+
+/* Is every byte of [ptr, ptr + size) mapped in the process? The kernel touches
+ * the buffer at EL1 after this check, at times with a lock held or with
+ * interrupts masked, so a buffer that starts inside a mapping and runs past its
+ * end must fail here rather than fault there. */
 static int map_belongs(const struct _process_t *proc, const void *ptr, size_t size)
 {
 	if (size == 0U) {
@@ -1652,28 +1692,22 @@ static int map_belongs(const struct _process_t *proc, const void *ptr, size_t si
 	 * and RO elf segments may not be assigned to any process.
 	 */
 #elif !defined(NOMMU)
-	map_entry_t e, *f;
+	ptr_t start = (ptr_t)ptr;
+	ptr_t end = start + size;
+	int covered;
 
-	/* parasoft-suppress-next-line MISRAC2012-RULE_11_8 "Structure 'e' is used only for tree searching, pointer will not be modified. We cannot change vaddr member of the map_entry_t to const." */
-	e.vaddr = (void *)ptr;
-	e.size = size;
-
-	(void)proc_lockSet(&proc->mapp->lock);
-	f = lib_treeof(map_entry_t, linkage, lib_rbFind(&proc->mapp->tree, &e.linkage));
-	if ((f == NULL) && (proc->imapp != NULL)) {
-		f = lib_treeof(map_entry_t, linkage, lib_rbFind(&proc->imapp->tree, &e.linkage));
-	}
-
-#if 0 /* NOMMU */
-	if (f->process != proc) {
-		(void)proc_lockClear(&proc->mapp->lock);
+	if (end < start) {
 		return -1;
 	}
-#endif
 
+	(void)proc_lockSet(&proc->mapp->lock);
+	covered = _map_covers(proc->mapp, start, end);
+	if ((covered == 0) && (proc->imapp != NULL)) {
+		covered = _map_covers(proc->imapp, start, end);
+	}
 	(void)proc_lockClear(&proc->mapp->lock);
 
-	if (f == NULL) {
+	if (covered == 0) {
 		return -1;
 	}
 

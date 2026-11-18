@@ -2702,30 +2702,6 @@ void threads_setupUserReturn(void *retval, cpu_context_t *ctx)
 }
 
 
-#ifdef HAL_SIGNAL_ALTSTACK
-/* Is every page of ss mapped in process? vm_mapBelongs() only tells whether a
- * range overlaps a mapping, so probe one byte per page. */
-static int threads_altstackMapped(const process_t *process, const stack_t *ss)
-{
-	const ptr_t start = (ptr_t)ss->ss_sp;
-	const ptr_t end = start + ss->ss_size;
-	ptr_t page;
-
-	if (end < start) {
-		return 0;
-	}
-
-	for (page = start & ~(ptr_t)(SIZE_PAGE - 1U); page < end; page += SIZE_PAGE) {
-		if (vm_mapBelongs(process, (const void *)((page < start) ? start : page), 1) < 0) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-#endif
-
-
 int threads_sigaltstack(const stack_t *ss, stack_t *oss)
 {
 #ifdef HAL_SIGNAL_ALTSTACK
@@ -2747,8 +2723,9 @@ int threads_sigaltstack(const stack_t *ss, stack_t *oss)
 			}
 
 			/* Signal frames are written there with the scheduler lock held,
-			 * where a fault cannot be survived: it must be our memory now. */
-			if (threads_altstackMapped(thread->process, ss) == 0) {
+			 * where a fault cannot be survived: all of it must be our memory
+			 * now (vm_mapBelongs() also makes it resident). */
+			if (vm_mapBelongs(thread->process, ss->ss_sp, ss->ss_size) < 0) {
 				return -EFAULT;
 			}
 		}
