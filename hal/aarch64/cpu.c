@@ -88,9 +88,6 @@ _Static_assert(sizeof(ucontext_t) + sizeof(siginfo_t) + (12U * sizeof(u64)) + 32
 		"SA_SIGINFO signal frame exceeds the bound checked by the scheduler");
 
 
-#define PSR_NZCV 0xf0000000UL
-
-
 /*
  * Signal frame, from the interrupted (or alternate) stack downwards:
  *

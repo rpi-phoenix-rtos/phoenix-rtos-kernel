@@ -275,8 +275,17 @@ _interrupts_dispatch:
 .type _hal_cpuRestoreCtx, %function
 _hal_cpuRestoreCtx:
 	/* Assumptions:
-	 * x1 => pointer to context to restore from */
+	 * x1 => pointer to context to restore from
+	 *
+	 * A context in user memory (x1 below the kernel half of the address space)
+	 * is a signal frame the scheduler has just pushed. Other threads of the
+	 * process can rewrite it from other CPUs until the loads below, so take
+	 * from it only what EL0 may set: the FPU enable bits of CPACR_EL1 and the
+	 * condition flags of SPSR_EL1, which leaves EL0 with DAIF clear. */
 	ldr X_CPACR_EL1, [x1, #0x08]
+	tbnz x1, #63, 2f
+	and X_CPACR_EL1, X_CPACR_EL1, #(3 << CPACR_FPU_TRAP_BIT0)
+2:
 	msr cpacr_el1, X_CPACR_EL1
 	isb
 #ifndef __SOFTFP__
@@ -306,6 +315,9 @@ _hal_cpuRestoreCtx:
 	add x1, x1, #0x220
 
 	ldp x0, x4, [x1]
+	tbnz x1, #63, 3f
+	and x0, x0, #PSR_NZCV
+3:
 	msr spsr_el1, x0
 	msr elr_el1, x4
 
