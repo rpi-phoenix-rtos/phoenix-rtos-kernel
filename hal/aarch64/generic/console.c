@@ -35,9 +35,7 @@ static struct {
 	hal_pl011_t uart;
 	spinlock_t lock;
 	int enabled;
-} console_common = {
-	.early = { .base = CONSOLE_EARLY_UART },
-};
+} console_common;
 
 
 /* CROSS-BOARD PORTABILITY NOTE (upstream review item "B5"): the early-console
@@ -55,6 +53,13 @@ static void _hal_consoleEarlyPutch(char c)
 	/* Bounded: if the UART behind the alias stops draining, output is dropped
 	 * instead of this CPU spinning on the status register forever, with the
 	 * console lock held and every other printing CPU spinning behind it */
+	/* Set on first use, not by an initializer: the kernel must keep no .data
+	 * (an initialized writable object starts a second load segment inside the
+	 * last page of the first, which the loader does not place where the kernel
+	 * expects; the boot then hangs here). .bss is zeroed by the loader. */
+	if (console_common.early.base == NULL) {
+		console_common.early.base = CONSOLE_EARLY_UART;
+	}
 	(void)hal_pl011Putch(&console_common.early, c);
 }
 
