@@ -337,11 +337,12 @@ static void process_illegal(unsigned int n, exc_context_t *ctx)
 	info.si_addr = (void *)hal_exceptionsPC(ctx);
 
 	/*
-	 * FIXME: In case signal is ignored or blocked, the process should be terminated
-	 * to avoid exception dump loop. In case it is handled, we should provide a mechanism
-	 * to force delivery of this signal before another pending ones.
+	 * A blocked or ignored SIGILL terminates the process (see threads_sigpostFault())
+	 * instead of looping on the instruction.
+	 * FIXME: In case it is handled, we should provide a mechanism to force delivery
+	 * of this signal before another pending ones.
 	 */
-	(void)threads_sigpostInfo(process, thread, SIGILL, &info);
+	(void)threads_sigpostFault(process, thread, SIGILL, &info);
 
 	if (thread->exit != 0U) {
 		proc_threadEnd();

@@ -1524,6 +1524,13 @@ void syscalls_sigreturn(u8 *ustack)
 	GETFROMSTACK(ustack, cpu_context_t *, ctx, 1U);
 	/* NOTE: `hal_cpuSigreturn` may take additional arguments from ustack */
 
+	/* ctx comes from user memory and is read and, on some architectures,
+	 * written by the kernel: it must be the process's own memory */
+	if (vm_mapBelongs(t->process, ctx, sizeof(*ctx)) < 0) {
+		proc_kill(t->process);
+		proc_threadEnd();
+	}
+
 	hal_cpuDisableInterrupts();
 	hal_cpuSigreturn(t->kstack + t->kstacksz, ustack, &ctx);
 
@@ -1531,7 +1538,10 @@ void syscalls_sigreturn(u8 *ustack)
 
 	/* TODO: check if return address belongs to user mapped memory */
 	if (hal_cpuSupervisorMode(ctx) != 0) {
+		/* Never resume the context: a killed thread still runs until it
+		 * leaves the kernel, and this one would leave it in supervisor mode */
 		proc_kill(t->process);
+		proc_threadEnd();
 	}
 
 	proc_longjmp(ctx);

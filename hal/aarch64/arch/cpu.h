@@ -49,6 +49,7 @@
 #define NO_IRQ        0x80U             /* mask to disable IRQ */
 #define NO_FIQ        0x40U             /* mask to disable FIQ */
 #define NO_INT        (NO_IRQ | NO_FIQ) /* mask to disable IRQ and FIQ */
+#define PSR_NZCV      0xf0000000U       /* condition flags */
 
 
 /* hal_cpuPushSignal() builds the frame at signalCtx, wherever that is, so

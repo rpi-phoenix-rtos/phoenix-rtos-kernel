@@ -2080,13 +2080,8 @@ static int _threads_sigwaiting(const thread_t *thread, u32 sigbit)
 }
 
 
-int threads_sigpost(process_t *process, thread_t *thread, int sig)
-{
-	return threads_sigpostInfo(process, thread, sig, NULL);
-}
-
-
-int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const siginfo_t *info)
+/* force: sig is a synchronous fault raised on thread, see threads_sigpostFault() */
+static int threads_sigpostEx(process_t *process, thread_t *thread, int sig, const siginfo_t *info, int force)
 {
 	u32 sigbit;
 	spinlock_ctx_t sc;
@@ -2112,13 +2107,26 @@ int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const sig
 		return EOK;
 	}
 
+	sigbit = (u32)1U << (unsigned int)sig;
+
+	/* The faulting instruction is re-executed on return, so a fault signal that
+	 * is blocked or ignored would fault again forever. Make it take its default
+	 * action, which ends the process. */
+	if ((force != 0) && (thread != NULL)) {
+		/* parasoft-suppress-next-line MISRAC2012-RULE_11_1-a "POSIX compliant definition" */
+		if (((thread->sigmask & sigbit) != 0U) || ((process->sigactions != NULL) && (process->sigactions[sig - 1].sa_handler == SIG_IGN))) {
+			thread->sigmask &= ~sigbit;
+			if (process->sigactions != NULL) {
+				process->sigactions[sig - 1].sa_handler = SIG_DFL;
+			}
+		}
+	}
+
 	/* parasoft-suppress-next-line MISRAC2012-RULE_11_1-a "POSIX compliant definition" */
 	if ((process->sigactions != NULL) && (process->sigactions[sig - 1].sa_handler == SIG_IGN)) {
 		hal_spinlockClear(&threads_common.spinlock, &sc);
 		return EOK;
 	}
-
-	sigbit = (u32)1U << (unsigned int)sig;
 
 	/* Keep the origin of the first pending instance, as the signal does not queue */
 	if (thread != NULL) {
@@ -2177,6 +2185,24 @@ int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const sig
 	hal_spinlockClear(&threads_common.spinlock, &sc);
 
 	return EOK;
+}
+
+
+int threads_sigpost(process_t *process, thread_t *thread, int sig)
+{
+	return threads_sigpostEx(process, thread, sig, NULL, 0);
+}
+
+
+int threads_sigpostInfo(process_t *process, thread_t *thread, int sig, const siginfo_t *info)
+{
+	return threads_sigpostEx(process, thread, sig, info, 0);
+}
+
+
+int threads_sigpostFault(process_t *process, thread_t *thread, int sig, const siginfo_t *info)
+{
+	return threads_sigpostEx(process, thread, sig, info, 1);
 }
 
 
