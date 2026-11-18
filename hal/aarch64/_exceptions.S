@@ -129,6 +129,12 @@ _exceptions_untrapFPU:
 	msr cpacr_el1, X_CPACR_EL1
 	isb
 
+	/* FPCR and FPSR still hold the values of the last thread on this CPU that
+	 * used the FPU (they are not restored while the FPU is trapped): start from
+	 * the defaults instead - round to nearest, no flush-to-zero, no flags. */
+	msr fpcr, xzr
+	msr fpsr, xzr
+
 	/* Initialize all registers with NAN - this prevents possible data leaks */
 	adr x26, .L_two_nans
 	ldp q0, q1, [x26]
@@ -401,6 +407,17 @@ hal_jmp:
 	/* TODO: There are some extensions that have their flags in SPSR and we clear them here. */
 	mov x1, #MODE_EL0
 	msr spsr_el1, x1
+
+	/* Enter EL0 with the FPU trapped, as a new thread starts. The FP/SIMD
+	 * registers and FPCR/FPSR may still be enabled and hold the state of the
+	 * program this thread ran before exec(), or of the parent a vfork() child
+	 * was copied from. The first FP instruction now traps and
+	 * _exceptions_untrapFPU gives the thread a fresh FPU state. A signal
+	 * handler starts the same way; the interrupted code's FPU state is in the
+	 * signal frame and sigreturn restores it. ERET synchronizes the write. */
+	mrs x1, cpacr_el1
+	bic x1, x1, #(3 << CPACR_FPU_TRAP_BIT0)
+	msr cpacr_el1, x1
 
 	/* Enter EL0 with no kernel value in a general-purpose register: they would
 	 * otherwise hold whatever the kernel left there, kernel pointers and the
