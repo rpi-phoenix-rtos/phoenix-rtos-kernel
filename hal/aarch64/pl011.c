@@ -32,6 +32,13 @@ enum {
 #define PL011_FR_BUSY (1U << 3)
 #define PL011_FR_TXFF (1U << 5)
 
+#define PL011_FIFO_SIZE 32U
+
+/* Status reads to wait for one character to leave a full TX FIFO. At 115200
+ * baud that takes ~87 us; this bound is milliseconds on any core, so only a
+ * UART that has stopped transmitting reaches it. */
+#define PL011_TX_SPINS 200000U
+
 
 int hal_pl011Init(hal_pl011_t *uart, addr_t base)
 {
@@ -56,17 +63,32 @@ int hal_pl011Init(hal_pl011_t *uart, addr_t base)
         return 0;
 }
 
-void hal_pl011Putch(hal_pl011_t *uart, char c)
+int hal_pl011Putch(hal_pl011_t *uart, char c)
 {
+	/* A stalled UART gets one look: do not spend the full wait per character */
+	u32 spins = (uart->stalled != 0U) ? 1U : PL011_TX_SPINS;
+
 	while ((*(uart->base + pl011_fr) & PL011_FR_TXFF) != 0U) {
+		spins--;
+		if (spins == 0U) {
+			uart->stalled = 1U;
+			hal_cpuAtomicInc(&uart->dropped);
+			return -1;
+		}
 	}
 
+	uart->stalled = 0U;
 	*(uart->base + pl011_dr) = (u32)(u8)c;
+
+	return 0;
 }
 
 
 void hal_pl011Flush(hal_pl011_t *uart)
 {
-	while ((*(uart->base + pl011_fr) & PL011_FR_BUSY) != 0U) {
+	u32 spins = PL011_FIFO_SIZE * PL011_TX_SPINS;
+
+	while (((*(uart->base + pl011_fr) & PL011_FR_BUSY) != 0U) && (spins != 0U)) {
+		spins--;
 	}
 }

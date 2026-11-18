@@ -30,6 +30,10 @@
 #include "perf/trace-events.h"
 #include "lib/lib.h"
 
+#if defined(KERNEL_HEARTBEAT) && defined(HAL_CONSOLE_HEARTBEAT)
+#include "heartbeat.h"
+#endif
+
 #include "include/errno.h"
 #include "proc/threads.h"
 
@@ -154,6 +158,14 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	if (n >= SIZE_INTERRUPTS) {
 		return 0;
 	}
+
+#if defined(KERNEL_HEARTBEAT) && defined(HAL_CONSOLE_HEARTBEAT)
+	/* Before any lock, so this CPU still counts the tick and prints a due line
+	 * when it then blocks on a lock that a hung CPU holds */
+	if (n == hal_timerIrq()) {
+		_hal_heartbeat(ctx);
+	}
+#endif
 
 	interrupted = proc_cpuTimeIntrEnter(ctx);
 

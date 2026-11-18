@@ -65,6 +65,9 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\" -DVERSION_TAGGED=\"$(VERSION_TAGGED)\" -DVE
 # KERNEL_BOOT_TRACE re-enables main.c's early bring-up markers ("hi: vm-done",
 # ...), the only visibility between the kernel banner and the first syspage
 # program. Off by default: main.c is shared, so they printed on every board.
+# KERNEL_HEARTBEAT (aarch64 generic) prints a line with every CPU's timer tick
+# count every KERNEL_HEARTBEAT_SEC (default 10) seconds from each CPU's timer
+# interrupt, past the console lock, to locate a hang; see hal/aarch64/heartbeat.h.
 CPPFLAGS += $(KERNEL_DIAG)
 
 # uncomment to enable stack canary checking
