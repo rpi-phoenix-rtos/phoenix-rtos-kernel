@@ -1021,6 +1021,33 @@ int vm_objectPage(vm_map_t *map, amap_t **amap, vm_object_t *o, void *vaddr, u64
 }
 
 
+/*
+ * Zeroes the pages of a contiguous allocation: vm_pageAlloc() returns them as their previous owner
+ * left them, and they go to a process. Through a cacheable kernel mapping, a chunk at a time so
+ * that a large allocation needs little kernel address space. Unmapping it writes the lines back,
+ * and mapping the pages uncached later cleans them again (pmap), so no stale line can land on a
+ * device's data.
+ */
+static int object_zeroContiguous(page_t *p, size_t size)
+{
+	const size_t chunk = 64U * SIZE_PAGE;
+	size_t done, len;
+	void *v;
+
+	for (done = 0; done < size; done += len) {
+		len = ((size - done) < chunk) ? (size - done) : chunk;
+		v = vm_mmap(object_common.kmap, NULL, NULL, len, PROT_READ | PROT_WRITE, VM_OBJ_PHYSMEM, (off_t)(p->addr + done), MAP_NONE);
+		if (v == NULL) {
+			return -ENOMEM;
+		}
+		hal_memset(v, 0, len);
+		(void)vm_munmap(object_common.kmap, v, len);
+	}
+
+	return EOK;
+}
+
+
 vm_object_t *vm_objectContiguous(size_t size)
 {
 	vm_object_t *o;
@@ -1034,6 +1061,11 @@ vm_object_t *vm_objectContiguous(size_t size)
 
 	size = 1UL << p->idx;
 	n = size / SIZE_PAGE;
+
+	if (object_zeroContiguous(p, size) < 0) {
+		vm_pageFree(p);
+		return NULL;
+	}
 
 	o = vm_kmalloc(sizeof(vm_object_t) + n * sizeof(page_t *));
 	if (o == NULL) {
