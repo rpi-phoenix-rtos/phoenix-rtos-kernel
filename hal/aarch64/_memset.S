@@ -19,20 +19,14 @@
 #define TMP       x5
 #define TMP2      x6
 
-/* TODO(TD-20): DC ZVA is disabled on Cortex-A72 (Raspberry Pi 4); normal
- * stores are used instead, which is correct and only slower. With ZVA, the
- * first large zeroing after the D-cache is enabled (_log_init's log_common
- * memset) hung on real Pi 4 with no exception output; it does not repro in
- * QEMU. The hang is NOT an EL2 trap: DCZID_EL0 reads DZP=0 on the Pi 4, so
- * DC ZVA is permitted and executes correctly with the MMU and caches on.
- * Still open: (a) what caused that hang -- log_common is ordinary cacheable
- * .bss, so the window right after D-cache enable is the suspect; and
- * (b) whether any hal_memset caller can pass uncached memory, which the ZVA
- * path is not meant for (see the header below). Lift this gate only once both
- * are answered. */
-#if defined(__TARGET_AARCH64A72) && !defined(MEMSET_WITHOUT_ZVA)
-#define MEMSET_WITHOUT_ZVA
-#endif
+/* DC ZVA zeroes a whole cache block per instruction (the zero-fill path below). It is not
+ * meant for Device memory, where it takes an alignment fault: no caller of hal_memset() passes
+ * Device memory, and the signal frame, which is written to a stack the process chose, is
+ * cleared with plain stores (hal/aarch64/cpu.c). On the Raspberry Pi 4 this path was compiled
+ * out after the first large zeroing following D-cache enable hung (2026-05); at that time the
+ * D-cache was enabled late from C, before the Cortex-A72 cache-enable fixes in the armstub (L2
+ * control timing, erratum 1319367) that the boot now has, and the configuration no longer
+ * exists. */
 
 /*
  * void *hal_memset(void *dst, int v, size_t l)

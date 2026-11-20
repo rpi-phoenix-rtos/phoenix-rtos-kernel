@@ -87,8 +87,23 @@ int hal_cpuCreateContext(cpu_context_t **nctx, startFn_t start, void *kstack, si
 /* An SA_SIGINFO frame adds a ucontext_t and a siginfo_t between the saved
  * context and the trampoline arguments. threads.c bounds the frame below
  * signalCtx by one more cpu_context_t, so the additions must fit in that. */
+_Static_assert(((sizeof(ucontext_t) % 8U) == 0U) && ((sizeof(((cpu_context_t *)0)->freg) % 8U) == 0U), "cpu_userZero() clears whole u64 fields");
 _Static_assert(sizeof(ucontext_t) + sizeof(siginfo_t) + (12U * sizeof(u64)) + 32U <= sizeof(cpu_context_t),
 		"SA_SIGINFO signal frame exceeds the bound checked by the scheduler");
+
+
+/* Zeroes part of a signal frame. The frame is on a stack the process chose, which may be a Device
+ * mapping, where hal_memset()'s DC ZVA path takes an alignment fault: plain aligned stores work on
+ * any memory type. len is a multiple of 8 and dst 8-byte aligned (whole u64 fields). */
+static void cpu_userZero(void *dst, size_t len)
+{
+	volatile u64 *p = dst;
+	size_t i;
+
+	for (i = 0; i < (len / sizeof(u64)); i++) {
+		p[i] = 0;
+	}
+}
 
 
 /*
@@ -133,7 +148,7 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		hal_memcpy(si, info, sizeof(*si));
 
 		/* Field by field: the padding of ss may be old kernel memory */
-		hal_memset(uc, 0, sizeof(*uc));
+		cpu_userZero(uc, sizeof(*uc));
 		uc->uc_stack.ss_sp = ss->ss_sp;
 		uc->uc_stack.ss_flags = ss->ss_flags;
 		uc->uc_stack.ss_size = ss->ss_size;
@@ -173,7 +188,7 @@ int hal_cpuPushSignal(void *kstack, void (*trampoline)(void), void (*handler)(in
 		 * and does not load this area, so zero it. */
 		signalCtx->fpcr = 0;
 		signalCtx->fpsr = 0;
-		hal_memset(signalCtx->freg, 0, sizeof(signalCtx->freg));
+		cpu_userZero(signalCtx->freg, sizeof(signalCtx->freg));
 	}
 #endif
 	signalCtx->psr = ctx->psr;
