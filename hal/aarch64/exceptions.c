@@ -453,6 +453,28 @@ static void exceptions_watchpointHandler(unsigned int n, exc_context_t *ctx)
 }
 
 
+/*
+ * Whether an exception is one the page-fault handler can resolve. For an abort, only a
+ * translation, access flag or permission fault is (ESR_ELx ISS {I,D}FSC 0b0001LL, 0b0010LL,
+ * 0b0011LL). The other fault status codes -- an alignment fault (an unaligned access or DC ZVA to
+ * Device memory), a synchronous external abort, a TLB conflict -- are not about a missing or
+ * protected page: the page-fault handler finds the page present and writable, resolves nothing
+ * and returns to the same instruction, which faults again for ever. They go to the default
+ * handler, which reports them.
+ */
+static int exceptions_isPageFault(unsigned int n, const exc_context_t *ctx)
+{
+	unsigned int fsc;
+
+	if ((n != EXC_INSTR_ABORT_EL0) && (n != EXC_INSTR_ABORT_EL1) && (n != EXC_DATA_ABORT_EL0) && (n != EXC_DATA_ABORT_EL1)) {
+		return 1;
+	}
+
+	fsc = (unsigned int)(ctx->esr & 0x3fU);
+	return ((fsc >= 0x04U) && (fsc <= 0x0fU)) ? 1 : 0;
+}
+
+
 /* parasoft-suppress-next-line MISRAC2012-RULE_8_4 "Usage in assembly" */
 void exceptions_dispatch(unsigned int n, exc_context_t *ctx)
 {
@@ -464,7 +486,12 @@ void exceptions_dispatch(unsigned int n, exc_context_t *ctx)
 
 	interrupted = proc_cpuTimeIntrEnter(&ctx->cpuCtx);
 
-	exceptions.handler[n](n, ctx);
+	if (exceptions_isPageFault(n, ctx) != 0) {
+		exceptions.handler[n](n, ctx);
+	}
+	else {
+		exceptions.defaultHandler(n, ctx);
+	}
 	/* Handle signals if necessary */
 	if (hal_cpuSupervisorMode(&ctx->cpuCtx) == 0) {
 		threads_setupUserReturn((void *)ctx->cpuCtx.x[0], &ctx->cpuCtx);
