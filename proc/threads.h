@@ -93,6 +93,8 @@ typedef struct _thread_t {
 	 * must not be freed while the borrower is still running on it. */
 	unsigned int lentKstack : 1;
 	unsigned int inKernel : 1;
+	/* An idle thread (one per CPU, run by any): not work for an idle CPU */
+	unsigned int idle : 1;
 
 	unsigned int sigmask;
 	unsigned int sigpend;

@@ -40,6 +40,31 @@ enum { event_scheduling, event_enqueued, event_waking, event_preempted };
 #define UNLOCK_TRY        0
 #define UNLOCK_FORCE      1
 
+/*
+ * Tickless idle (KERNEL_TICKLESS_IDLE, a HAL platform option).
+ *
+ * Every CPU runs a 1 ms tick, which a CPU that runs threads needs for
+ * round-robin. An idle secondary CPU does not: with the tick it would take
+ * ~1000 interrupts/s only to find the global ready queue empty again. So a
+ * secondary that has nothing to run marks itself in idleCpus, replaces its
+ * tick with THREADS_IDLE_BACKSTOP_US and waits for an interrupt. Whoever makes
+ * a thread ready takes one CPU out of idleCpus and sends it RESCHED_IRQ; the
+ * scheduler restores the 1 ms tick on that CPU before it runs anything.
+ *
+ * The backstop is a safety net, not a timeout anything relies on: it bounds
+ * the cost of a lost IPI (and keeps the KERNEL_HEARTBEAT tick count of an idle
+ * CPU moving). CPU 0 is left alone: it serves every sleeper deadline from its
+ * timer (threads_timeintr) and so keeps its tick, idle or not.
+ */
+#if defined(KERNEL_TICKLESS_IDLE) && (KERNEL_TICKLESS_IDLE != 0)
+#ifndef RESCHED_IRQ
+#error "KERNEL_TICKLESS_IDLE needs a reschedule IPI (RESCHED_IRQ) from the HAL"
+#endif
+#define THREADS_TICKLESS_IDLE
+#define THREADS_IDLE_BACKSTOP_US (100U * 1000U)
+_Static_assert(NUM_CPUS <= 32U, "the idle CPU masks are 32-bit");
+#endif
+
 #define THREAD_WAIT_INTERRUPTIBLE (1U << 0)
 #define THREAD_WAIT_EXCLUSIVE     (1U << 1) /* reject a second waiter (unlocked exclusive conditional) */
 #define THREAD_WAIT_KILLABLE      (1U << 2) /* an exit request ends the wait, signals do not */
@@ -90,6 +115,13 @@ static struct {
 	intr_handler_t pendsvHandler;
 #endif
 
+#ifdef THREADS_TICKLESS_IDLE
+	intr_handler_t reschedHandler;
+	/* Synchronized by spinlock */
+	u32 idleCpus;      /* secondaries asleep with nothing to run: a RESCHED_IRQ target */
+	u32 stretchedCpus; /* secondaries whose timer runs the backstop instead of the tick */
+#endif
+
 	/* Synchronized by spinlock */
 	thread_t *ghosts;
 	thread_t *reaper;
@@ -103,6 +135,7 @@ _Static_assert(NPRIOS <= sizeof(threads_common.readyBitmask) * 8U, "NPRIOS must 
 
 static thread_t *_proc_current(void);
 static void _proc_threadDequeue(thread_t *t);
+static void threads_idlethr(void *arg);
 static int _proc_threadWait(thread_t **queue, time_t timeout, spinlock_ctx_t *scp);
 static void _threads_cpuTimeMode(thread_t *t, int kernel);
 static void _threads_cpuTimeToProcess(const thread_t *t);
@@ -298,6 +331,91 @@ static unsigned int _readyMinPrioIdx(void)
 }
 
 
+#ifdef THREADS_TICKLESS_IDLE
+
+/* Note: always called with threads_common.spinlock set */
+static int _threads_readyWork(void)
+{
+	const unsigned int idleIdx = (unsigned int)(MAX_PRIO + PRIO_OFFSET);
+	unsigned int idx = _readyMinPrioIdx();
+	thread_t *t;
+
+	if (idx < idleIdx) {
+		return 1;
+	}
+
+	if (idx == idleIdx) {
+		/* The idle threads of the busy CPUs always wait here: only a thread
+		 * of the lowest priority that is not one of them is work */
+		t = threads_common.ready[idleIdx];
+		do {
+			if (t->idle == 0U) {
+				return 1;
+			}
+			t = t->next;
+		} while (t != threads_common.ready[idleIdx]);
+	}
+
+	return 0;
+}
+
+
+/* Note: always called with threads_common.spinlock set, after a thread became ready */
+static void _threads_kickIdleCpu(void)
+{
+	unsigned int cpu = hal_cpuGetID();
+	u32 idle = threads_common.idleCpus;
+
+	if (idle == 0U) {
+		return;
+	}
+
+	/* This CPU is in idleCpus when an interrupt woke its idle thread: it is
+	 * awake already, but the interrupt may have come between the idle thread's
+	 * check for work and its wfi, so it is kicked too (a self-IPI simply stays
+	 * pending until this interrupt returns). Otherwise any idle CPU will do. */
+	if ((idle & (1U << cpu)) == 0U) {
+		cpu = hal_cpuGetFirstBit(idle);
+	}
+
+	/* One IPI per thread made ready: taken out of the mask until its idle
+	 * thread puts it back, so wakeups in a burst spread over the idle CPUs */
+	threads_common.idleCpus &= ~(1U << cpu);
+	hal_cpuSendIPI(cpu, RESCHED_IRQ);
+}
+
+
+/* Note: always called with threads_common.spinlock set, from the scheduler of this CPU */
+static void _threads_tickRestore(unsigned int cpu)
+{
+	u32 bit = 1U << cpu;
+
+	/* Whatever woke this CPU (the IPI, the backstop, a device interrupt
+	 * that made a thread ready), the 1 ms tick is back before the scheduler
+	 * picks a thread that needs it for round-robin. When the idle thread is
+	 * picked again it stretches the timer once more. */
+	if ((threads_common.stretchedCpus & bit) != 0U) {
+		threads_common.stretchedCpus &= ~bit;
+		threads_common.idleCpus &= ~bit;
+		hal_timerSetWakeup(SYSTICK_INTERVAL);
+	}
+}
+
+
+static int threads_reschedintr(unsigned int n, cpu_context_t *context, void *arg)
+{
+	(void)n;
+	(void)context;
+	(void)arg;
+
+	/* Nothing else to do: returning 1 makes interrupts_dispatch() run the
+	 * scheduler on this CPU, which is all the IPI is for */
+	return 1;
+}
+
+#endif /* THREADS_TICKLESS_IDLE */
+
+
 static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 {
 	thread_t *t;
@@ -318,7 +436,9 @@ static int threads_timeintr(unsigned int n, cpu_context_t *context, void *arg)
 		 * programs the firing secondary's own timer. Only cpu0
 		 * walks the sleeping tree and updates the global wakeup
 		 * deadline; secondaries just take a tick and let cpu0 do
-		 * the housekeeping. */
+		 * the housekeeping. With KERNEL_TICKLESS_IDLE this may be the
+		 * idle backstop expiring: the scheduler run below finds the
+		 * CPU stretched and the idle thread stretches it again. */
 		hal_timerSetWakeup(SYSTICK_INTERVAL);
 		/* Invoke scheduler */
 		return 1;
@@ -798,6 +918,10 @@ int _threads_schedule(unsigned int n, cpu_context_t *context, void *arg)
 
 	trace_eventSchedEnter(cpuId);
 
+#ifdef THREADS_TICKLESS_IDLE
+	_threads_tickRestore(cpuId);
+#endif
+
 	current = _proc_current();
 	threads_common.current[cpuId] = NULL;
 
@@ -1117,6 +1241,7 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 #else
 	t->inKernel = (process == NULL) ? 1U : 0U;
 #endif
+	t->idle = (start == threads_idlethr) ? 1U : 0U;
 	proc_gettime(&t->readyTime, NULL);
 	t->maxWait = 0;
 	t->startTime = t->readyTime;
@@ -1176,6 +1301,9 @@ int proc_threadCreate(process_t *process, startFn_t start, int *id, priority_t p
 	/* Insert thread to scheduler queue */
 	_threads_waking(t);
 	_readyAdd(t);
+#ifdef THREADS_TICKLESS_IDLE
+	_threads_kickIdleCpu();
+#endif
 
 	hal_spinlockClear(&threads_common.spinlock, &sc);
 
@@ -1257,6 +1385,11 @@ static void _proc_threadSetPriority(thread_t *thread, priority_t priority)
 		_readyRemove(thread);
 		thread->priority = priority;
 		_readyAdd(thread);
+#ifdef THREADS_TICKLESS_IDLE
+		/* A preempted idle thread that holds a lock (log_scrubTry) becomes
+		 * work when a waiter lends it its priority: an idle CPU must run it */
+		_threads_kickIdleCpu();
+#endif
 	}
 	else {
 		thread->priority = priority;
@@ -1492,6 +1625,9 @@ static void _proc_threadDequeue(thread_t *t)
 
 	if (i == hal_cpuGetCount()) {
 		_readyAdd(t);
+#ifdef THREADS_TICKLESS_IDLE
+		_threads_kickIdleCpu();
+#endif
 	}
 }
 
@@ -3610,6 +3746,65 @@ int _proc_lockSetTraceEpoch(lock_t *lock, int epoch)
  */
 
 
+#ifdef THREADS_TICKLESS_IDLE
+
+/* Returns 0 on CPU 0, which keeps its tick and idles the usual way */
+static int threads_idleTickless(void)
+{
+	spinlock_ctx_t sc;
+	unsigned int cpu;
+	u32 bit;
+
+	/* Unlocked fast path, so that CPU 0 idles exactly as before. Racy if this
+	 * thread migrates right after it, which the check under the lock covers. */
+	if (hal_cpuGetID() == 0U) {
+		return 0;
+	}
+
+	/* The lock masks interrupts, so this thread stays on this CPU until the
+	 * mask bit is set and the timer stretched: no CPU marks itself idle for
+	 * a thread that has migrated elsewhere */
+	hal_spinlockSet(&threads_common.spinlock, &sc);
+	cpu = hal_cpuGetID();
+	if (cpu == 0U) {
+		hal_spinlockClear(&threads_common.spinlock, &sc);
+		return 0;
+	}
+
+	/* Checked under the same lock that makes a thread ready and reads
+	 * idleCpus: either this CPU sees the new thread here, or the thread's
+	 * waker sees this CPU in idleCpus and sends it RESCHED_IRQ */
+	if (_threads_readyWork() != 0) {
+		/* Run it now rather than at the next tick (it may also be a lowest-
+		 * priority thread queued behind idle threads: rotate them) */
+		(void)hal_cpuReschedule(&threads_common.spinlock, &sc);
+		return 1;
+	}
+
+	bit = 1U << cpu;
+	threads_common.idleCpus |= bit;
+
+	/* Only when the tick is still on: an interrupt that woke this CPU without
+	 * a reschedule must not push the backstop further out each time */
+	if ((threads_common.stretchedCpus & bit) == 0U) {
+		threads_common.stretchedCpus |= bit;
+		/* CNTV is level-triggered: re-arming replaces the pending tick with
+		 * the backstop, it does not leave the line asserted */
+		hal_timerSetWakeup(THREADS_IDLE_BACKSTOP_US);
+	}
+	hal_spinlockClear(&threads_common.spinlock, &sc);
+
+	/* An IPI that arrives before the wfi is taken here, with interrupts on,
+	 * and its reschedule restores the tick; if this thread is then preempted
+	 * and resumes later, this wfi lasts at most one tick of its new CPU. */
+	hal_cpuHalt();
+
+	return 1;
+}
+
+#endif /* THREADS_TICKLESS_IDLE */
+
+
 static void threads_idlethr(void *arg)
 {
 	time_t wakeup;
@@ -3618,6 +3813,12 @@ static void threads_idlethr(void *arg)
 	for (;;) {
 		/* Scrub any potential kernel logs (wake up readers) */
 		log_scrubTry();
+
+#ifdef THREADS_TICKLESS_IDLE
+		if (threads_idleTickless() != 0) {
+			continue;
+		}
+#endif
 
 		if (hal_cpuLowPowerAvail() != 0) {
 			hal_spinlockSet(&threads_common.spinlock, &sc);
@@ -4035,6 +4236,10 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 #ifdef TIMER_WAKEUP_IRQ
 	threads_common.timerWakeupPending = 0U;
 #endif
+#ifdef THREADS_TICKLESS_IDLE
+	threads_common.idleCpus = 0U;
+	threads_common.stretchedCpus = 0U;
+#endif
 
 	/* Allocate and initialize current threads array */
 	/* parasoft-suppress-next-line MISRAC2012-DIR_4_7 "return value of hal_cpuGetCount() is always the same, false positive" */
@@ -4077,6 +4282,12 @@ int _threads_init(vm_map_t *kmap, vm_object_t *kernel)
 	threads_common.wakeupHandler.f = threads_wakeupintr;
 	threads_common.wakeupHandler.n = TIMER_WAKEUP_IRQ;
 	(void)hal_interruptsSetHandler(&threads_common.wakeupHandler);
+#endif
+#ifdef THREADS_TICKLESS_IDLE
+	hal_memset(&threads_common.reschedHandler, 0, sizeof(threads_common.reschedHandler));
+	threads_common.reschedHandler.f = threads_reschedintr;
+	threads_common.reschedHandler.n = RESCHED_IRQ;
+	(void)hal_interruptsSetHandler(&threads_common.reschedHandler);
 #endif
 
 	return EOK;

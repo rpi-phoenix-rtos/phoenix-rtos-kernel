@@ -68,6 +68,8 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\" -DVERSION_TAGGED=\"$(VERSION_TAGGED)\" -DVE
 # KERNEL_HEARTBEAT (aarch64 generic) prints a line with every CPU's timer tick
 # count every KERNEL_HEARTBEAT_SEC (default 10) seconds from each CPU's timer
 # interrupt, past the console lock, to locate a hang; see hal/aarch64/heartbeat.h.
+# KERNEL_TICKLESS_IDLE=0 (aarch64 generic, on by default) puts the idle secondary
+# CPUs back on the flat 1 ms tick, for an A/B; see "Tickless idle" in proc/threads.c.
 CPPFLAGS += $(KERNEL_DIAG)
 
 # uncomment to enable stack canary checking
