@@ -155,6 +155,7 @@ static struct {
 	volatile u32 ticks;
 	volatile u64 pc;     /* where the last timer interrupt found the CPU */
 	volatile u32 el;
+	volatile u32 ipis;   /* reschedule IPIs taken */
 	time_t next;         /* when this CPU prints next */
 	u32 seen[NUM_CPUS];  /* tick counts at this CPU's previous line */
 } __attribute__((aligned(64))) heartbeat_cpu[NUM_CPUS];
@@ -162,7 +163,7 @@ static struct {
 
 static void _hal_heartbeatPrint(unsigned int id, time_t now)
 {
-	char line[64 + NUM_CPUS * 40];
+	char line[64 + NUM_CPUS * 52];
 	char *p = line;
 	unsigned int i, stopped = 0U;
 	u32 ticks;
@@ -182,6 +183,10 @@ static void _hal_heartbeatPrint(unsigned int id, time_t now)
 		if ((i == id) || ((stopped & (1U << i)) != 0U)) {
 			p += lib_sprintf(p, " %u@%llx/el%u", i, (u64)heartbeat_cpu[i].pc, heartbeat_cpu[i].el);
 		}
+	}
+	p += lib_sprintf(p, " ipi");
+	for (i = 0U; i < NUM_CPUS; i++) {
+		p += lib_sprintf(p, " %u", heartbeat_cpu[i].ipis);
 	}
 	(void)lib_sprintf(p, " drop %u\n", console_common.early.dropped + console_common.uart.dropped);
 
@@ -217,6 +222,16 @@ void _hal_heartbeat(const cpu_context_t *ctx)
 	/* The CPUs take turns, spread over the period, so their lines do not collide */
 	slot = (HEARTBEAT_PERIOD_US / (time_t)NUM_CPUS) * (time_t)id;
 	heartbeat_cpu[id].next = ((now - slot) / HEARTBEAT_PERIOD_US + 1) * HEARTBEAT_PERIOD_US + slot;
+}
+
+
+void _hal_heartbeatIpi(void)
+{
+	unsigned int id = hal_cpuGetID();
+
+	if (id < NUM_CPUS) {
+		heartbeat_cpu[id].ipis++;
+	}
 }
 
 #endif /* KERNEL_HEARTBEAT */

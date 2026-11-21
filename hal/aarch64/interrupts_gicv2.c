@@ -165,6 +165,11 @@ int interrupts_dispatch(unsigned int n, cpu_context_t *ctx)
 	if (n == hal_timerIrq()) {
 		_hal_heartbeat(ctx);
 	}
+#ifdef RESCHED_IRQ
+	else if (n == RESCHED_IRQ) {
+		_hal_heartbeatIpi();
+	}
+#endif
 #endif
 
 	interrupted = proc_cpuTimeIntrEnter(ctx);

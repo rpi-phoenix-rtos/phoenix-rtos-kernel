@@ -31,7 +31,7 @@
  * each CPU, in its own slot of the period, writes one line straight to the
  * UART, past the console lock and with a bounded wait:
  *
- *   hb cpu<n> t=<s> ticks <c0> <c1> ... <n>@<pc>/el<e> ... drop <d>
+ *   hb cpu<n> t=<s> ticks <c0> <c1> ... <n>@<pc>/el<e> ... ipi <i0> <i1> ... drop <d>
  *
  * <cN> counts the timer interrupts of CPU N; a '!' marks a count that has not
  * changed since this CPU's previous line, and that CPU's last interrupted pc
@@ -44,6 +44,15 @@
  * for a hang hunt use a short period, e.g. -DKERNEL_HEARTBEAT_SEC=2.
  */
 void _hal_heartbeat(const cpu_context_t *ctx);
+
+
+/*
+ * Counts a reschedule IPI (RESCHED_IRQ) taken by this CPU, printed as
+ * "ipi <i0> <i1> ..." (totals since boot): with KERNEL_TICKLESS_IDLE an idle
+ * secondary takes few timer interrupts, and these show it is still woken for
+ * work.
+ */
+void _hal_heartbeatIpi(void);
 
 
 #endif
