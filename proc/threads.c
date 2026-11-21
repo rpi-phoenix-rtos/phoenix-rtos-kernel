@@ -365,8 +365,17 @@ static void _threads_kickIdleCpu(void)
 {
 	unsigned int cpu = hal_cpuGetID();
 	u32 idle = threads_common.idleCpus;
+	const thread_t *cur = threads_common.current[cpu];
 
 	if (idle == 0U) {
+		return;
+	}
+
+	/* The waker is an interrupt on a CPU that runs its idle thread with its tick on
+	 * (typically CPU 0's timer waking a sleeper): this CPU reschedules within a tick
+	 * and runs the thread itself. Kicking another idle CPU would wake two CPUs for one
+	 * thread and move it across -- on an idle board most wakeups are of this kind. */
+	if ((cur != NULL) && (cur->idle != 0U) && ((idle & (1U << cpu)) == 0U)) {
 		return;
 	}
 
