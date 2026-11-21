@@ -149,15 +149,15 @@ void hal_consolePutch(char c)
 
 /* Each CPU writes only its own entry, from its own timer interrupt. Every
  * CPU prints, at its own time slot, the tick counts of all CPUs: a CPU that
- * stopped taking interrupts shows as a count that no longer grows, in the
- * lines of the CPUs that still run. */
+ * stopped taking interrupts (neither ticks nor reschedule IPIs) is marked "!"
+ * in the lines of the CPUs that still run. */
 static struct {
 	volatile u32 ticks;
 	volatile u64 pc;     /* where the last timer interrupt found the CPU */
 	volatile u32 el;
 	volatile u32 ipis;   /* reschedule IPIs taken */
 	time_t next;         /* when this CPU prints next */
-	u32 seen[NUM_CPUS];  /* tick counts at this CPU's previous line */
+	u32 seen[NUM_CPUS];  /* ticks + IPIs of each CPU at this CPU's previous line */
 } __attribute__((aligned(64))) heartbeat_cpu[NUM_CPUS];
 
 
@@ -171,10 +171,12 @@ static void _hal_heartbeatPrint(unsigned int id, time_t now)
 	p += lib_sprintf(p, "hb cpu%u t=%u ticks", id, (u32)(now / 1000000));
 	for (i = 0U; i < NUM_CPUS; i++) {
 		ticks = heartbeat_cpu[i].ticks;
-		if (ticks == heartbeat_cpu[id].seen[i]) {
+		/* Alive is any interrupt taken: an idle CPU in tickless idle may take only
+		 * reschedule IPIs for a long time, its tick count standing still */
+		if ((ticks + heartbeat_cpu[i].ipis) == heartbeat_cpu[id].seen[i]) {
 			stopped |= 1U << i;
 		}
-		heartbeat_cpu[id].seen[i] = ticks;
+		heartbeat_cpu[id].seen[i] = ticks + heartbeat_cpu[i].ipis;
 		p += lib_sprintf(p, " %u%s", ticks, ((stopped & (1U << i)) != 0U) ? "!" : "");
 	}
 
