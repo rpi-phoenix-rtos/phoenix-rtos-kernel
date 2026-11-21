@@ -491,6 +491,14 @@ void _hal_interruptsInitPerCPU(void)
 				hal_cpuAtomicInc(&hal_smpInterruptsEnabledPpiCount[myCpuId]);
 			}
 		}
+
+#ifdef RESCHED_IRQ
+		/* SGI priority and enable bits are banked per CPU as well: CPU 0 sets
+		 * its own when the scheduler registers the handler, each secondary
+		 * has to set them for itself to receive the reschedule IPI. */
+		interrupts_setPriority(RESCHED_IRQ, DEFAULT_PRIORITY);
+		interrupts_enableIRQ(RESCHED_IRQ);
+#endif
 	}
 }
 

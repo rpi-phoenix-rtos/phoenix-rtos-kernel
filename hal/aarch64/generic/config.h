@@ -52,6 +52,15 @@
 /* The console implements the KERNEL_HEARTBEAT debug output (hal/aarch64/heartbeat.h) */
 #define HAL_CONSOLE_HEARTBEAT
 
+/* Idle secondary CPUs replace their 1 ms tick with a long backstop and sleep
+ * until a reschedule IPI (RESCHED_IRQ) or the backstop wakes them; see
+ * "Tickless idle" in proc/threads.c. It relies on each CPU having its own
+ * wakeup timer (the banked CNTV), hence a platform option. Build with
+ * -DKERNEL_TICKLESS_IDLE=0 (e.g. through KERNEL_DIAG) to keep the flat tick. */
+#ifndef KERNEL_TICKLESS_IDLE
+#define KERNEL_TICKLESS_IDLE 1
+#endif
+
 #ifndef __ASSEMBLY__
 
 #if defined(__TARGET_AARCH64A72)
